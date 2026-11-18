@@ -1,0 +1,99 @@
+{
+  "at": "2026-11-18T21:43:06.457Z",
+  "scope": "BTC / 主网公开零地址",
+  "requests": [
+    {
+      "type": "l2Book",
+      "http": 200,
+      "shape": [
+        "coin",
+        "time",
+        "levels"
+      ]
+    },
+    {
+      "type": "metaAndAssetCtxs",
+      "http": 200,
+      "shape": "array:2"
+    },
+    {
+      "type": "userAbstraction",
+      "http": 200,
+      "shape": "default"
+    },
+    {
+      "type": "clearinghouseState",
+      "http": 200,
+      "shape": [
+        "marginSummary",
+        "crossMarginSummary",
+        "crossMaintenanceMarginUsed",
+        "withdrawable",
+        "assetPositions",
+        "time"
+      ]
+    },
+    {
+      "type": "userFunding",
+      "http": 200,
+      "shape": "array:0"
+    },
+    {
+      "type": "activeAssetData",
+      "http": 200,
+      "shape": [
+        "user",
+        "coin",
+        "leverage",
+        "maxTradeSzs",
+        "availableToTrade",
+        "markPx"
+      ]
+    },
+    {
+      "type": "userFees",
+      "http": 200,
+      "shape": [
+        "dailyUserVlm",
+        "feeSchedule",
+        "userCrossRate",
+        "userAddRate",
+        "userSpotCrossRate",
+        "userSpotAddRate",
+        "activeReferralDiscount"
+      ]
+    },
+    {
+      "type": "spotClearinghouseState",
+      "http": 200,
+      "shape": [
+        "balances"
+      ]
+    },
+    {
+      "type": "userFills",
+      "http": 200,
+      "shape": "array:2000"
+    }
+  ],
+  "rest": {
+    "mark": "62319.5",
+    "dex": "",
+    "mode": "default",
+    "capacityRead": true,
+    "unresolved": [
+      "PF_RULES",
+      "FX",
+      "CANDIDATE_MARGIN",
+      "UNSUPPORTED_MARGIN_MODE"
+    ]
+  },
+  "ws": {
+    "channel": "l2Book",
+    "asOf": "2026-11-18T21:43:07.193Z",
+    "depth": [
+      5,
+      5
+    ]
+  }
+}

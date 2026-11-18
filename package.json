@@ -12,9 +12,16 @@
     "test:vest": "node scripts/qa/vest-auto.js && node scripts/qa/vest-public.js && node scripts/qa/vest-fx.js",
     "build:trade": "node scripts/build-trade-extension.js",
     "trade": "node scripts/open-trade.js",
-    "test:trade": "node scripts/qa/trade-ui.js && node scripts/qa/trade-hype.js"
+    "test:trade": "node scripts/qa/trade-ui.js && node scripts/qa/trade-hype.js",
+    "hedge": "node scripts/serve.js --hedge",
+    "test:hedge": "node --test tests/hedge-*.test.js",
+    "test:hedge:browser": "node scripts/qa/hedge-browser.js",
+    "test:hedge:live": "node scripts/qa/hedge-live.js"
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "decimal.js": "10.6.0"
   }
 }

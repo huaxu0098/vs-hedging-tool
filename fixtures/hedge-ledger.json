@@ -1,0 +1,855 @@
+{
+  "version": 1,
+  "revision": 0,
+  "profile": {
+    "id": "用户模型 · 固定回撤",
+    "profileVersion": 1,
+    "source": "user_provided",
+    "verification": "assumed",
+    "verifiedAt": null,
+    "B": "500",
+    "purchaseFee": "91",
+    "baseline": "10000",
+    "challengeTarget": "12000",
+    "challengeFloor": "9400",
+    "fundedFloor": "8000",
+    "share": "0.8",
+    "hours": "48",
+    "passTrigger": "net_settlement",
+    "failureTrigger": "net_settlement",
+    "additionalRules": []
+  },
+  "markets": {
+    "unit": {
+      "id": "unit",
+      "name": "标准单位",
+      "unit": "单位",
+      "source": "simulation_assumption",
+      "pf": {
+        "symbol": "PF-SIM-unit",
+        "unit": "单位",
+        "mark": "1000",
+        "step": "0.01",
+        "minQty": "0.01",
+        "minNotional": "0",
+        "fx": "1",
+        "factor": "1",
+        "currency": "U",
+        "quoteCurrency": "U",
+        "settlementCurrency": "U",
+        "underlying": "unit",
+        "priceTick": "0.01",
+        "multiplier": "1",
+        "type": "linear",
+        "mappingVerified": true,
+        "rate": "0.0001",
+        "pool": "standard",
+        "marginMode": "cross",
+        "leverage": "20",
+        "tiers": [
+          {
+            "from": "0",
+            "mmr": "0.025",
+            "deduction": "0"
+          }
+        ],
+        "hold": "0",
+        "open": true,
+        "asks": [
+          [
+            "1000",
+            "1000000"
+          ]
+        ],
+        "bids": [
+          [
+            "1000",
+            "1000000"
+          ]
+        ],
+        "source": "simulation_assumption"
+      },
+      "hl": {
+        "symbol": "HL-SIM-unit",
+        "unit": "单位",
+        "mark": "1000",
+        "step": "0.001",
+        "minQty": "0.001",
+        "minNotional": "0",
+        "fx": "1",
+        "factor": "1",
+        "currency": "U",
+        "quoteCurrency": "U",
+        "settlementCurrency": "U",
+        "underlying": "unit",
+        "priceTick": "0.01",
+        "multiplier": "1",
+        "type": "linear",
+        "mappingVerified": true,
+        "rate": "0.0005",
+        "pool": "standard",
+        "marginMode": "cross",
+        "leverage": "20",
+        "tiers": [
+          {
+            "from": "0",
+            "mmr": "0.025",
+            "deduction": "0"
+          }
+        ],
+        "hold": "0",
+        "open": true,
+        "asks": [
+          [
+            "1000",
+            "1000000"
+          ]
+        ],
+        "bids": [
+          [
+            "1000",
+            "1000000"
+          ]
+        ],
+        "source": "simulation_assumption"
+      }
+    },
+    "btc": {
+      "id": "btc",
+      "name": "BTC",
+      "unit": "BTC",
+      "source": "simulation_assumption",
+      "pf": {
+        "symbol": "PF-SIM-btc",
+        "unit": "BTC",
+        "mark": "100000",
+        "step": "0.00001",
+        "minQty": "0.00001",
+        "minNotional": "0",
+        "fx": "1",
+        "factor": "1",
+        "currency": "U",
+        "quoteCurrency": "U",
+        "settlementCurrency": "U",
+        "underlying": "btc",
+        "priceTick": "0.01",
+        "multiplier": "1",
+        "type": "linear",
+        "mappingVerified": true,
+        "rate": "0.0001",
+        "pool": "standard",
+        "marginMode": "cross",
+        "leverage": "20",
+        "tiers": [
+          {
+            "from": "0",
+            "mmr": "0.025",
+            "deduction": "0"
+          }
+        ],
+        "hold": "0",
+        "open": true,
+        "asks": [
+          [
+            "100000",
+            "1000000"
+          ]
+        ],
+        "bids": [
+          [
+            "100000",
+            "1000000"
+          ]
+        ],
+        "source": "simulation_assumption"
+      },
+      "hl": {
+        "symbol": "HL-SIM-btc",
+        "unit": "BTC",
+        "mark": "100000",
+        "step": "0.00001",
+        "minQty": "0.00001",
+        "minNotional": "0",
+        "fx": "1",
+        "factor": "1",
+        "currency": "U",
+        "quoteCurrency": "U",
+        "settlementCurrency": "U",
+        "underlying": "btc",
+        "priceTick": "0.01",
+        "multiplier": "1",
+        "type": "linear",
+        "mappingVerified": true,
+        "rate": "0.0005",
+        "pool": "standard",
+        "marginMode": "cross",
+        "leverage": "20",
+        "tiers": [
+          {
+            "from": "0",
+            "mmr": "0.025",
+            "deduction": "0"
+          }
+        ],
+        "hold": "0",
+        "open": true,
+        "asks": [
+          [
+            "100000",
+            "1000000"
+          ]
+        ],
+        "bids": [
+          [
+            "100000",
+            "1000000"
+          ]
+        ],
+        "source": "simulation_assumption"
+      }
+    },
+    "eth": {
+      "id": "eth",
+      "name": "ETH",
+      "unit": "ETH",
+      "source": "simulation_assumption",
+      "pf": {
+        "symbol": "PF-SIM-eth",
+        "unit": "ETH",
+        "mark": "2500",
+        "step": "0.001",
+        "minQty": "0.001",
+        "minNotional": "0",
+        "fx": "1",
+        "factor": "1",
+        "currency": "U",
+        "quoteCurrency": "U",
+        "settlementCurrency": "U",
+        "underlying": "eth",
+        "priceTick": "0.01",
+        "multiplier": "1",
+        "type": "linear",
+        "mappingVerified": true,
+        "rate": "0.0001",
+        "pool": "standard",
+        "marginMode": "cross",
+        "leverage": "20",
+        "tiers": [
+          {
+            "from": "0",
+            "mmr": "0.025",
+            "deduction": "0"
+          }
+        ],
+        "hold": "0",
+        "open": true,
+        "asks": [
+          [
+            "2500",
+            "1000000"
+          ]
+        ],
+        "bids": [
+          [
+            "2500",
+            "1000000"
+          ]
+        ],
+        "source": "simulation_assumption"
+      },
+      "hl": {
+        "symbol": "HL-SIM-eth",
+        "unit": "ETH",
+        "mark": "2500",
+        "step": "0.001",
+        "minQty": "0.001",
+        "minNotional": "0",
+        "fx": "1",
+        "factor": "1",
+        "currency": "U",
+        "quoteCurrency": "U",
+        "settlementCurrency": "U",
+        "underlying": "eth",
+        "priceTick": "0.01",
+        "multiplier": "1",
+        "type": "linear",
+        "mappingVerified": true,
+        "rate": "0.0005",
+        "pool": "standard",
+        "marginMode": "cross",
+        "leverage": "20",
+        "tiers": [
+          {
+            "from": "0",
+            "mmr": "0.025",
+            "deduction": "0"
+          }
+        ],
+        "hold": "0",
+        "open": true,
+        "asks": [
+          [
+            "2500",
+            "1000000"
+          ]
+        ],
+        "bids": [
+          [
+            "2500",
+            "1000000"
+          ]
+        ],
+        "source": "simulation_assumption"
+      }
+    },
+    "sol": {
+      "id": "sol",
+      "name": "SOL",
+      "unit": "SOL",
+      "source": "simulation_assumption",
+      "pf": {
+        "symbol": "PF-SIM-sol",
+        "unit": "SOL",
+        "mark": "160",
+        "step": "0.01",
+        "minQty": "0.01",
+        "minNotional": "0",
+        "fx": "1",
+        "factor": "1",
+        "currency": "U",
+        "quoteCurrency": "U",
+        "settlementCurrency": "U",
+        "underlying": "sol",
+        "priceTick": "0.01",
+        "multiplier": "1",
+        "type": "linear",
+        "mappingVerified": true,
+        "rate": "0.0001",
+        "pool": "standard",
+        "marginMode": "cross",
+        "leverage": "20",
+        "tiers": [
+          {
+            "from": "0",
+            "mmr": "0.025",
+            "deduction": "0"
+          }
+        ],
+        "hold": "0",
+        "open": true,
+        "asks": [
+          [
+            "160",
+            "1000000"
+          ]
+        ],
+        "bids": [
+          [
+            "160",
+            "1000000"
+          ]
+        ],
+        "source": "simulation_assumption"
+      },
+      "hl": {
+        "symbol": "HL-SIM-sol",
+        "unit": "SOL",
+        "mark": "160",
+        "step": "0.01",
+        "minQty": "0.01",
+        "minNotional": "0",
+        "fx": "1",
+        "factor": "1",
+        "currency": "U",
+        "quoteCurrency": "U",
+        "settlementCurrency": "U",
+        "underlying": "sol",
+        "priceTick": "0.01",
+        "multiplier": "1",
+        "type": "linear",
+        "mappingVerified": true,
+        "rate": "0.0005",
+        "pool": "standard",
+        "marginMode": "cross",
+        "leverage": "20",
+        "tiers": [
+          {
+            "from": "0",
+            "mmr": "0.025",
+            "deduction": "0"
+          }
+        ],
+        "hold": "0",
+        "open": true,
+        "asks": [
+          [
+            "160",
+            "1000000"
+          ]
+        ],
+        "bids": [
+          [
+            "160",
+            "1000000"
+          ]
+        ],
+        "source": "simulation_assumption"
+      }
+    },
+    "xau": {
+      "id": "xau",
+      "name": "黄金",
+      "unit": "盎司",
+      "source": "simulation_assumption",
+      "pf": {
+        "symbol": "PF-SIM-xau",
+        "unit": "手",
+        "mark": "2500",
+        "step": "0.0001",
+        "minQty": "0.0001",
+        "minNotional": "0",
+        "fx": "1",
+        "factor": "1",
+        "currency": "U",
+        "quoteCurrency": "U",
+        "settlementCurrency": "U",
+        "underlying": "xau",
+        "priceTick": "0.01",
+        "multiplier": "100",
+        "type": "linear",
+        "mappingVerified": true,
+        "rate": "0.0001",
+        "pool": "standard",
+        "marginMode": "cross",
+        "leverage": "20",
+        "tiers": [
+          {
+            "from": "0",
+            "mmr": "0.025",
+            "deduction": "0"
+          }
+        ],
+        "hold": "0",
+        "open": true,
+        "asks": [
+          [
+            "2500",
+            "1000000"
+          ]
+        ],
+        "bids": [
+          [
+            "2500",
+            "1000000"
+          ]
+        ],
+        "source": "simulation_assumption"
+      },
+      "hl": {
+        "symbol": "HL-SIM-xau",
+        "unit": "盎司",
+        "mark": "2500",
+        "step": "0.001",
+        "minQty": "0.001",
+        "minNotional": "0",
+        "fx": "1",
+        "factor": "1",
+        "currency": "U",
+        "quoteCurrency": "U",
+        "settlementCurrency": "U",
+        "underlying": "xau",
+        "priceTick": "0.01",
+        "multiplier": "1",
+        "type": "linear",
+        "mappingVerified": true,
+        "rate": "0.0005",
+        "pool": "standard",
+        "marginMode": "cross",
+        "leverage": "20",
+        "tiers": [
+          {
+            "from": "0",
+            "mmr": "0.025",
+            "deduction": "0"
+          }
+        ],
+        "hold": "0",
+        "open": true,
+        "asks": [
+          [
+            "2500",
+            "1000000"
+          ]
+        ],
+        "bids": [
+          [
+            "2500",
+            "1000000"
+          ]
+        ],
+        "source": "simulation_assumption"
+      }
+    },
+    "us100": {
+      "id": "us100",
+      "name": "纳指 100",
+      "unit": "点",
+      "source": "simulation_assumption",
+      "pf": {
+        "symbol": "PF-SIM-us100",
+        "unit": "张",
+        "mark": "20000",
+        "step": "0.0001",
+        "minQty": "0.0001",
+        "minNotional": "0",
+        "fx": "1",
+        "factor": "1",
+        "currency": "U",
+        "quoteCurrency": "U",
+        "settlementCurrency": "U",
+        "underlying": "us100",
+        "priceTick": "0.01",
+        "multiplier": "5",
+        "type": "linear",
+        "mappingVerified": true,
+        "rate": "0.0001",
+        "pool": "standard",
+        "marginMode": "cross",
+        "leverage": "20",
+        "tiers": [
+          {
+            "from": "0",
+            "mmr": "0.025",
+            "deduction": "0"
+          }
+        ],
+        "hold": "0",
+        "open": true,
+        "asks": [
+          [
+            "20000",
+            "1000000"
+          ]
+        ],
+        "bids": [
+          [
+            "20000",
+            "1000000"
+          ]
+        ],
+        "source": "simulation_assumption"
+      },
+      "hl": {
+        "symbol": "HL-SIM-us100",
+        "unit": "点",
+        "mark": "20000",
+        "step": "0.001",
+        "minQty": "0.001",
+        "minNotional": "0",
+        "fx": "1",
+        "factor": "1",
+        "currency": "U",
+        "quoteCurrency": "U",
+        "settlementCurrency": "U",
+        "underlying": "us100",
+        "priceTick": "0.01",
+        "multiplier": "1",
+        "type": "linear",
+        "mappingVerified": true,
+        "rate": "0.0005",
+        "pool": "standard",
+        "marginMode": "cross",
+        "leverage": "20",
+        "tiers": [
+          {
+            "from": "0",
+            "mmr": "0.025",
+            "deduction": "0"
+          }
+        ],
+        "hold": "0",
+        "open": true,
+        "asks": [
+          [
+            "20000",
+            "1000000"
+          ]
+        ],
+        "bids": [
+          [
+            "20000",
+            "1000000"
+          ]
+        ],
+        "source": "simulation_assumption"
+      }
+    }
+  },
+  "branches": {
+    "demo": {
+      "version": 1,
+      "revision": 7,
+      "mode": "demo",
+      "stage": "challenge",
+      "status": "CHALLENGE_TIMEOUT_EXIT",
+      "attemptId": "sample-48h",
+      "round": 1,
+      "challengeStartedAt": "2026-01-01T00:00:00.000Z",
+      "challengeDeadlineAt": "2026-01-03T00:00:00.000Z",
+      "deadlineMode": "elapsed_hours",
+      "exitStatus": "settled",
+      "profileVersion": 1,
+      "passTrigger": "net_settlement",
+      "failureTrigger": "net_settlement",
+      "additionalRules": [],
+      "currency": "U",
+      "baseline": "10000",
+      "share": "0.8",
+      "challengeTarget": "12000",
+      "challengeFloor": "9400",
+      "fundedFloor": "8000",
+      "B": "500",
+      "pf": "9998",
+      "hl": "407",
+      "external": "0",
+      "fees": {
+        "pf": "2",
+        "hl": "2",
+        "registration": "91"
+      },
+      "realized": {
+        "pf": "0",
+        "hl": "0"
+      },
+      "funding": {
+        "pf": "0",
+        "hl": "0"
+      },
+      "paid": "0",
+      "contributions": "0",
+      "withdrawals": "0",
+      "roundIn": "0",
+      "roundOut": "0",
+      "ref": "409",
+      "refEvent": "sample-48h/start",
+      "payouts": {},
+      "transfers": {},
+      "positions": {},
+      "events": [
+        {
+          "id": "sample-48h/start",
+          "type": "attempt_start",
+          "source": "demo",
+          "occurredAt": "2026-01-01T00:00:00.000Z",
+          "receivedAt": "2026-01-01T00:00:00.000Z",
+          "payload": {
+            "fee": "91",
+            "deadline": "2026-01-03T00:00:00.000Z"
+          },
+          "attemptId": "sample-48h",
+          "roundId": 1,
+          "ruleProfileVersion": 1,
+          "currency": "U",
+          "venue": "external",
+          "pfEquity": "10000",
+          "personalEquity": "409",
+          "pfBalance": "10000",
+          "hlBalance": "409",
+          "external": "0",
+          "C_ref": "409"
+        },
+        {
+          "id": "sample-48h/open/pf",
+          "type": "fill",
+          "payload": {
+            "asset": "unit",
+            "venue": "pf",
+            "pool": "standard",
+            "currency": "U",
+            "qty": "10",
+            "price": "1000",
+            "rate": "0.0001",
+            "multiplier": "1",
+            "fx": "1",
+            "gross": "0",
+            "fee": "1",
+            "feeToken": "U",
+            "rebate": "0"
+          },
+          "occurredAt": "2026-01-01T00:00:00.000Z",
+          "receivedAt": "2026-01-01T00:00:00.000Z",
+          "source": "demo",
+          "attemptId": "sample-48h",
+          "roundId": 1,
+          "ruleProfileVersion": 1,
+          "currency": "U",
+          "venue": "pf",
+          "pfEquity": "9999",
+          "personalEquity": "409",
+          "pfBalance": "9999",
+          "hlBalance": "409",
+          "external": "0",
+          "C_ref": "409"
+        },
+        {
+          "id": "sample-48h/open/hl",
+          "type": "fill",
+          "payload": {
+            "asset": "unit",
+            "venue": "hl",
+            "pool": "standard",
+            "currency": "U",
+            "qty": "-2",
+            "price": "1000",
+            "rate": "0.0005",
+            "multiplier": "1",
+            "fx": "1",
+            "gross": "0",
+            "fee": "1",
+            "feeToken": "U",
+            "rebate": "0"
+          },
+          "occurredAt": "2026-01-01T00:00:00.000Z",
+          "receivedAt": "2026-01-01T00:00:00.000Z",
+          "source": "demo",
+          "attemptId": "sample-48h",
+          "roundId": 1,
+          "ruleProfileVersion": 1,
+          "currency": "U",
+          "venue": "hl",
+          "pfEquity": "9999",
+          "personalEquity": "408",
+          "pfBalance": "9999",
+          "hlBalance": "408",
+          "external": "0",
+          "C_ref": "409"
+        },
+        {
+          "id": "sample-48h/timeout/due",
+          "type": "deadline",
+          "payload": {},
+          "occurredAt": "2026-01-03T00:00:00.000Z",
+          "receivedAt": "2026-01-03T00:00:00.000Z",
+          "source": "demo",
+          "confirmed": false,
+          "attemptId": "sample-48h",
+          "roundId": 1,
+          "ruleProfileVersion": 1,
+          "currency": "U",
+          "venue": "external",
+          "pfEquity": "9999",
+          "personalEquity": "408",
+          "pfBalance": "9999",
+          "hlBalance": "408",
+          "external": "0",
+          "C_ref": "409"
+        },
+        {
+          "id": "sample-48h/timeout/close/pf/standard/unit",
+          "type": "fill",
+          "payload": {
+            "venue": "pf",
+            "asset": "unit",
+            "pool": "standard",
+            "currency": "U",
+            "qty": "-10",
+            "entry": "1000",
+            "mark": "1000",
+            "multiplier": "1",
+            "fx": "1",
+            "rate": "0.0001",
+            "price": "1000",
+            "exit": true,
+            "gross": "0",
+            "fee": "1",
+            "feeToken": "U",
+            "rebate": "0"
+          },
+          "occurredAt": "2026-01-03T00:00:00.000Z",
+          "receivedAt": "2026-01-03T00:00:00.000Z",
+          "source": "demo",
+          "confirmed": false,
+          "attemptId": "sample-48h",
+          "roundId": 1,
+          "ruleProfileVersion": 1,
+          "currency": "U",
+          "venue": "pf",
+          "pfEquity": "9998",
+          "personalEquity": "408",
+          "pfBalance": "9998",
+          "hlBalance": "408",
+          "external": "0",
+          "C_ref": "409"
+        },
+        {
+          "id": "sample-48h/timeout/close/hl/standard/unit",
+          "type": "fill",
+          "payload": {
+            "venue": "hl",
+            "asset": "unit",
+            "pool": "standard",
+            "currency": "U",
+            "qty": "2",
+            "entry": "1000",
+            "mark": "1000",
+            "multiplier": "1",
+            "fx": "1",
+            "rate": "0.0005",
+            "price": "1000",
+            "exit": true,
+            "gross": "0",
+            "fee": "1",
+            "feeToken": "U",
+            "rebate": "0"
+          },
+          "occurredAt": "2026-01-03T00:00:00.000Z",
+          "receivedAt": "2026-01-03T00:00:00.000Z",
+          "source": "demo",
+          "confirmed": false,
+          "attemptId": "sample-48h",
+          "roundId": 1,
+          "ruleProfileVersion": 1,
+          "currency": "U",
+          "venue": "hl",
+          "pfEquity": "9998",
+          "personalEquity": "407",
+          "pfBalance": "9998",
+          "hlBalance": "407",
+          "external": "0",
+          "C_ref": "409"
+        },
+        {
+          "id": "sample-48h/timeout/settled",
+          "type": "exit_settled",
+          "payload": {},
+          "occurredAt": "2026-01-03T00:00:00.000Z",
+          "receivedAt": "2026-01-03T00:00:00.000Z",
+          "source": "demo",
+          "confirmed": false,
+          "attemptId": "sample-48h",
+          "roundId": 1,
+          "ruleProfileVersion": 1,
+          "currency": "U",
+          "venue": "external",
+          "pfEquity": "9998",
+          "personalEquity": "407",
+          "pfBalance": "9998",
+          "hlBalance": "407",
+          "external": "0",
+          "C_ref": "409"
+        }
+      ],
+      "seen": {
+        "sample-48h/start": true,
+        "sample-48h/open/pf": true,
+        "sample-48h/open/hl": true,
+        "sample-48h/timeout/due": true,
+        "sample-48h/timeout/close/pf/standard/unit": true,
+        "sample-48h/timeout/close/hl/standard/unit": true,
+        "sample-48h/timeout/settled": true
+      },
+      "exitCash": "407"
+    }
+  },
+  "vsSnapshot": null
+}

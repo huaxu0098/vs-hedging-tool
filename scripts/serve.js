@@ -8,7 +8,8 @@ import { createUsdRatesReader } from './usd-rates.js';
 
 const root = new URL('../', import.meta.url);
 const host = '127.0.0.1';
-const port = Number(process.env.PORT || 4178);
+const hedge = process.argv.includes('--hedge');
+const port = Number(process.env.PORT || (hedge ? 4180 : 4178));
 const types = {
   html: 'text/html',
   css: 'text/css',
@@ -32,6 +33,39 @@ const server = createServer(async (request, response) => {
     url = new URL(request.url, 'http://localhost');
   } catch {
     response.writeHead(400).end();
+    return;
+  }
+  if (hedge && url.pathname !== '/api/hype-info') {
+    const path = url.pathname;
+    const files = {
+      '/': 'hedge.html',
+      '/hedge.css': 'hedge.css',
+      '/vendor/decimal.mjs': 'node_modules/decimal.js/decimal.mjs'
+    };
+    const file = Object.hasOwn(files, path)
+      ? files[path]
+      : /^\/(?:src\/hedge\/[a-z-]+\.js|src\/vs-parser\.js|fixtures\/hedge-[a-z-]+\.(?:json|csv)|config\/hedge-example\.json)$/.test(
+            path
+          )
+        ? path.slice(1)
+        : null;
+    if (!file || !['GET', 'HEAD'].includes(request.method)) {
+      response.writeHead(404).end();
+      return;
+    }
+    try {
+      const body = await readFile(new URL(file, root));
+      response
+        .writeHead(200, {
+          'Content-Type':
+            (file.endsWith('.mjs') ? 'text/javascript' : types[file.split('.').at(-1)]) + '; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff'
+        })
+        .end(request.method === 'HEAD' ? undefined : body);
+    } catch {
+      response.writeHead(404).end();
+    }
     return;
   }
   if (url.pathname === '/api/usd-rates') {

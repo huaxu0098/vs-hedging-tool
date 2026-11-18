@@ -6,7 +6,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
-export async function openTestBrowser() {
+export async function openTestBrowser({ hedge = false } = {}) {
   const locations = [
     process.env.CHROME_BIN,
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -25,7 +25,7 @@ export async function openTestBrowser() {
   if (!executable) throw Error('请设置 CHROME_BIN 指向本机 Chrome 或 Chromium。');
   const dir = await mkdtemp(path.join(os.tmpdir(), 'vs-hype-browser-'));
   const root = fileURLToPath(new URL('../../', import.meta.url));
-  const server = spawn(process.execPath, ['scripts/serve.js'], {
+  const server = spawn(process.execPath, ['scripts/serve.js', ...(hedge ? ['--hedge'] : [])], {
     cwd: root,
     env: { ...process.env, PORT: '0' },
     stdio: ['ignore', 'pipe', 'inherit']
@@ -110,7 +110,7 @@ export async function openTestBrowser() {
       const status = await run(
         "['notice','verdict','feed-health','vs-paste-error'].map(k=>document.getElementById(k)?.textContent).filter(Boolean).join(' | ')"
       );
-      throw Error('等待页面条件超时 ' + expression + ' ' + status);
+      throw Error('等待页面条件超时 ' + expression + ' ' + status + ' ' + faults.join(' / '));
     }
     for (const method of ['Page.enable', 'Runtime.enable']) await send(method);
     await send('Emulation.setDeviceMetricsOverride', {
@@ -120,14 +120,18 @@ export async function openTestBrowser() {
       mobile: false
     });
     await send('Page.navigate', { url });
-    await wait(
-      "document.querySelector('#feed-values') && document.querySelector('#feed-switch')?.value==='live'",
-      15000
-    );
-    await run(
-      "document.querySelector('#feed-switch').value='offline';document.querySelector('#feed-switch').dispatchEvent(new Event('change'))"
-    );
-    await wait("document.querySelector('#verdict')?.innerText.includes('匹配可交易')", 15000);
+    if (hedge) {
+      await wait("document.querySelector('#calc-status')?.textContent.length > 0", 15000);
+    } else {
+      await wait(
+        "document.querySelector('#feed-values') && document.querySelector('#feed-switch')?.value==='live'",
+        15000
+      );
+      await run(
+        "document.querySelector('#feed-switch').value='offline';document.querySelector('#feed-switch').dispatchEvent(new Event('change'))"
+      );
+      await wait("document.querySelector('#verdict')?.innerText.includes('匹配可交易')", 15000);
+    }
     const selector = (s) => 'document.querySelector(' + JSON.stringify(s) + ')';
     return {
       url,

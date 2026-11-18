@@ -1,0 +1,114 @@
+{
+  "profile": {
+    "id": "用户模型 · 固定回撤",
+    "profileVersion": 1,
+    "source": "user_provided",
+    "verification": "assumed",
+    "verifiedAt": null,
+    "B": "500",
+    "purchaseFee": "91",
+    "baseline": "10000",
+    "challengeTarget": "12000",
+    "challengeFloor": "9400",
+    "fundedFloor": "8000",
+    "share": "0.8",
+    "hours": "48",
+    "passTrigger": "net_settlement",
+    "failureTrigger": "net_settlement",
+    "additionalRules": []
+  },
+  "exampleMarket": {
+    "id": "xau",
+    "name": "黄金",
+    "unit": "盎司",
+    "source": "simulation_assumption",
+    "pf": {
+      "symbol": "PF-SIM-xau",
+      "unit": "手",
+      "mark": "2500",
+      "step": "0.0001",
+      "minQty": "0.0001",
+      "minNotional": "0",
+      "fx": "1",
+      "factor": "1",
+      "currency": "U",
+      "quoteCurrency": "U",
+      "settlementCurrency": "U",
+      "underlying": "xau",
+      "priceTick": "0.01",
+      "multiplier": "100",
+      "type": "linear",
+      "mappingVerified": true,
+      "rate": "0.0001",
+      "pool": "standard",
+      "marginMode": "cross",
+      "leverage": "20",
+      "tiers": [
+        {
+          "from": "0",
+          "mmr": "0.025",
+          "deduction": "0"
+        }
+      ],
+      "hold": "0",
+      "open": true,
+      "asks": [
+        [
+          "2500",
+          "1000000"
+        ]
+      ],
+      "bids": [
+        [
+          "2500",
+          "1000000"
+        ]
+      ],
+      "source": "simulation_assumption"
+    },
+    "hl": {
+      "symbol": "HL-SIM-xau",
+      "unit": "盎司",
+      "mark": "2500",
+      "step": "0.001",
+      "minQty": "0.001",
+      "minNotional": "0",
+      "fx": "1",
+      "factor": "1",
+      "currency": "U",
+      "quoteCurrency": "U",
+      "settlementCurrency": "U",
+      "underlying": "xau",
+      "priceTick": "0.01",
+      "multiplier": "1",
+      "type": "linear",
+      "mappingVerified": true,
+      "rate": "0.0005",
+      "pool": "standard",
+      "marginMode": "cross",
+      "leverage": "20",
+      "tiers": [
+        {
+          "from": "0",
+          "mmr": "0.025",
+          "deduction": "0"
+        }
+      ],
+      "hold": "0",
+      "open": true,
+      "asks": [
+        [
+          "2500",
+          "1000000"
+        ]
+      ],
+      "bids": [
+        [
+          "2500",
+          "1000000"
+        ]
+      ],
+      "source": "simulation_assumption"
+    }
+  }
+}
