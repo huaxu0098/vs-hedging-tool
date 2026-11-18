@@ -92,7 +92,19 @@
           </div>
           <button id="solve">求解另一边</button>
         </div>
-        <section id="verdict" class="verdict" aria-live="polite"></section>
+        <section id="verdict" class="verdict" data-state="pending" aria-labelledby="verdict-title">
+          <header>
+            <h2 id="verdict-title" aria-live="polite" aria-atomic="true">正在验算</h2>
+            <strong
+              ><span id="verdict-plan"></span><span id="verdict-vs"></span><span id="verdict-hype"></span
+            ></strong>
+          </header>
+          <p>
+            <span id="verdict-vs-change"></span>
+            <span id="verdict-hype-change"></span>
+            <span id="verdict-reason"></span>
+          </p>
+        </section>
         <div class="panorama">
           <section class="panel venue" id="vs-panel"></section>
           <section class="panel cross" id="cross-panel"></section>

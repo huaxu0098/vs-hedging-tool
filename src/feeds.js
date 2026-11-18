@@ -430,7 +430,17 @@ function valueVSAccount(snap, leg, now, issues) {
   return usdAccount(raw, rate, read, issues, 'VS');
 }
 
-export function toMarketAsset(asset, snap, now = Date.now()) {
+export function toMarketAsset(asset, snap, now = Date.now(), useExternalAccounts = true) {
+  if (snap && !useExternalAccounts) {
+    // The desk still needs fresh venue quotes and exchange margin rules when
+    // the simulated ledger supplies balances. Ignore the unused account clock.
+    snap = {
+      ...snap,
+      vsAutoAccountIssue: '',
+      addressConfigured: false,
+      vs: snap.vs && { ...snap.vs, account: null }
+    };
+  }
   const mixed = snap?.mode === 'offline' && positive(snap.vs?.bid);
   if (!snap || (snap.mode === 'offline' && !mixed)) {
     const sourceIssues = feedIssues(snap, now);
@@ -527,7 +537,7 @@ export function toMarketAsset(asset, snap, now = Date.now()) {
   if (!mixed) valueLegFx(asset, snap, 'hype', hype, now, sourceIssues);
   if (!mixed && snap.hype) {
     const fx = hype.settleUsd,
-      raw = snap.hype.account;
+      raw = useExternalAccounts ? snap.hype.account : null;
     hype.account = null;
     if (positive(fx)) {
       // The API reports collateral-currency amounts. Prices and quantities retain venue units.

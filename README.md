@@ -59,7 +59,10 @@ npm start
 npm test
 npm run test:browser
 npm run test:vest
+npm run test:verdict
 ```
+
+`test:verdict` 在 Chrome 逐帧检查连续报价时的结论栏、价格轴及候选表，并验证停流过期和恢复。
 
 浏览器测试启动真实的本地服务和独立临时 Chrome 配置。可通过 `CHROME_BIN` 指定 Chrome/Chromium 路径。该测试需要 Hyperliquid 主网可达，使用公共测试地址检查账户接口；随后在浏览器注入请求超时，以验证断连与超龄。设置 `QA_REPORT_PATH` 可将此次运行的实际报价和通过项目写为 JSON。测试不会使用日常浏览器的配置或账本。
 

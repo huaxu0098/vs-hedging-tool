@@ -177,7 +177,7 @@ function configIssues(account, c) {
   return errors;
 }
 
-function issues(asset, account, c, now) {
+export function decisionInputIssues(asset, account, c, now = Date.now()) {
   const reasons = [...(asset.sourceIssues ?? []), ...configIssues(account, c)];
   if (!positive(asset.referencePrice) || !positive(asset.maxAgeSec) || !asset.verified || !asset.benchmark)
     reasons.push('参考价格、有效期或标的映射未验证');
@@ -709,7 +709,7 @@ function liquidation(asset, account, h, other, baseCash, now) {
 }
 
 function newContext(asset, account, c, now) {
-  const reasons = issues(asset, account, c, now);
+  const reasons = decisionInputIssues(asset, account, c, now);
   if (reasons.length) return { reasons, limits: { vs: {}, hype: {} }, cache: new Map(), other: {} };
   return {
     reasons,

@@ -266,7 +266,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
     clearTimeout(timer);
     pending = false;
   }
-  function refresh() {
+  function refresh(forceAtStart = true) {
     if (dead || mode !== 'live') return;
     cancel();
     if (dirty) {
@@ -278,7 +278,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
       controller = new AbortController();
     inflight = controller;
     pending = true;
-    emit();
+    emit(forceAtStart);
     readHype({ ...config, signal: controller.signal, proxyBase: location.origin })
       .then((data) => {
         if (dead || ticket !== epoch) return;
@@ -306,7 +306,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
           2
         );
         emit();
-        timer = setTimeout(refresh, config.period);
+        timer = setTimeout(() => refresh(false), config.period);
       });
   }
   function setMode(next) {

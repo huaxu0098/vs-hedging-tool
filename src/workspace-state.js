@@ -69,7 +69,7 @@ export function dashboardAccount(local, manual, snapshot, asset, assets, legacyH
   const active = snapshot && snapshot.mode !== 'offline';
   for (const venue of ['vs', 'hype']) {
     const source =
-      active || venue === 'vs'
+      snapshot && (active || venue === 'vs')
         ? venue === 'hype'
           ? (asset.hype.account ?? null)
           : Object.hasOwn(asset.vs, 'account')

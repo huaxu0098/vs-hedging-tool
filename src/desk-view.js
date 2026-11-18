@@ -202,40 +202,38 @@ export function showCross(a, c, result, snap) {
     '</div>' +
     info(hypeSource);
 }
-export function showVerdict(a, c, result, config) {
+function renderVerdict(state, { title, detail, plan = '', vs = '', hype = '', vsChange = '', hypeChange = '' }) {
+  const panel = $('verdict');
+  if (panel.dataset.state !== state) panel.dataset.state = state;
+  const parts = { title, plan, vs, hype, 'vs-change': vsChange, 'hype-change': hypeChange, reason: detail };
+  for (const [slot, value] of Object.entries(parts)) {
+    const element = $('verdict-' + slot);
+    const node = element.firstChild;
+    if (!node) element.appendChild(document.createTextNode(value));
+    else if (node.data !== value) node.data = value;
+  }
+}
+export function showVerdictMessage(title, reason = '', kind = 'pending') {
+  renderVerdict(kind === 'bad' ? 'bad' : 'pending', { title, detail: reason });
+}
+export function showVerdict(a, c, result) {
   const ok = c?.ok && !c.noTrade;
-  $('verdict').className = 'verdict' + (ok ? '' : ' bad');
-  const plan =
-    c?.vs && c?.hype
-      ? planSide(c) +
-        '，VS ' +
-        money(c.vs.notional) +
-        '（' +
-        totalQty(c, a, 'vs') +
-        '），Hype ' +
-        money(c.hype.notional) +
-        '（' +
-        totalQty(c, a, 'hype') +
-        '）'
-      : '当前没有可执行的双边方案';
-  $('verdict').innerHTML =
-    '<header><h2>' +
-    h(labelStatus(c)) +
-    '</h2><strong>' +
-    h(a.ticker + ' · ' + plan) +
-    '</strong></header>' +
-    '<p>' +
-    h(
-      (c?.vs && c?.hype
-        ? '相对现仓的带符号调整：VS ' + signedQty(c, a, 'vs') + '，Hype ' + signedQty(c, a, 'hype') + '。 '
-        : '') +
-        (ok
-          ? c.runway?.ok
-            ? '按当前假设可安全续航至首次出金。'
-            : '仅可完成本阶段，详见续航验算。'
-          : reason(c) || result.reasons?.join(' · ') || '未找到可行候选，维持不交易。')
-    ) +
-    '</p>';
+  const both = c?.vs && c?.hype;
+  const state = ok ? 'matched' : !c?.noTrade && c?.status === 'one-sided' ? 'one-sided' : 'bad';
+  const detail = ok
+    ? c.runway?.ok
+      ? '按当前假设可安全续航至首次出金。'
+      : '仅可完成本阶段，详见续航验算。'
+    : reason(c) || result?.reasons?.join(' · ') || '未找到可行候选，维持不交易。';
+  renderVerdict(state, {
+    title: labelStatus(c),
+    detail,
+    plan: a.ticker + ' · ' + (both ? planSide(c) + '，' : '当前没有可执行的双边方案'),
+    vs: both ? 'VS ' + money(c.vs.notional) + '（' + totalQty(c, a, 'vs') + '），' : '',
+    hype: both ? 'Hype ' + money(c.hype.notional) + '（' + totalQty(c, a, 'hype') + '）' : '',
+    vsChange: both ? '相对现仓，VS 调整 ' + signedQty(c, a, 'vs') + '，' : '',
+    hypeChange: both ? 'Hype 调整 ' + signedQty(c, a, 'hype') + '。' : ''
+  });
 }
 export function showAxes(a, c, account, config, scenario) {
   const ref = a.referencePrice,

@@ -1,4 +1,5 @@
 import { escapeHTML as h, number as n, money, stateNames } from './format.js';
+import { analyzeCandidate, decisionInputIssues } from './decision.js';
 import { openEditor } from './editor.js';
 import { openSettings } from './settings.js';
 import {
@@ -19,6 +20,7 @@ import {
   showVenue,
   showCross,
   showVerdict,
+  showVerdictMessage,
   showAxes,
   showChecks,
   showCandidates,
@@ -38,7 +40,9 @@ let mode = 'auto',
   choices = [];
 let display = null,
   generation = 0,
-  workerBusy = false,
+  contextVersion = 0,
+  accountVersion = 0,
+  inFlight = null,
   pending = null,
   freshness;
 let worker;
@@ -50,7 +54,7 @@ function allMarkets() {
   for (const p of held) if (p.asset && !catalog.some((a) => a.id === p.assetId)) catalog.push(p.asset);
   return catalog.map((a) => {
     const feed = a.id === id ? snapshot : feedCache.get(a.id);
-    const candidate = toMarketAsset(a, feed);
+    const candidate = toMarketAsset(a, feed, Date.now(), state.config.useExternalAccounts !== false);
     return resolveHeldMarket(candidate, held.find((p) => p.assetId === a.id)?.asset);
   });
 }
@@ -93,7 +97,7 @@ function getInputs() {
 }
 function safeOrder() {
   if (!display?.candidate?.requested) throw Error('当前没有可核验的目标仓位，请回到决策工作台。');
-  if (display.id !== generation) throw Error('报价或参数已更新，等待重新验算。');
+  if (!currentResult()) throw Error('报价或参数已更新，等待重新验算。');
   return { ...display.candidate.requested };
 }
 function tab() {
@@ -156,29 +160,88 @@ function issueKey() {
     })
   ].join('|');
 }
+// A recommendation can stay visible while a healthy quote is being priced.
+// Acting on it always requires the latest completed request and fresh inputs.
+function currentResult() {
+  return display && !display.historical && !display.blocked && display.id === generation &&
+    Date.now() <= display.expires && freshness === issueKey();
+}
+function quoteDeadline(asset, snap, account, config) {
+  const deadlines = [];
+  function addLeg(leg, age) {
+    const stamp = typeof leg?.asOf === 'number' ? leg.asOf : Date.parse(leg?.asOf);
+    if (Number.isFinite(stamp)) deadlines.push(stamp + age);
+    if (leg?.fxValidUntil != null) deadlines.push(leg.fxValidUntil);
+  }
+  for (const venue of ['vs', 'hype']) {
+    addLeg(asset[venue], asset.maxAgeSec * 1000);
+    if (snap?.mode === 'live' || (venue === 'vs' && asset.mixedSource))
+      addLeg(snap[venue], snap.maxAgeMs);
+    if (config.useExternalAccounts !== false)
+      addLeg(asset[venue].account, snap?.maxAgeMs ?? asset.maxAgeSec * 1000);
+  }
+  for (const p of account.positions ?? []) {
+    if (p.asset && p.assetId !== asset.id) addLeg(p.asset[p.venue], p.asset.maxAgeSec * 1000);
+  }
+  return Math.min(...deadlines);
+}
+function feedContext(s, includeBalances = false) {
+  if (!s) return '';
+  function contract(leg, venue) {
+    if (!leg) return null;
+    const acct = state.config.useExternalAccounts === false ? null : leg.account;
+    const position = (p) => [p.symbol, p.qty, p.entry, p.marginMode, p.leverage];
+    return [
+      leg.source, leg.symbol, leg.open, leg.documentedQuote, leg.settleCurrency,
+      leg.maxLeverage, leg.step, leg.minNotional, leg.tiers, leg.marginMode,
+      venue === 'hype' && leg.account?.position ? position(leg.account.position) : null,
+      includeBalances || !acct ? acct : [acct.currency, acct.source, acct.stage, acct.positions?.map(position)]
+    ];
+  }
+  // Account timestamps advance even when the positions and balances are identical.
+  return JSON.stringify(
+    [
+      s.assetId, s.scopeId, s.mode, s.maxAgeMs, s.mappingVerified, s.fxMode, s.quoteCurrency,
+      s.marginMode, s.addressConfigured, s.vestContract, contract(s.vs, 'vs'), contract(s.hype, 'hype')
+    ],
+    (key, value) => key === 'asOf' ? undefined : value
+  );
+}
+function stillFeasible(candidate, { asset, account, config }) {
+  if (!candidate?.ok) return true;
+  const checked = analyzeCandidate(asset, account, config, candidate.requested);
+  return checked.ok && checked.runway?.ok === candidate.runway?.ok;
+}
 function dispatch() {
-  if (workerBusy || !pending) return;
-  const data = pending;
+  if (inFlight || !pending) return;
+  inFlight = pending;
   pending = null;
-  workerBusy = true;
-  worker.postMessage(data);
+  worker.postMessage(inFlight.input);
 }
 function invalidate() {
   display = null;
   choices = [];
-  $('verdict').className = 'verdict bad';
-  $('verdict').innerHTML = '<h2>正在验算</h2>';
+  $('candidates-note').textContent = '';
   $('pin').disabled = true;
   // No old passing conclusion or scenario survives a disconnected or expired book.
   for (const section of ['checks', 'scenario-result', 'comparison', 'candidates', 'axis', 'assumptions'])
     $(section).replaceChildren();
 }
-function refresh() {
-  invalidate();
+// The feed is healthy, but the worker has not finished a still-fresh result.
+// Keep the previous tables readable as history and lock all result actions.
+function markPreviousResult() {
+  if (display.historical) return;
+  display.historical = true;
+  $('pin').disabled = true;
+  $('candidates-note').textContent = '上次验算的候选，等待最新结果。';
+  showVerdictMessage('等待新结果', '下方为上次验算的快照。其报价已过期，最新报价正在验算。');
+}
+function refresh(quoteUpdate = false, accountChanged = false) {
+  const stamp = ++generation;
+  pending = null;
   try {
     const { asset, account, config } = getInputs();
     simulation?.observe?.();
-    const stamp = ++generation;
     top();
     freshness = issueKey();
     const isManual = !!inspected;
@@ -200,30 +263,60 @@ function refresh() {
       (account.stage === 'funded' ? '出金号' : '考核阶段') +
       '　·　' +
       (config.triggerMode === 'mark' ? '标记净值触线' : '平仓净值触线');
-    const errors = asset.sourceIssues ?? [];
-    if (errors.length) {
-      const r = { ok: false, status: 'unverified', reasons: errors };
-      showVerdict(asset, r, { reasons: errors }, config);
+    const errors = decisionInputIssues(asset, account, config);
+    const expires = quoteDeadline(asset, snapshot, account, config);
+    if (!errors.length && expires < Date.now()) {
+      const reason = '仓位验算依赖的行情或汇率已过期。';
+      asset.sourceIssues.push(reason);
+      errors.push(reason);
     }
-    showVenue('vs', asset, account, config, null, null, snapshot);
-    showVenue('hype', asset, account, config, null, null, snapshot);
-    showCross(asset, null, {}, snapshot);
-    pending = { id: stamp, asset, account, config, request, inspected, pinned };
+    if (accountChanged) {
+      accountVersion++;
+      if (!errors.length && !stillFeasible(display?.candidate, { asset, account, config }))
+        quoteUpdate = false;
+    }
+    if (!quoteUpdate || errors.length) contextVersion++;
+    $('pin').disabled = true;
+    if (!quoteUpdate || errors.length || !display) {
+      invalidate();
+      if (errors.length) {
+        showVerdict(asset, { status: 'unverified', reasons: errors }, { reasons: errors });
+      } else {
+        showVerdictMessage('正在验算');
+      }
+      showVenue('vs', asset, account, config, null, null, snapshot);
+      showVenue('hype', asset, account, config, null, null, snapshot);
+      showCross(asset, null, {}, snapshot);
+    } else if (display.expires < Date.now()) {
+      markPreviousResult();
+    }
+    pending = {
+      input: { id: stamp, asset, account, config, request, inspected, pinned },
+      contextVersion,
+      accountVersion,
+      expires,
+      snapshot,
+      blocked: errors.length > 0
+    };
     dispatch();
     if (!$('sim').hidden) simulation?.refresh();
   } catch (err) {
-    generation++;
-    pending = null;
-    notify(err.message);
-    $('verdict').textContent = '无法验证 · ' + err.message;
+    calculationFailed(err.message);
   }
 }
-function render(data) {
-  const { asset, account, config } = getInputs(),
+function calculationFailed(message) {
+  contextVersion++;
+  invalidate();
+  showVerdictMessage('无法验证', message, 'bad');
+  notify(message);
+}
+function render(data, job) {
+  const { asset, account, config } = job.input,
+    { snapshot } = job,
     r = data.result,
     c = data.candidate ?? { status: r.status, reasons: r.reasons };
-  display = { ...data, candidate: c };
-  showVerdict(asset, c, r, config);
+  display = { id: data.id, candidate: c, expires: job.expires, blocked: job.blocked, asset, account, config };
+  showVerdict(asset, c, r);
   showVenue('vs', asset, account, config, r.limits, c, snapshot);
   showVenue('hype', asset, account, config, r.limits, c, snapshot);
   showCross(asset, c, r, snapshot);
@@ -231,7 +324,7 @@ function render(data) {
   showChecks(c, asset);
   choices = showCandidates(r, c);
   showComparison(c, data.comparison, asset);
-  $('pin').disabled = !c.requested;
+  $('pin').disabled = !c.requested || data.id !== generation || job.blocked;
   $('candidates-note').textContent =
     '已验算 ' + (r.sampleCount ?? 0) + ' 组 · 合格 ' + (r.matchedCount ?? 0) + ' 组';
   for (const v of ['vs', 'hype']) {
@@ -334,30 +427,42 @@ function setup() {
   id = state.assets[0].id;
   worker = new Worker(new URL('./match-worker.js', import.meta.url), { type: 'module' });
   worker.onmessage = ({ data }) => {
-    workerBusy = false;
-    if (data.id === generation) {
-      if (data.error) {
-        invalidate();
-        $('verdict').textContent = '无法验证 · ' + data.error;
-      } else if (freshness !== issueKey()) {
+    const job = inFlight;
+    inFlight = null;
+    try {
+      if (!job || data.id !== job.input.id || job.contextVersion !== contextVersion) return;
+      if (freshness !== issueKey()) refresh();
+      else if (data.error) {
+        if (data.id === generation) calculationFailed(data.error);
+      } else if (job.blocked || Date.now() <= job.expires) {
+        // New balances may arrive faster than the search. Only present an
+        // older positive result if that same order also passes the newer account.
+        if (job.accountVersion === accountVersion || (pending && stillFeasible(data.candidate, pending.input)))
+          render(data, job);
+      } else if (data.id === generation) {
         refresh();
-      } else render(data);
+      }
+    } catch (err) {
+      calculationFailed(err.message);
+    } finally {
+      dispatch();
     }
-    dispatch();
   };
   worker.onerror = (e) => {
-    workerBusy = false;
-    invalidate();
-    notify('计算模块错误：' + e.message);
+    inFlight = pending = null;
+    calculationFailed('计算模块错误：' + e.message);
   };
   selectedAssets();
   feeds = mountFeedUI($('feed-root'), {
     getAsset: current,
     onUpdate: (next) => {
       if (next.assetId !== id) return;
+      const sameContext = feedContext(snapshot) === feedContext(next);
+      const accountChanged = sameContext && state.config.useExternalAccounts !== false &&
+        feedContext(snapshot, true) !== feedContext(next, true);
       snapshot = next;
       feedCache.set(id, next);
-      refresh();
+      refresh(sameContext, accountChanged);
     }
   });
   simulation = mountSimulation($('sim-root'), {
@@ -365,7 +470,7 @@ function setup() {
     getAssets: allMarkets,
     getConfig: () => state.config,
     getOrder: safeOrder,
-    getCandidate: () => display?.candidate,
+    getCandidate: () => (currentResult() ? display.candidate : null),
     getAccount: () => getInputs().account,
     onChange: () => {
       refresh();
@@ -461,25 +566,25 @@ $('solve').onclick = () => {
   inspected = null;
   refresh();
 };
-$('pin').onclick = () => {
-  pinned = { ...display.candidate.requested };
+$('pin').onclick = guard(() => {
+  pinned = safeOrder();
   refresh();
-};
+});
 $('clear-pin').onclick = () => {
   pinned = null;
   refresh();
 };
 $('scenario-buttons').onclick = (e) => {
   const key = e.target.closest('[data-scenario]')?.dataset.scenario;
-  if (key && display) {
+  if (key && currentResult()) {
     scenario = key;
-    const { asset, account, config } = getInputs();
+    const { asset, account, config } = display;
     showAxes(asset, display.candidate, account, config, key);
   }
 };
 $('candidates').onclick = (e) => {
   const index = e.target.closest('[data-choice]')?.dataset.choice;
-  if (index !== undefined && choices[index]?.requested) {
+  if (index !== undefined && choices[index]?.requested && currentResult()) {
     inspected = { ...choices[index].requested };
     mode = 'fixedVs';
     $('direction').value = inspected.vsLong ? 'long' : 'short';
@@ -510,11 +615,16 @@ window.addEventListener(
   })
 );
 setInterval(() => {
-  if (state && freshness !== issueKey()) refresh();
+  if (!state) return;
+  if (freshness !== issueKey()) refresh();
+  else if (display && !display.blocked && !display.historical && display.expires < Date.now()) {
+    if (inFlight || pending) markPreviousResult();
+    else refresh(true);
+  }
 }, 200);
 try {
   setup();
 } catch (e) {
   notify(e.message);
-  $('verdict').textContent = '无法验证 · ' + e.message;
+  showVerdictMessage('无法验证', e.message, 'bad');
 }

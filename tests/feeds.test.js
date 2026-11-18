@@ -216,6 +216,10 @@ test('VS 独立账户时刻随新报价保留，跨品种只有过期账户时�
   assert.equal(v.account.asOf, old);
   const snap = { assetId: a.id, mode: 'offline', vs: v, maxAgeMs: 5000, mappingVerified: true };
   assert.deepEqual(feedIssues(snap, t), ['VS 账户数据过期或时间未知。']);
+  const local = toMarketAsset(a, snap, t, false);
+  assert.equal(local.vs.account, null);
+  assert.ok(!local.sourceIssues.some((issue) => issue.includes('账户数据过期')));
+  assert.ok(toMarketAsset(a, snap, t + 6000, false).sourceIssues.some((issue) => issue.includes('报价过期')));
   assert.deepEqual(toMarketAsset(a, { ...snap, vs: { account: v.account } }, t).sourceIssues, [
     'VS 账户数据过期或时间未知。'
   ]);
