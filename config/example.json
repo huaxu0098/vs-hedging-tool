@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "rules": {
+    "initialCapital": 500,
+    "registrationFee": 91,
+    "vsStart": 10000,
+    "challengeTarget": 12000,
+    "challengeFail": 9400,
+    "fundedFail": 8000,
+    "payoutTarget": 11000,
+    "payoutShare": 0.8,
+    "triggerMode": "settled",
+    "minCash": 10,
+    "maxMarginPct": 90,
+    "minBuffer": 0,
+    "basisReserveBps": 2,
+    "closeSlippageBps": 1,
+    "maxRoundingDriftPct": 5,
+    "sortBy": "worst",
+    "vsCapUsd": 0,
+    "hypeCapUsd": 0,
+    "targets": [
+      10500,
+      11000,
+      11500
+    ],
+    "useExternalAccounts": true
+  }
+}

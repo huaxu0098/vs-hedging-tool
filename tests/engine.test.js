@@ -5,7 +5,12 @@ import { createTemplates } from '../src/assets.js';
 
 const now = Date.parse('2026-10-05T02:00:00Z');
 const order = { vsUsd: 2000, hypeUsd: 2000, vsLong: true };
-const product = id => createTemplates(now).find(asset => asset.id === id);
+// Archived v1 calculations used a 0.02% VS fee. Keep those regression fixtures reproducible.
+function product(id) {
+  const asset = createTemplates(now).find(item => item.id === id);
+  asset.vs.feeRate = 0.0002;
+  return asset;
+}
 const calc = (asset, overrides = {}, available = 500) => evaluate(asset, { ...order, ...overrides }, available, now);
 function near(actual, expected, tolerance = 1e-7) {
   assert.ok(Math.abs(actual - expected) < tolerance, `expected ${actual} to equal ${expected}`);

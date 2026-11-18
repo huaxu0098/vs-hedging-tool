@@ -1,0 +1,127 @@
+.fd,
+.fd-dialog {
+  color: #223c32;
+  font: inherit;
+}
+.fd header,
+.fd-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.fd h2,
+.fd h3 {
+  margin: 0 0 8px;
+}
+.fd p {
+  color: #546c5d;
+  line-height: 1.6;
+  margin: 8px 0;
+}
+.fd-card,
+.fd-fields {
+  background: #fff;
+  border: 1px solid #d8e3da;
+  border-radius: 10px;
+  padding: 16px;
+  margin: 12px 0;
+}
+.fd-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+  gap: 12px;
+}
+.fd label:not(.fd-check) {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 550;
+}
+.fd input:not([type='checkbox']),
+.fd select,
+.fd textarea {
+  box-sizing: border-box;
+  max-width: 100%;
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 9px;
+  background: #fff;
+  color: #24392d;
+  border: 1px solid #bcccbf;
+  border-radius: 6px;
+  font: inherit;
+}
+.fd textarea {
+  resize: vertical;
+}
+.fd button {
+  cursor: pointer;
+  padding: 7px 12px;
+  border-radius: 6px;
+  border: 1px solid #bdd0bf;
+  background: #f7faf7;
+  color: #17472e;
+  font: inherit;
+}
+.fd .fd-row {
+  justify-content: flex-start;
+  margin: 10px 0;
+}
+.fd .fd-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+.fd .fd-check input {
+  width: 16px;
+  height: 16px;
+}
+.fd-reading,
+.fd pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font:
+    13px/1.7 ui-monospace,
+    monospace;
+}
+.fd pre {
+  max-height: 270px;
+  overflow: auto;
+}
+.fd summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.fd #feed-fx {
+  margin: 12px 0;
+}
+.fd-dialog {
+  width: min(780px, 94vw);
+  max-height: 90vh;
+  overflow-y: auto;
+  border-radius: 12px;
+  border: 1px solid #bfd0c2;
+  background: white;
+  padding: 20px;
+}
+.fd-dialog::backdrop {
+  background: rgb(24 39 30 / 48%);
+}
+.fd-dialog form {
+  margin: 0;
+}
+.fd-dialog button {
+  margin: 7px 0;
+}
+.fd-dialog #vs-paste-error {
+  color: #885d23;
+}
+.fd #feed-health {
+  font-size: 13px;
+  color: #74572e;
+}

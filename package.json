@@ -1,12 +1,15 @@
 {
   "name": "vs-hype-hedge-matcher",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "VS × Hype 多品种动态对冲匹配器，本地线性合约模拟工具",
+  "description": "本地 VS × Hype 只读行情、双账本决策与情景回放工作台",
   "scripts": {
     "start": "node scripts/serve.js",
-    "test": "node --test"
+    "test": "node --test",
+    "test:browser": "node scripts/browser-acceptance.js"
   },
-  "engines": { "node": ">=22" }
+  "engines": {
+    "node": ">=22"
+  }
 }

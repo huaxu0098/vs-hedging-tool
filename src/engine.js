@@ -4,7 +4,7 @@ const positive = value => Number.isFinite(value) && value > 0;
 const nonnegative = value => Number.isFinite(value) && value >= 0;
 const label = value => typeof value === 'string' && value.trim().length > 0;
 
-function validateLeg(leg, name, asset, now, rates, reasons) {
+export function validateLeg(leg, name, asset, now, rates, reasons) {
   const reject = message => reasons.push(name + '：' + message);
   if (!leg) {
     reject('缺少合约参数');
@@ -53,7 +53,7 @@ function decimalParts(value) {
   return { coefficient: BigInt(integer + fraction), power: Number(exponent) - fraction.length };
 }
 
-function tradableQty(usd, leg, entry) {
+export function tradableQty(usd, leg, entry) {
   const amount = decimalParts(usd);
   const step = decimalParts(leg.step);
   let denominator = step.coefficient;
@@ -70,7 +70,7 @@ function tradableQty(usd, leg, entry) {
   return Number(String(steps * step.coefficient) + 'e' + step.power);
 }
 
-function grid(value, tick, up) {
+export function grid(value, tick, up) {
   const count = value / tick;
   if (!Number.isFinite(count) || Math.abs(count) >= Number.MAX_SAFE_INTEGER) return NaN;
   const nearest = Math.round(count);

@@ -1,103 +1,164 @@
 <!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#eff3ee">
-  <meta name="description" content="按实际可下单数量校验多品种线性合约的敞口、价格阈值与共享本金。">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='11' fill='%231c463b'/%3E%3Cpath d='M7 32 19 13h7L14 32zm15 0 12-19h7L29 32z' fill='%23c2eaa1'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="./styles.css">
-  <link rel="stylesheet" href="./editor.css">
-  <title>VS × Hype 多品种动态对冲匹配器</title>
-</head>
-<body>
-  <header class="appbar">
-    <div class="shell bar-content">
-      <a class="brand" href="#workbench" aria-label="VS × Hype 匹配工作台"><span class="brandmark" aria-hidden="true"></span>VS <i>×</i> Hype</a>
-      <nav aria-label="主导航">
-        <a href="#workbench" id="to-workbench">匹配工作台</a>
-        <a href="#ledger" id="to-ledger">资金流水</a>
-      </nav>
-      <span class="mode"><i class="dot"></i> 本地模拟</span>
-    </div>
-  </header>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#174535" />
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/editor.css" />
+    <title>VS × Hype 多品种动态对冲匹配器</title>
+  </head>
+  <body>
+    <header class="appbar">
+      <div class="wrap header-content">
+        <a href="#desk" class="brand"
+          ><span aria-hidden="true" class="brandmark">∕∕</span> VS <i>×</i> Hype</a
+        >
+        <nav aria-label="工作区">
+          <a href="#desk">决策工作台</a><a href="#feeds">行情接入</a><a href="#sim">账本与回放</a>
+        </nav>
+        <span class="mode-flag">模拟推演与决策辅助（非实盘自动下单）</span>
+      </div>
+    </header>
 
-  <main class="shell">
-    <div id="notice" role="status" hidden></div>
-    <section id="workbench">
+    <main class="wrap">
+      <div id="notice" role="status" hidden></div>
       <div class="title-row">
-        <h1>VS × Hype <span>多品种动态对冲匹配器</span></h1>
-        <button class="quiet refresh" id="refresh" type="button"><span aria-hidden="true">↻</span> 重放模拟报价</button>
-      </div>
-      <section class="asset-section" aria-labelledby="asset-heading">
-        <div class="section-heading compact">
-          <h2 id="asset-heading">选择品种</h2>
-          <button class="text-button" type="button" id="add-asset">＋ 新增自定义品种</button>
+        <div>
+          <h1>双平台仓位匹配工作台</h1>
+          <p id="state-label" class="sub"></p>
         </div>
-        <div id="assets" class="asset-list"></div>
-      </section>
-
-      <div class="dashboard">
-        <div class="stack">
-          <section class="panel order-panel">
-            <div class="panel-head"><h2>开仓设置</h2><button id="edit-asset" type="button" class="text-button">合约参数 <span aria-hidden="true">↗</span></button></div>
-            <div class="panel-inner">
-              <fieldset class="directions"><legend>对冲方向</legend>
-                <div class="segmented"><button type="button" id="direction-long">VS 多 / Hype 空</button><button type="button" id="direction-short">VS 空 / Hype 多</button></div>
-              </fieldset>
-              <label class="amount-label" for="vs-amount"><i class="venue-icon vs-icon"></i>VS 开仓金额</label>
-              <div class="money-input"><span>$</span><input id="vs-amount" type="number" min="0" step="any" inputmode="decimal" value="2000"><small>USD</small></div>
-              <div class="converted" id="vs-quantity"></div>
-              <label class="amount-label" for="hype-amount"><i class="venue-icon hype-icon"></i>Hype 开仓金额</label>
-              <div class="money-input"><span>$</span><input id="hype-amount" type="number" min="0" step="any" inputmode="decimal" value="2000"><small>USD</small></div>
-              <div class="converted" id="hype-quantity"></div>
-              <div class="reserve-row"><span>本次资金占用</span><strong id="reserve"></strong></div>
-              <button type="button" id="book" class="primary" disabled>记录模拟占用 <span aria-hidden="true">→</span></button>
-            </div>
-          </section>
-          <section class="capital-panel">
-            <div class="panel-head"><h2>共享本金</h2><span class="capital-mark" aria-hidden="true">▤</span></div>
-            <div class="capital-value"><span id="available">—</span><small>U 可用</small></div>
-            <div class="capital-track"><i id="capital-fill"></i></div>
-            <div class="capital-foot"><span>已占用 <b id="used">—</b></span><span>总本金 <b>500 U</b></span></div>
-          </section>
-        </div>
-        <div class="stack">
-          <section class="panel result-panel" aria-label="当前候选仓位的匹配结果">
-            <div class="panel-head"><h2>匹配结果</h2><span id="match-status" role="status" class="status neutral">正在计算</span></div>
-            <div id="reasons" hidden></div>
-            <div class="result-metrics">
-              <div><span>敞口匹配度</span><strong id="match-value">—</strong></div>
-              <div><span>净美元敞口</span><strong id="delta-value">—</strong></div>
-              <div><span>强平缓冲</span><strong id="buffer-value">—</strong><small id="buffer-percent"></small></div>
-            </div>
-            <div class="plot-block">
-              <div class="plot-title"><h3>价格情景</h3><div class="plot-key"><span class="key-vs">VS</span><span class="key-hype">Hype</span></div></div>
-              <div class="plot-sub" id="plot-sub"></div>
-              <div id="chart" role="img"></div>
-              <div id="price-lines" class="price-lines"></div>
-            </div>
-          </section>
-          <section class="panel contracts-panel">
-            <div class="panel-head"><h2>双边仓位明细</h2><span id="asset-benchmark" class="micro"></span></div>
-            <div id="details"></div>
-          </section>
+        <div class="actions">
+          <button id="account-edit">账户与规则</button><button id="contract-edit">合约规格</button>
         </div>
       </div>
-      <footer id="snapshot"></footer>
-    </section>
-
-    <section id="ledger" hidden>
-      <div class="title-row"><h1>资金流水</h1><label class="filter">筛选品种 <select id="ledger-filter"></select></label></div>
-      <section class="ledger-summary panel" id="ledger-summary"></section>
-      <section class="panel ledger-panel">
-        <div class="panel-head"><h2>模拟占用记录</h2><span id="entry-count" class="micro"></span></div>
-        <div id="entries"></div>
+      <div class="asset-strip">
+        <label for="asset">选择品种</label
+        ><select id="asset"></select
+        ><button id="asset-new" class="link">＋ 新增自定义品种</button> <span class="spacer"></span
+        ><button id="refresh-demo">重放模拟报价</button
+        ><select id="feed-switch" aria-label="行情来源">
+          <option value="live">Hype API 实时</option>
+          <option value="frozen">冻结实时快照</option>
+          <option value="offline">离线模拟</option></select
+        ><button id="paste-open">粘贴识别 VS 页面</button>
+      </div>
+      <section id="desk">
+        <div class="toolbar">
+          <div class="segments" aria-label="仓位计算模式">
+            <button data-mode="auto">自动最优匹配</button><button data-mode="fixedVs">固定 VS 调 Hype</button
+            ><button data-mode="fixedHype">固定 Hype 调 VS</button>
+          </div>
+          <label
+            >方向
+            <select id="direction">
+              <option value="both">搜索双向</option>
+              <option value="long">VS 多 / Hype 空</option>
+              <option value="short">VS 空 / Hype 多</option>
+            </select></label
+          >
+          <label
+            >排序
+            <select id="sort">
+              <option value="worst">最差情景最优</option>
+              <option value="success">达标剩余现金</option>
+              <option value="buffer">强平缓冲</option>
+              <option value="margin">较低保证金</option>
+            </select></label
+          >
+        </div>
+        <div class="ticket" id="ticket">
+          <div>
+            <label for="vs-size">VS 目标仓位（USD）</label
+            ><input id="vs-size" type="number" min="0" step="any" value="10000" /><input
+              type="range"
+              id="vs-slider"
+              min="0"
+              step="1"
+              aria-label="拖动 VS 仓位"
+            />
+          </div>
+          <div>
+            <label for="hype-size">Hype 目标仓位（USD）</label
+            ><input id="hype-size" type="number" min="0" step="any" value="1800" /><input
+              type="range"
+              id="hype-slider"
+              min="0"
+              step="1"
+              aria-label="拖动 Hype 仓位"
+            />
+          </div>
+          <button id="solve">求解另一边</button>
+        </div>
+        <section id="verdict" class="verdict" aria-live="polite"></section>
+        <div class="panorama">
+          <section class="panel venue" id="vs-panel"></section>
+          <section class="panel cross" id="cross-panel"></section>
+          <section class="panel venue" id="hype-panel"></section>
+        </div>
+        <div class="analytics">
+          <section class="panel" id="axis-panel">
+            <div class="panel-head">
+              <h2>双平台价格情景</h2>
+              <span id="axis-unit" class="muted"></span>
+            </div>
+            <div id="axis"></div>
+            <div class="scenario-controls" id="scenario-buttons">
+              <button data-scenario="passState">到通过 / 出金线</button
+              ><button data-scenario="failState">到失败线</button
+              ><button data-scenario="closeState">日内收盘</button>
+            </div>
+            <div id="scenario-result"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <h2>资金与风控验算</h2>
+              <button id="pin" class="link">固定此方案对比</button>
+            </div>
+            <div id="checks"></div>
+          </section>
+        </div>
+        <section class="panel broad">
+          <div class="panel-head">
+            <h2>候选与淘汰原因</h2>
+            <span id="candidates-note" class="muted"></span>
+          </div>
+          <div id="candidates"></div>
+        </section>
+        <section class="panel broad">
+          <div class="panel-head">
+            <h2>方案对比</h2>
+            <button class="link" id="clear-pin">清除对比</button>
+          </div>
+          <div id="comparison"></div>
+        </section>
+        <details class="panel broad">
+          <summary>出金目标对比与计算假设</summary>
+          <div id="assumptions"></div>
+        </details>
       </section>
-      <footer>每笔模拟占用从同一份 500 U 本金中扣留。释放时返还原预留金额。</footer>
-    </section>
-    <noscript>请启用 JavaScript 以运行本地模拟。</noscript>
-  </main>
-  <script type="module" src="./src/app.js"></script>
-</body>
+      <section id="feeds" hidden><div id="feed-root"></div></section>
+      <section id="sim" hidden>
+        <div class="sim-account-bar"><button id="follow-simulation">看板跟随本地模拟账本</button></div>
+        <div id="sim-root"></div>
+        <details class="panel broad">
+          <summary>品种与规则备份</summary>
+          <div class="backup-controls">
+            <button id="export-settings">导出品种与规则</button
+            ><label
+              >恢复品种与规则 <input id="import-settings" type="file" accept="application/json,.json"
+            /></label>
+          </div>
+        </details>
+        <details class="panel broad" id="legacy">
+          <summary>旧版资金占用记录</summary>
+          <div id="legacy-entries"></div>
+        </details>
+      </section>
+      <footer>VS × Hype 多品种动态对冲匹配器 · 本地只读行情与虚拟账本</footer>
+      <noscript>请启用 JavaScript 运行本地工作台。</noscript>
+    </main>
+    <script type="module" src="/src/app.js"></script>
+  </body>
 </html>
