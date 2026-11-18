@@ -46,6 +46,7 @@ let display = null,
   inFlight = null,
   pending = null,
   freshness;
+let projectionIssue = '';
 let worker, drawTrade = () => {};
 const tradePage = location.pathname === '/trade.html';
 const current = () => state.assets.find((a) => a.id === id);
@@ -279,6 +280,7 @@ function refresh(quoteUpdate = false, accountChanged = false) {
       asset.sourceIssues.push(reason);
       errors.push(reason);
     }
+    projectionIssue = errors[0] ?? '';
     if (accountChanged) {
       accountVersion++;
       if (!errors.length && !stillFeasible(display?.candidate, { asset, account, config }))
@@ -315,6 +317,7 @@ function refresh(quoteUpdate = false, accountChanged = false) {
   }
 }
 function calculationFailed(message) {
+  projectionIssue = message;
   contextVersion++;
   invalidate();
   showVerdictMessage('无法验证', message, 'bad');
@@ -490,7 +493,7 @@ function setup() {
     }
   });
   if (tradePage) drawTrade = mountTradeDesk({
-    read: () => ({ display, snapshot, asset: current() }), current: currentResult, getSim: () => getSimulation(state.config)
+    read: () => ({ display, snapshot, asset: current(), projectionIssue }), current: currentResult, getSim: () => getSimulation(state.config)
   });
   tab();
   refresh();
@@ -577,6 +580,30 @@ for (const v of ['vs', 'hype']) {
   $(v + '-size').oninput = () => inspectEdit(v, false);
   $(v + '-slider').oninput = () => inspectEdit(v, true);
 }
+function showTradeOptions(expanded) {
+  document.body.classList.toggle('trade-options-open', expanded);
+  $('trade-options').setAttribute('aria-expanded', String(expanded));
+  $('trade-options').textContent = expanded ? '收起设置' : '展开设置';
+}
+$('trade-demo').onclick = guard(() => {
+  if (snapshot?.mode === 'offline') $('refresh-demo').click();
+  else feeds.setMode('offline');
+});
+$('trade-options').onclick = () => showTradeOptions($('trade-options').getAttribute('aria-expanded') !== 'true');
+$('trade-adjust').onclick = () => {
+  if (matchMedia('(max-width: 600px)').matches) showTradeOptions(true);
+  const order = display?.candidate?.requested;
+  mode = 'fixedVs';
+  if (order) {
+    inspected = { ...order };
+    $('direction').value = order.vsLong ? 'long' : 'short';
+    $('vs-size').value = order.vsUsd;
+    $('hype-size').value = order.hypeUsd;
+  }
+  refresh();
+  $('vs-size').focus();
+  $('vs-size').select();
+};
 $('solve').onclick = () => {
   inspected = null;
   refresh();

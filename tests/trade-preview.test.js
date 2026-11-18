@@ -43,6 +43,7 @@ test('考核模型分别给出新增现金利润与全周期利润；已扣报�
   near(pass.cashAfterPayout, pass.cash);
   near(fail.price, result.candidate.fail);
   assert.equal(liq.status, 'preempted');
+  assert.equal(liq.first, 'pass');
   assert.equal(liq.cash, null);
   assert.ok(result.candidate.hype.margin > 200);
 });
@@ -87,7 +88,15 @@ test('Hype 强平先于通过时，只给强平触发价与已核实的另一方
   assert.equal(candidate.checks.capital, true);
   assert.equal(pass.status, 'preempted');
   assert.equal(pass.profit, null);
+  assert.equal(pass.first, 'liq');
   assert.equal(liq.status, 'conditional');
+  near(
+    liq.positionGross,
+    candidate.hype.targetQty *
+      inputs.asset.hype.multiplier *
+      inputs.asset.hype.settleUsd *
+      (candidate.liqMark - candidate.hype.avgEntry)
+  );
   near(liq.price, candidate.liq);
   near(liq.localPrice, candidate.liqMark);
   assert.equal(liq.cash, null);
@@ -132,4 +141,49 @@ test('反方向路径、同时触线、资金不足、已失效与无交易方�
     candidate
   );
   assert.equal(stale.scenarios.pass.reason, '报价过期');
+});
+
+test('到收盘都未触线且价格不变，显示扣费后的日内结果与回本差额', () => {
+  const inputs = setup();
+  const result = preview(inputs, { initialCapital: 550 });
+  const { close, fail } = result.scenarios;
+  assert.equal(close.status, 'conditional');
+  assert.ok(close.profit < 0);
+  near(close.profit, result.candidate.closeState.hypeCash - result.startingEquity);
+  near(fail.totalProfit, result.candidate.failGap);
+  near(close.totalProfit, close.cash - 550);
+  near(close.pendingPayout, 0);
+});
+test('当前价格已经触发强平时，两条 VS 路径和原价收盘均不能列为可结算收益', () => {
+  const inputs = setup();
+  const { candidate } = preview(inputs);
+  const mark = inputs.asset.referencePrice;
+  const { scenarios } = buildTradePreview(
+    inputs.asset,
+    inputs.account,
+    {},
+    { ...candidate, liq: mark, liqMark: mark }
+  );
+  for (const key of ['pass', 'fail', 'close']) {
+    assert.equal(scenarios[key].first, 'liq');
+    assert.equal(scenarios[key].cash, null);
+  }
+  assert.equal(scenarios.liq.status, 'conditional');
+});
+
+test('手工强平价已被当前标记价越过时，需要核对持仓，不沿任一方向声称可达', () => {
+  const inputs = setup();
+  const { candidate } = preview(inputs);
+  const mark = inputs.asset.referencePrice - 1;
+  const { scenarios } = buildTradePreview(
+    inputs.asset,
+    inputs.account,
+    {},
+    { ...candidate, liq: mark, liqMark: mark }
+  );
+  for (const row of Object.values(scenarios)) {
+    assert.equal(row.status, 'unverified');
+    assert.match(row.reason, /越过/);
+    assert.equal(row.cash, null);
+  }
 });

@@ -223,7 +223,7 @@ export function showVerdict(a, c, result, matchedTitle = null) {
   const detail = ok
     ? c.runway?.ok
       ? '按当前假设可安全续航至首次出金。'
-      : '仅可完成本阶段，详见续航验算。'
+      : c.runway?.reason ? '仅可完成本阶段。' + c.runway.reason + '。' : '仅可完成本阶段。'
     : reason(c) || result?.reasons?.join(' · ') || '未找到可行候选，维持不交易。';
   renderVerdict(state, {
     title: ok && matchedTitle ? matchedTitle : labelStatus(c),

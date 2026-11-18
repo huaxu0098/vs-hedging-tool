@@ -191,17 +191,28 @@ async function main() {
     assert.ok(await desk.run(sel('#trade-send') + '.disabled'));
     for (const id of ['pass', 'fail', 'liq'])
       assert.match(await desk.text('#trade-' + id + '-price'), /[\d]/);
-    await set(desk, '#trade-scenario', 'fail');
-    const fail = await desk.text('#trade-pnl');
-    await set(desk, '#trade-scenario', 'pass');
-    assert.match(fail, /\d/);
-    assert.match(await desk.text('#trade-pnl'), /\d/);
-    assert.notEqual(await desk.text('#trade-pnl'), fail);
-    await set(desk, '#trade-scenario', 'liq');
-    assert.match(
-      (await desk.text('#trade-pnl-note')) + ' ' + (await desk.text('#trade-pnl')),
-      /先触及|清算|待核实|结算|无法|未知|不可达/
-    );
+    const fail = await desk.text('#trade-fail-pnl');
+    const pass = await desk.text('#trade-pass-pnl');
+    assert.match(fail, /^\+[\d,.]+ U$/);
+    assert.match(pass, /^-[\d,.]+ U$/);
+    assert.match(await desk.text('#trade-close-pnl'), /^-[\d,.]+ U$/);
+    assert.match(await desk.text('#trade-liq-note'), /VS 考核通过先于 Hype 强平/);
+    assert.ok((await desk.text('#trade-liq-note')).includes(pass));
+    assert.match(await desk.text('#trade-fail-detail'), /结算后个人现金.*超过回本线/);
+    assert.match(await desk.text('#trade-pass-detail'), /结算后个人现金.*距回本还差/);
+    assert.match(await desk.text('#trade-buffer'), /[\d.]%）/);
+    await desk.click('#trade-adjust');
+    await desk.wait("document.activeElement.id==='vs-size' && !document.querySelector('#ticket').hidden");
+    await set(desk, '#direction', 'long');
+    await set(desk, '#vs-size', '15000', 'input');
+    await set(desk, '#hype-size', '3600', 'input');
+    await desk.wait(sel('#trade-pass-pnl') + ".textContent==='Hype 会先强平'");
+    assert.match(await desk.text('#trade-liq-note'), /预计浮盈亏为 -[\d,.]+ U/);
+    assert.match(await desk.text('#trade-fail-pnl'), /^\+[\d,.]+ U$/);
+    assert.ok(await desk.run(sel('#trade-send') + '.disabled'));
+    await set(desk, '#direction', 'both');
+    await desk.click('[data-mode="auto"]');
+    await desk.wait(sel('#trade-pass-pnl') + '.textContent===' + JSON.stringify(pass));
     assert.deepEqual(await events(), unknown);
     await set(desk, '#asset', 'eth');
     await desk.wait(
@@ -216,6 +227,30 @@ async function main() {
     );
     await set(desk, '#asset', 'btc');
     await desk.wait(sel('#trade-pass-price') + '.textContent===' + JSON.stringify(original));
+    await desk.click('#account-edit');
+    await set(desk, '[name="source"]', 'manual');
+    await set(desk, '[name="stage"]', 'funded');
+    await desk.click('.settings-dialog button.primary');
+    await desk.wait("document.querySelector('#trade-payout-detail')?.offsetHeight > 0");
+    assert.equal(await desk.text('#trade-pass-label'), '若首次出金到账');
+    assert.match(await desk.text('#trade-pass-pnl'), /^\+[\d,.]+ U$/);
+    assert.match(await desk.text('#trade-payout-detail'), /仅达标平仓时，本次净盈亏 -.*预计首笔分成.*尚待到账/);
+    await desk.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    assert.ok(await desk.run("!document.querySelector('#trade-rule-actions').offsetHeight && document.querySelector('#trade-options').offsetHeight > 0"));
+    assert.ok(await desk.run("document.documentElement.scrollWidth <= innerWidth + 1"));
+    await desk.click('#trade-options');
+    await desk.click('#account-edit');
+    await set(desk, '[name="source"]', 'ledger');
+    await desk.click('.settings-dialog button.primary');
+    await desk.wait("document.querySelector('#trade-pass-label').textContent==='VS 考核通过' && !document.querySelector('#trade-payout-detail').offsetHeight");
+    await desk.click('#trade-options');
+    await desk.send('Emulation.clearDeviceMetricsOverride');
+    await set(desk, '#feed-switch', 'frozen');
+    await desk.wait("document.querySelector('#trade-profit-body').hidden && /冻结/.test(document.querySelector('#trade-profit-wait').textContent)");
+    assert.ok(await desk.run(sel('#trade-send') + '.disabled'));
+    await desk.click('#trade-demo');
+    await desk.wait(sel('#trade-pass-pnl') + '.textContent===' + JSON.stringify(pass) + " && !document.querySelector('#trade-profit-body').hidden");
+    console.log('PASS 通过、失败与原价收盘同屏；强平抢先保留另一方向；首笔出金到账前后、手机设置、冻结清除可见估算');
     await desk.click('nav a[href="#sim"]');
     await desk.wait("!document.querySelector('#sim').hidden");
     await desk.click('[data-op="target"]');
@@ -285,9 +320,13 @@ async function main() {
     await venues.vs.click('#qa-copy');
     await venues.vs.wait("document.body.innerText.includes('已核对当前账户')");
     await desk.wait('!' + sel('#trade-send') + '.disabled');
-    const firstBinding = await desk.run(
-      'JSON.parse(' + sel('#trade-controls') + '.dataset.plan).legs[0].accountContext'
-    );
+    // Quote updates can withdraw a plan between two CDP messages. Capture one
+    // freshly verified plan within a single browser evaluation.
+    const readFreshPlan = async () => {
+      await desk.wait("!!(window.qaFreshPlan = JSON.parse(document.querySelector('#trade-controls').dataset.plan || 'null'))");
+      return desk.run('window.qaFreshPlan');
+    };
+    const firstBinding = (await readFreshPlan()).legs[0].accountContext;
     await venues.vs.click('[data-testid="account-selector-trigger"] > div > span');
     await desk.wait(
       sel('#trade-send') + '.disabled && !window.qaAccount.accountContext'
@@ -326,7 +365,7 @@ async function main() {
     } catch (e) {
       throw Error(e.message + ' ' + (await desk.text('#trade-why')) + ' ' + (await desk.text('#verdict')));
     }
-    const plan = await desk.run('JSON.parse(' + sel('#trade-controls') + '.dataset.plan)');
+    const plan = await readFreshPlan();
     assert.notEqual(plan.legs[0].accountContext, firstBinding);
     assert.doesNotMatch(JSON.stringify(plan), /QA-587/);
     console.log('PASS 本人授权并点击当前账户的复制图标才绑定，切换账号失效，新绑定更新标识');
