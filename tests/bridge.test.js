@@ -51,6 +51,18 @@ test('本机桥限制来源、品种和授权字段，旋转配对及撤销立�
       400
     );
     assert.equal((await post('/api/vs-snapshot', data, origin, pairing.token)).status, 202);
+    const claimed = { accountContext: 'opaque', outcome: { status: 'passed', source: 'vest-page' } };
+    assert.equal(
+      (
+        await post(
+          '/api/vs-snapshot',
+          { ...data, snapshot: { ...data.snapshot, account: claimed } },
+          origin,
+          pairing.token
+        )
+      ).status,
+      400
+    );
     assert.equal((await (await fetch(base + '/api/bridge/latest')).json()).snapshot.bid, 50);
     assert.equal(
       (await post('/api/hype-info', { network: 'mainnet', request: { type: 'unknown' } })).status,

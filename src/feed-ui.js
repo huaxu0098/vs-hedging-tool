@@ -153,11 +153,32 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
     return leg;
   }
   function snapshot() {
+    const evidence = vs?.account?.outcome;
+    const fresh = (asOf) => {
+      const age = Date.now() - Date.parse(asOf);
+      return age >= 0 && age <= config.maxAgeMs;
+    };
+    const current =
+      mode === 'live' &&
+      auto?.active &&
+      !vsAutoAccountIssue &&
+      !dirty &&
+      vs?.account?.source === 'VS 网页自动识别' &&
+      vs.account.boundAssetId === asset.id &&
+      vs.account.boundSymbol === config.vsSymbol &&
+      fresh(vs.account.asOf);
+    let visibleVS = vs;
+    if (vs?.account?.accountContext && (!current || (evidence && !fresh(evidence.asOf)))) {
+      const account = { ...vs.account };
+      delete account.outcome;
+      if (!current) delete account.accountContext;
+      visibleVS = { ...vs, account };
+    }
     const result = {
       assetId: asset.id,
       scopeId,
       mode,
-      vs,
+      vs: visibleVS,
       hype,
       errors: [...errors],
       frozen: mode === 'frozen',
@@ -169,6 +190,8 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
       mappingVerified: config.verified && !dirty,
       updatedAt: new Date().toISOString(),
       addressConfigured: !!config.address,
+      accountAddress: config.address,
+      endpoint: config.endpoint,
       marginMode: config.marginMode,
       quoteCurrency: config.quoteCurrency,
       vestContract,
@@ -250,7 +273,14 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
           '×'
       );
     $('feed-values').textContent = lines.join('\n');
-    return problems.join('|');
+    const observed = snap.vs?.account?.outcome;
+    $('feed-auto-outcome').textContent = observed
+      ? 'VS 页面已确认' +
+        (observed.status === 'passed' ? '考核通过' : '账户失败') +
+        ' · ' +
+        new Date(observed.asOf).toLocaleTimeString()
+      : 'VS 账户结果未知';
+    return JSON.stringify([problems, snap.vs?.account?.accountContext, observed?.status, observed?.asOf]);
   }
   function emit(force = true) {
     if (dead || !asset) return;
@@ -330,10 +360,10 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
     const liveVest =
       vestContract &&
       vestContract.symbol === config.vsSymbol &&
-      (vs?.source === 'Vest 公开行情' || (!vs?.bid && auto?.active));
+      (vs?.source === 'Vest 公开行情' || vs?.account?.accountContext || (!vs?.bid && auto?.active));
     const bindings = [
       { side: 'vs', kind: 'quote', code: liveVest ? vestContract.quote : asset.vs.quote },
-      { side: 'vs', kind: 'settle', code: asset.vs.settle },
+      { side: 'vs', kind: 'settle', code: vs?.account?.accountContext && ['BTC-PERP','ETH-PERP','SOL-PERP'].includes(vs.symbol) ? 'USDC' : asset.vs.settle },
       { side: 'vs', kind: 'account', code: vs?.account?.currency },
       { side: 'hype', kind: 'quote', code: config.quoteCurrency || asset.hype.quote },
       { side: 'hype', kind: 'settle', code: asset.hype.settle }
@@ -758,6 +788,37 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
     },
     apply(candidate, source) {
       const checked = parseVSText(JSON.stringify(candidate));
+      const account = candidate.account;
+      if (
+        source === 'VS 网页自动识别' &&
+        candidate.symbol === config.vsSymbol &&
+        typeof account?.accountContext === 'string' &&
+        /^[a-f0-9-]{36}$/i.test(account.accountContext) &&
+        Number.isFinite(Date.parse(account.asOf))
+      ) {
+        Object.assign(checked.account, {
+          accountContext: account.accountContext,
+          asOf: account.asOf,
+          boundAssetId: asset.id,
+          boundSymbol: candidate.symbol
+        });
+        const e = account.outcome;
+        if (
+          e?.source === 'vest-page' &&
+          ['passed', 'failed'].includes(e.status) &&
+          e.symbol === candidate.symbol &&
+          e.accountContext === account.accountContext &&
+          Number.isFinite(Date.parse(e.asOf)) &&
+          Date.parse(e.asOf) <= Date.now()
+        )
+          checked.account.outcome = {
+            status: e.status,
+            asOf: e.asOf,
+            source: 'vest-page',
+            symbol: candidate.symbol,
+            accountContext: account.accountContext
+          };
+      }
       const accountCurrency = candidate.account?.currency;
       if (
         Object.keys(checked.account).length &&
@@ -777,6 +838,13 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
       }
     },
     accountLost(reason) {
+      if (reason && sharedVSAccount?.accountContext) {
+        const clean = { ...sharedVSAccount };
+        delete clean.accountContext;
+        delete clean.outcome;
+        sharedVSAccount = clean;
+        if (vs) vs = { ...vs, account: clean };
+      }
       if (vsAutoAccountIssue !== reason) {
         vsAutoAccountIssue = reason;
         emit();

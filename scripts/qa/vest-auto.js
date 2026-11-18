@@ -26,6 +26,8 @@ function marketPage(symbol, mark, balance) {
     field('open', 'Market Status', 'Open') +
     '</dl></section>' +
     '<section aria-label="Account overview"><h2>Account overview</h2><dl>' +
+    field('acct-id', 'Account ID', 'TEST-4062') +
+    field('eval-result', 'Evaluation status', 'Passed') +
     field('balance', 'Balance', fmt(balance)) +
     field('equity', 'Equity', fmt(balance + gross)) +
     field('used', 'Used Margin', '20') +
@@ -153,6 +155,10 @@ async function main() {
     const seen = await desk.run("window.qaAutoEvents.filter(e=>e.type==='snapshot').at(-1)?.snapshot");
     assert.equal(seen.account.positions[0].symbol, 'BTC-PERP');
     assert.equal(seen.account.positions[0].qty, 0.002);
+    assert.equal(seen.account.outcome.status, 'passed');
+    assert.equal(seen.account.outcome.accountContext, seen.account.accountContext);
+    assert.doesNotMatch(JSON.stringify(seen), /TEST-4062/);
+    assert.match(await desk.text('#feed-auto-outcome'), /页面已确认考核通过/);
     pass('看板真实点击启动，已打开的 BTC-PERP 标签自动传入初始报价、账户净值和剩余保证金');
     await mutate(first, 100041, 10940);
     await waitForQuote(100041);
@@ -165,6 +171,7 @@ async function main() {
     );
     await desk.wait("document.querySelector('#feed-health').textContent.includes('VS 报价过期')", 9000);
     assert.equal(await quoteTime(), at, '无关 DOM 重绘不得重签报价时间');
+    await desk.wait("document.querySelector('#feed-auto-outcome').textContent.includes('结果未知')", 4000);
     assert.doesNotMatch(await desk.text('#verdict'), /匹配可交易/);
     await first.run('clearInterval(window.qaTicker)');
     pass('装饰区域持续刷新而盘口静止，原报价时间保持不变并熔断');

@@ -132,6 +132,49 @@ test('真实 Chrome 的 Vest 可见 DOM 读数与保守拒识', async (t) => {
       assert.equal((await read(html, 'https://other.example/trade/ETH-PERP')).symbol, null);
       assert.equal((await read(html, market + '/orders')).symbol, null);
     });
+    await t.test('考核结果只来自唯一当前账户身份与结果字段，账户和连接切换即解绑', async () => {
+      await browser.send('Page.navigate', { url: browser.url + '/config/example.json' });
+      await browser.wait("location.pathname==='/config/example.json' && document.body");
+      await browser.run(code);
+      const account = (id, label, value, extra = '') =>
+        area(
+          'Current account',
+          '<dl>' + (id ? field('Account ID', id) : '') + field(label, value) + extra + '</dl>'
+        );
+      const iso = '2026-02-03T02:01:00.000Z';
+      const html = account('A-1234', 'Evaluation status', 'Passed', field('Account timestamp', iso));
+      const accepted = (await read(html)).account;
+      assert.deepEqual(accepted.outcome, { status: 'passed', asOf: iso });
+      assert.match(accepted.accountContext, /^[a-f0-9-]{36}$/i);
+      assert.ok(!JSON.stringify(accepted).includes('1234'));
+      const same = (await read(html + area('Orders', field('Account status', 'Failed')))).account;
+      assert.equal(same.accountContext, accepted.accountContext);
+      const change = (await read(account('A-8942', '账户状态', '账户爆号'))).account;
+      assert.notEqual(change.accountContext, accepted.accountContext);
+      assert.equal(change.outcome.status, 'failed');
+      for (const [label, value] of [
+        ['Stage', 'Funded'],
+        ['Order status', 'Fulfilled'],
+        ['账户状态', '考核通过后可出金'],
+        ['Equity', '0'],
+        ['Evaluation status', 'Active']
+      ]) {
+        assert.equal((await read(account('A-8942', label, value))).account?.outcome, undefined);
+      }
+      assert.equal((await read(account(null, 'Evaluation status', 'Passed'))).account?.outcome, undefined);
+      assert.equal(
+        (await read(html + account('A-1234', 'Evaluation status', 'Passed'))).account?.outcome,
+        undefined
+      );
+      assert.equal(
+        (await read(account('A-1234', 'Evaluation status', 'Passed', field('账户状态', '失败')))).account
+          ?.outcome,
+        undefined
+      );
+      const before = (await read(html)).account.accountContext;
+      await browser.run('resetVestAccountBinding(document)');
+      assert.notEqual((await read(html)).account.accountContext, before);
+    });
   } finally {
     await browser.close();
   }

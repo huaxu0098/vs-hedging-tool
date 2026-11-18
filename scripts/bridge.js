@@ -43,6 +43,9 @@ function infoBody(body) {
   if (!isRecord(r)) return false;
   const dex = r.dex === undefined || (typeof r.dex === 'string' && /^[\w-]{1,48}$/.test(r.dex));
   if (r.type === 'metaAndAssetCtxs') return dex && exact(r, new Set(['type', 'dex']));
+  if (r.type === 'userNonFundingLedgerUpdates')
+    return exact(r, new Set(['type','user','startTime'])) && /^0x[\da-fA-F]{40}$/.test(r.user) &&
+      Number.isSafeInteger(r.startTime) && r.startTime > 0 && r.startTime <= Date.now();
   if (r.type === 'spotMeta') return exact(r, new Set(['type']));
   if (r.type === 'l2Book')
     return (

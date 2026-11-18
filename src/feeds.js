@@ -511,8 +511,13 @@ export function toMarketAsset(asset, snap, now = Date.now(), useExternalAccounts
     }
   }
   // Feed observations describe prices, not a replacement contract specification.
+  // Vest's official venue uses cross margin for perpetual contracts.
+  if (snap.vs?.source === 'Vest 公开行情' || snap.vs?.account?.accountContext) vs.marginMode = 'cross';
   vs.quote = asset.vs.quote;
-  vs.settle = asset.vs.settle;
+  const officialAccount = snap.vs?.account?.accountContext &&
+    ['BTC-PERP', 'ETH-PERP', 'SOL-PERP'].includes(snap.vs.symbol);
+  vs.settle = officialAccount ? 'USDC' : asset.vs.settle;
+  if (officialAccount && snap.vestContract?.symbol === snap.vs.symbol) vs.quote = snap.vestContract.quote;
   vs.quoteScale = asset.vs.quoteScale;
   vs.ratio = asset.vs.ratio;
   hype.settle = asset.hype.settle;

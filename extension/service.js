@@ -18,7 +18,7 @@ function allowed(port) {
   try {
     const url = new URL(sender.url);
     if (port.name === 'vs-desk')
-      return url.origin === localOrigin && ['/', '/index.html'].includes(url.pathname);
+      return url.origin === localOrigin && (globalThis.vsAutoConfig.deskPage ? url.pathname === globalThis.vsAutoConfig.deskPage : ['/', '/index.html'].includes(url.pathname));
     return (
       port.name === 'vs-source' &&
       url.origin === 'https://next.vestmarkets.com' &&

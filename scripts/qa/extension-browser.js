@@ -87,7 +87,7 @@ function protocol(child) {
   };
 }
 
-export async function extensionBrowser() {
+export async function extensionBrowser({ buildExtension } = {}) {
   const executable = await chooseChrome();
   const dir = await mkdtemp(path.join(tmpdir(), 'vs-vest-collect-'));
   let chrome, server;
@@ -106,15 +106,18 @@ export async function extensionBrowser() {
     const url = String(ready).match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
     if (!url) throw Error('隔离的本地服务未返回回环地址');
     const extDir = path.join(dir, 'extension');
-    await cp(path.join(root, 'extension'), extDir, { recursive: true });
-    const cfg = path.join(extDir, 'config.js'),
-      original = await readFile(cfg, 'utf8');
-    const patched = original.replace(
-      /(deskPort\s*:\s*['"])4178(['"])/,
-      (_, begin, end) => begin + new URL(url).port + end
-    );
-    if (patched === original) throw Error('测试扩展未能精确绑定临时服务端口');
-    await writeFile(cfg, patched);
+    if (buildExtension) await buildExtension(extDir, new URL(url).port);
+    else {
+      await cp(path.join(root, 'extension'), extDir, { recursive: true });
+      const cfg = path.join(extDir, 'config.js'),
+        original = await readFile(cfg, 'utf8');
+      const patched = original.replace(
+        /(deskPort\s*:\s*['"])4178(['"])/,
+        (_, begin, end) => begin + new URL(url).port + end
+      );
+      if (patched === original) throw Error('测试扩展未能精确绑定临时服务端口');
+      await writeFile(cfg, patched);
+    }
     const profile = path.join(dir, 'profile');
     await mkdir(profile);
     chrome = spawn(
@@ -127,6 +130,7 @@ export async function extensionBrowser() {
         '--no-first-run',
         '--no-default-browser-check',
         '--disable-background-networking',
+        '--no-proxy-server',
         '--disable-background-timer-throttling',
         '--disable-renderer-backgrounding',
         '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1',
@@ -183,7 +187,7 @@ export async function extensionBrowser() {
           await delay(65);
         }
         const status = await run(
-          "['feed-auto-status','feed-health','feed-values','notice'].map(k=>document.getElementById(k)?.textContent).filter(Boolean).join(' | ')"
+          "['trade-feedback','trade-why','feed-auto-status','feed-health','feed-values','notice'].map(k=>document.getElementById(k)?.textContent).filter(Boolean).join(' | ')"
         );
         throw Error('等待超时 ' + expression + '\n' + status.slice(0, 1300));
       }

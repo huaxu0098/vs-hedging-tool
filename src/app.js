@@ -1,5 +1,6 @@
 import { escapeHTML as h, number as n, money, stateNames } from './format.js';
 import { analyzeCandidate, decisionInputIssues } from './decision.js';
+import { mountTradeDesk } from './trade-view.js';
 import { openEditor } from './editor.js';
 import { openSettings } from './settings.js';
 import {
@@ -11,7 +12,7 @@ import {
   strategyBackup,
   loadStrategyBackup
 } from './workspace-state.js';
-import { accountView, getSimulation, SIM_KEY } from './simulation.js';
+import { accountView, createSimulation, getSimulation, SIM_KEY } from './simulation.js';
 import { mountSimulation } from './simulation-ui.js';
 import { mountFeedUI } from './feed-ui.js';
 import { toMarketAsset } from './feeds.js';
@@ -45,11 +46,15 @@ let display = null,
   inFlight = null,
   pending = null,
   freshness;
-let worker;
+let worker, drawTrade = () => {};
+const tradePage = location.pathname === '/trade.html';
 const current = () => state.assets.find((a) => a.id === id);
 const feedCache = new Map();
-function allMarkets() {
-  const held = getSimulation(state.config).positions;
+function hasOfficialAccounts() {
+  return tradePage && state.config.useExternalAccounts !== false && snapshot?.mode === 'live' &&
+    snapshot.vs?.account?.accountContext && snapshot.accountAddress && snapshot.hype?.account;
+}
+function allMarkets(held = getSimulation(state.config).positions) {
   const catalog = [...state.assets];
   for (const p of held) if (p.asset && !catalog.some((a) => a.id === p.assetId)) catalog.push(p.asset);
   return catalog.map((a) => {
@@ -74,22 +79,20 @@ function guard(fn) {
   };
 }
 function getInputs() {
-  const config = state.config,
-    old = legacy(),
-    assets = allMarkets(),
-    asset = assets.find((a) => a.id === id);
-  const sim = getSimulation(config);
-  const local = accountView(sim, assets, config, old.used);
+  const config = state.config;
+  const official = hasOfficialAccounts();
+  // Live wallets supply their own balances, holds and positions. A simulated
+  // liquidation or reservation belongs only to the local replay ledger.
+  const sim = official ? createSimulation(config) : getSimulation(config);
+  if (official) sim.externalUnrecovered = state.manual?.externalUnrecovered ?? 0;
+  const held = official ? 0 : legacy().used;
+  const assets = allMarkets(sim.positions), asset = assets.find((a) => a.id === id);
+  const local = accountView(sim, assets, config, held);
   const { account, issues } = dashboardAccount(
-    local,
-    state.manual,
-    state.config.useExternalAccounts === false ? null : snapshot,
-    asset,
-    assets,
-    old.used
+    local, official ? null : state.manual, config.useExternalAccounts === false ? null : snapshot, asset, assets, held
   );
   const otherIssues = assets
-    .filter((a) => a.id !== id && sim.positions.some((p) => p.assetId === a.id))
+    .filter((a) => a.id !== id && account.positions.some((p) => p.assetId === a.id))
     .flatMap((a) => a.sourceIssues ?? []);
   if (sim.observation) issues.push('模拟账本已记录尚未结算的首个触线事件，详见账本与回放。');
   asset.sourceIssues = [...(asset.sourceIssues ?? []), ...issues, ...otherIssues];
@@ -101,13 +104,18 @@ function safeOrder() {
   return { ...display.candidate.requested };
 }
 function tab() {
-  const active = ['feeds', 'sim'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'desk';
-  for (const key of ['feeds', 'sim', 'desk']) {
-    $(key).hidden = key !== active;
-    const link = document.querySelector('nav a[href="#' + key + '"]');
-    if (key === active) link.setAttribute('aria-current', 'page');
-    else link.removeAttribute('aria-current');
+  const route = location.hash.slice(1);
+  const active = ['feeds','sim','desk'].includes(route) ? route : (tradePage ? 'trade' : 'desk');
+  document.body.classList.toggle('trade-desk', active === 'trade');
+  for (const key of ['feeds','sim','desk','trade']) {
+    $(key).hidden = key !== active && !(key === 'desk' && active === 'trade');
+    const link = key === 'trade' ? $('trade-nav') : document.querySelector('nav a[href="#' + key + '"]');
+    if (key === active) link.setAttribute('aria-current','page'); else link.removeAttribute('aria-current');
   }
+  document.querySelector('footer').textContent = tradePage ? 'VS × Hype 多品种动态对冲匹配器 · 双边网页委托' : 'VS × Hype 多品种动态对冲匹配器 · 本地只读行情与虚拟账本';
+  $('page-title').textContent = active === 'trade' ? '双边一键开仓' : '双平台仓位匹配工作台';
+  $('page-mode').textContent = active === 'trade' ? '网页委托 · 本人点击提交' : '模拟推演与决策辅助（非实盘自动下单）';
+  drawTrade();
   if (active === 'sim') {
     simulation?.refresh();
     renderLegacy();
@@ -149,10 +157,10 @@ function top() {
 }
 function issueKey() {
   if (!state) return '';
-  const assets = allMarkets(),
-    asset = assets.find((a) => a.id === id);
+  const official = hasOfficialAccounts();
+  const assets = official ? allMarkets([]) : allMarkets(), asset = assets.find((a) => a.id === id);
   return [
-    !!getSimulation(state.config).observation,
+    !official && !!getSimulation(state.config).observation,
     ...assets.flatMap((a) => a.sourceIssues ?? []),
     ...['vs', 'hype'].map((v) => {
       const t = Date.parse(asset[v]?.asOf);
@@ -235,13 +243,14 @@ function markPreviousResult() {
   $('pin').disabled = true;
   $('candidates-note').textContent = '上次验算的候选，等待最新结果。';
   showVerdictMessage('等待新结果', '下方为上次验算的快照。其报价已过期，最新报价正在验算。');
+  drawTrade();
 }
 function refresh(quoteUpdate = false, accountChanged = false) {
   const stamp = ++generation;
   pending = null;
   try {
     const { asset, account, config } = getInputs();
-    simulation?.observe?.();
+    if (!hasOfficialAccounts() || location.hash === '#sim') simulation?.observe?.();
     top();
     freshness = issueKey();
     const isManual = !!inspected;
@@ -299,6 +308,7 @@ function refresh(quoteUpdate = false, accountChanged = false) {
       blocked: errors.length > 0
     };
     dispatch();
+    drawTrade();
     if (!$('sim').hidden) simulation?.refresh();
   } catch (err) {
     calculationFailed(err.message);
@@ -309,6 +319,7 @@ function calculationFailed(message) {
   invalidate();
   showVerdictMessage('无法验证', message, 'bad');
   notify(message);
+  drawTrade();
 }
 function render(data, job) {
   const { asset, account, config } = job.input,
@@ -316,7 +327,8 @@ function render(data, job) {
     r = data.result,
     c = data.candidate ?? { status: r.status, reasons: r.reasons };
   display = { id: data.id, candidate: c, expires: job.expires, blocked: job.blocked, asset, account, config };
-  showVerdict(asset, c, r);
+  drawTrade();
+  showVerdict(asset, c, r, tradePage ? (snapshot?.mode === 'offline' ? '模拟匹配' : '方案合格') : null);
   showVenue('vs', asset, account, config, r.limits, c, snapshot);
   showVenue('hype', asset, account, config, r.limits, c, snapshot);
   showCross(asset, c, r, snapshot);
@@ -476,6 +488,9 @@ function setup() {
       refresh();
       renderLegacy();
     }
+  });
+  if (tradePage) drawTrade = mountTradeDesk({
+    read: () => ({ display, snapshot, asset: current() }), current: currentResult, getSim: () => getSimulation(state.config)
   });
   tab();
   refresh();

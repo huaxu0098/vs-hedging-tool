@@ -1,6 +1,18 @@
 # VS × Hype 多品种动态对冲匹配器
 
-本地中文决策工作台。用 VS 考核账户和 Hyperliquid 永续合约的独立规格、余额、已有仓位和可成交报价，计算可开上限、差额调仓、固定失败线、通过或首次出金线，以及 Hype 强平缓冲。全部成交发生在浏览器的模拟账本中。
+本地中文决策工作台。用 VS 考核账户和 Hyperliquid 永续合约的独立规格、余额、已有仓位和可成交报价，计算可开上限、差额调仓、固定失败线、通过或首次出金线，以及 Hype 强平缓冲。决策工作台使用本地模拟账本。需要操作已登录的官方交易页面时，打开独立的双边开仓工具。
+
+## 双边网页开仓
+
+在本仓库运行 `npm run trade` 或双击「打开双边开仓.command」，即可启动服务、生成扩展并打开独立交易页。[本机双边开仓](http://127.0.0.1:4178/trade.html)
+
+1. 初次使用时，在 Chrome 的扩展管理页打开开发者模式，选择「加载已解压的扩展程序」，选中本项目的 `build/trade-extension` 文件夹。刷新本机及两边官方页面。交易版包含当前页的只读采集功能。
+2. 点「打开两个官网」，在相同 Chrome 配置中分别登录。Vest 选择具体考核或出金账户，展开当前账户概览与完整持仓。Hype 使用英文桌面版和主钱包。回到工具的「行情接入」，输入 Hype 公开钱包地址、确认映射，点击「开始自动识别」。若 Vest 只显示账户名称，在开仓页的「连接交易页与扩展」点「绑定 Vest 当前账户」，再亲自点官网当前账户名旁的复制图标，60 秒内返回开仓页。账户或徽标变化时重新核对身份。核对实际费率、杠杆、考核目标和账户失败线。
+3. 页面列出本次增量买卖数量及估计名义额。切换「本次预计净盈亏」旁的情景，可查看 VS 通过、VS 失败及 Hype 强平时的条件结果。已到账现金、相对初始本金的累计盈亏及未到账分成分别列示。
+4. 点击「一键双边开仓」会准备并核对两个官网市价表单，按已核实的账户和数量分别点击委托。跨平台委托可能只成交一边。钱包签名、官方确认及查看实际成交由本人完成。中断或提交后回执保留，核对两边委托与持仓后才能开始下一笔。实际成交滑点取决于当时的盘口和官网设置。
+5. 「平台已发生的事件」读取当前 Vest 账户可见的通过或失败结果，以及 Hype 主网公开地址最近 24 小时返回的本品种强平记录。金额触线或仓位消失均不足以证明平台已结算。模拟记录可在同一区域展开。
+
+交易版当前支持 BTC、ETH、SOL 的原生币线性 1:1 合约及主钱包的双边新开或同向加仓。黄金、指数、自定义品种可继续试算。Vest 的考核及 Live Funded 账户未开放 API 交易，本工具使用已打开的官网表单。[Vest 账户限制](https://docs.vestmarkets.com/vest-capital/overview#requirements-and-limits) · [Vest 合约规格](https://docs.vestmarkets.com/platform/perpetual-contract-specifications) · [Hyperliquid 账户事件](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions)
 
 ## 启动
 
@@ -60,6 +72,7 @@ npm test
 npm run test:browser
 npm run test:vest
 npm run test:verdict
+npm run test:trade
 ```
 
 `test:verdict` 在 Chrome 逐帧检查连续报价时的结论栏、价格轴及候选表，并验证停流过期和恢复。

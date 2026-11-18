@@ -9,7 +9,10 @@
     "test": "node --test",
     "test:browser": "node scripts/browser-acceptance.js",
     "test:verdict": "node scripts/qa/verdict-refresh.js",
-    "test:vest": "node scripts/qa/vest-auto.js && node scripts/qa/vest-public.js && node scripts/qa/vest-fx.js"
+    "test:vest": "node scripts/qa/vest-auto.js && node scripts/qa/vest-public.js && node scripts/qa/vest-fx.js",
+    "build:trade": "node scripts/build-trade-extension.js",
+    "trade": "node scripts/open-trade.js",
+    "test:trade": "node scripts/qa/trade-ui.js && node scripts/qa/trade-hype.js"
   },
   "engines": {
     "node": ">=22"

@@ -22,7 +22,10 @@
     lastMessage,
     suspended = false;
   const seen = new Map(); // Per-document freshness survives stop/start, never goes to disk.
+  globalThis.isVestReaderActive = (symbol) =>
+    !!active && active.symbol === symbol && routeSymbol() === symbol;
   function stopScan() {
+    globalThis.resetVestAccountBinding?.(document);
     active = null;
     observer?.disconnect();
     clearTimeout(debounce);
@@ -126,11 +129,13 @@
     if (raw.account) {
       const inAccount = raw.account,
         a = {};
+      const binding = inAccount.accountContext;
+      const bound = typeof binding === 'string' && /^[a-f0-9-]{36}$/i.test(binding);
       for (const k of ['balance', 'equity', 'used', 'free']) if (numeric(inAccount[k])) a[k] = inAccount[k];
       if (['challenge', 'funded'].includes(inAccount.stage)) a.stage = inAccount.stage;
       if (Array.isArray(inAccount.positions))
         a.positions = inAccount.positions.map(position).sort((x, y) => x.symbol.localeCompare(y.symbol));
-      if (Object.keys(a).length) {
+      if (Object.keys(a).length || bound) {
         const fields = { ...a };
         if (a.positions) {
           // The extractor emits a list only for an identifiable positions
@@ -144,7 +149,22 @@
           });
           memory.positionDetails = details;
         }
-        const ts = fieldClock(memory.account, fields, inAccount.asOf, true);
+        if (bound) {
+          a.accountContext = binding;
+          const evidence = inAccount.outcome;
+          if (evidence && ['passed', 'failed'].includes(evidence.status) && evidence.asOf) {
+            a.outcome = {
+              status: evidence.status,
+              asOf: sourceTime(evidence.asOf),
+              symbol,
+              accountContext: binding,
+              source: 'vest-page'
+            };
+          }
+        }
+        const ts = Object.keys(fields).length
+          ? fieldClock(memory.account, fields, inAccount.asOf, true)
+          : fieldClock((memory.identity ??= new Map()), { binding }, inAccount.asOf ?? a.outcome?.asOf, true);
         a.asOf = ts.asOf;
         a.timeSource = ts.timeSource;
         snapshot.account = a;

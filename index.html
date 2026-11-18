@@ -7,6 +7,7 @@
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/styles.css" />
     <link rel="stylesheet" href="/editor.css" />
+    <link rel="stylesheet" href="/trade.css" />
     <meta name="vs-hype-app" content="vs-hype-matcher" />
     <title>VS × Hype 多品种动态对冲匹配器</title>
   </head>
@@ -17,9 +18,9 @@
           ><span aria-hidden="true" class="brandmark">∕∕</span> VS <i>×</i> Hype</a
         >
         <nav aria-label="工作区">
-          <a href="#desk">决策工作台</a><a href="#feeds">行情接入</a><a href="#sim">账本与回放</a>
+          <a href="/trade.html#trade" id="trade-nav">双边开仓</a><a href="#desk">决策工作台</a><a href="#feeds">行情接入</a><a href="#sim">账本与回放</a>
         </nav>
-        <span class="mode-flag">模拟推演与决策辅助（非实盘自动下单）</span>
+        <span class="mode-flag" id="page-mode">模拟推演与决策辅助（非实盘自动下单）</span>
       </div>
     </header>
 
@@ -27,7 +28,7 @@
       <div id="notice" role="status" hidden></div>
       <div class="title-row">
         <div>
-          <h1>双平台仓位匹配工作台</h1>
+          <h1 id="page-title">双平台仓位匹配工作台</h1>
           <p id="state-label" class="sub"></p>
         </div>
         <div class="actions">
@@ -150,6 +151,44 @@
           <summary>出金目标对比与计算假设</summary>
           <div id="assumptions"></div>
         </details>
+      </section>
+      <section id="trade" hidden>
+        <div id="trade-grid">
+          <section class="panel trade-order" id="trade-controls">
+            <div class="panel-head"><h2>双边市价开仓</h2><span id="trade-state"></span></div>
+            <div class="trade-leg"><b>VS</b><strong id="trade-vs-qty">—</strong><span id="trade-vs-cost">—</span></div>
+            <div class="trade-leg"><b>Hype</b><strong id="trade-hype-qty">—</strong><span id="trade-hype-cost">—</span></div>
+            <div class="trade-buttons"><button id="trade-send" class="trade-primary" disabled>一键双边开仓</button><button id="trade-open">打开两个官网</button></div>
+            <p id="trade-why" class="hint"></p>
+            <p class="hint">两边分别提交市价委托，以各自成交回报为准。单边可能先成交，实际滑点取决于官网设置与盘口，钱包确认由本人完成。</p>
+            <p id="trade-feedback" role="status"></p>
+            <div id="trade-receipt" hidden><strong>上次网页委托</strong><p id="trade-receipt-text"></p><button id="trade-ack">已在两边核对委托及持仓</button></div>
+            <details id="trade-setup"><summary>连接交易页与扩展</summary>
+              <button type="button" id="trade-bind-vs" disabled>绑定 Vest 当前账户</button>
+              <p>先在行情接入中启动 VS 页面识别。若页面只显示账户名称，点此按钮，再亲自点 Vest 当前账户名称旁的复制图标。此次账户绑定有效 60 秒。</p>
+              <p>在 Chrome 扩展管理页开启开发者模式，加载已解压的交易扩展目录，然后刷新三个页面。</p>
+              <code id="trade-extension-path">build/trade-extension</code>
+              <p><a id="trade-vs-url" target="_blank" rel="noopener noreferrer">Vest 官方交易页</a> · <a id="trade-hype-url" target="_blank" rel="noopener noreferrer">Hyperliquid 官方交易页</a></p>
+              <p>在 <a href="#feeds">行情接入</a> 填入公开钱包地址并应用映射。打开已登录的 Vest 账户概览、持仓并启动页面识别。</p>
+            </details>
+          </section>
+          <section class="panel trade-profit"><div class="panel-head"><h2>本次预计净盈亏</h2>
+            <select id="trade-scenario" aria-label="盈亏情景"><option value="fail">VS 触及失败线</option><option value="pass">VS 达标</option><option value="liq">Hype 先强平</option></select></div>
+            <strong id="trade-pnl">—</strong><p id="trade-pnl-note"></p>
+            <dl class="trade-stats"><div><dt>情景结算后个人现金</dt><dd id="trade-cash">—</dd></div><div><dt>相对本金及历史成本</dt><dd id="trade-total">—</dd></div><div><dt>预计可分、尚未到账</dt><dd id="trade-payout">—</dd></div></dl>
+            <p class="hint">条件推演，含本次交易与预计平仓费用。VS 考核盈利不能提款。</p>
+          </section>
+          <section class="panel trade-lines"><h2>通过、失败与强平</h2><div class="trade-outcomes">
+            <div><span id="trade-pass-title">VS 考核通过</span><strong id="trade-pass-price">—</strong><small id="trade-pass-result"></small></div>
+            <div><span>VS 触及失败线</span><strong id="trade-fail-price">—</strong><small id="trade-fail-result"></small></div>
+            <div><span>Hype 强平线</span><strong id="trade-liq-price">—</strong><small id="trade-liq-result"></small></div>
+          </div></section>
+          <section class="panel trade-events"><h2>平台已发生的事件</h2>
+            <div class="trade-event"><b>VS</b><span id="trade-vs-event" role="status">等待当前账户的官方状态</span></div>
+            <div class="trade-event"><b>Hype</b><span id="trade-hype-event" role="status">等待公开钱包</span></div>
+            <details><summary>本地模拟账本记录</summary><p id="trade-sim-event"></p></details>
+          </section>
+        </div>
       </section>
       <section id="feeds" hidden><div id="feed-root"></div></section>
       <section id="sim" hidden>

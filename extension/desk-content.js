@@ -4,7 +4,7 @@
   const correctPage = () =>
     window === window.top &&
     location.origin === 'http://127.0.0.1:' + globalThis.vsAutoConfig.deskPort &&
-    ['/', '/index.html'].includes(location.pathname) &&
+    (globalThis.vsAutoConfig.deskPage ? location.pathname === globalThis.vsAutoConfig.deskPage : ['/', '/index.html'].includes(location.pathname)) &&
     document.querySelector('meta[name="vs-hype-app"]')?.content === 'vs-hype-matcher' &&
     document.title === 'VS × Hype 多品种动态对冲匹配器';
   if (!correctPage()) return;

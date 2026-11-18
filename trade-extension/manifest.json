@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "VS × Hype 双边开仓",
+  "description": "按本人在本机开仓页的点击操作两个指定官方网站的市价表单。",
+  "version": "1.0.0",
+  "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1/*","https://next.vestmarkets.com/trade/*","https://app.hyperliquid.xyz/trade/*"],
+  "background": {"service_worker":"service.js","type":"module"},
+  "action": {"default_title":"打开本机双边开仓工具"},
+  "content_scripts": [
+    {"matches":["http://127.0.0.1/*"],"js":["desk.js"]},
+    {"matches":["https://next.vestmarkets.com/trade/*"],"js":["venue-vs.js","venue.js"]},
+    {"matches":["https://app.hyperliquid.xyz/trade/*"],"js":["venue-hype.js","venue.js"]}
+  ]
+}

@@ -80,9 +80,9 @@ const server = createServer(async (request, response) => {
   }
   try {
     const path = decodeURIComponent(url.pathname);
-    const file = path === '/' ? 'index.html' : path.slice(1);
-    if (file === 'config/extension-location.json') {
-      const location = JSON.stringify({ path: fileURLToPath(new URL('extension', root)) });
+    const file = (path === '/' || path === '/trade.html') ? 'index.html' : path.slice(1);
+    if (file === 'config/extension-location.json' || file === 'config/trade-extension-location.json') {
+      const location = JSON.stringify({ path: fileURLToPath(new URL(file.includes('trade-extension') ? 'build/trade-extension' : 'extension', root)) });
       response
         .writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
         .end(request.method === 'HEAD' ? undefined : location);

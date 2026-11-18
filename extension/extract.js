@@ -44,9 +44,33 @@
       /^(?:account(?: (?:overview|summary|details|stats|information|info|metrics|balance))?|margin (?:overview|summary)|portfolio(?: (?:overview|summary))?|账户(?:概览|总览|摘要|详情|信息|资产|余额)?|保证金(?:概况|概览))$/,
     positions: /^(?:(?:all |open |current )?positions?|(?:当前|全部|未平)?持仓)(?:[ （(]*\d+[ ）)]*)?$/,
     excluded:
-      /^(?:trade history|order history|orders|open orders|closed positions|position history|trades|recent trades|watchlist|favorites|all markets|markets|order entry|order form|place order|new order|buy[ /]+sell|成交历史|历史持仓|订单历史|下单|自选|市场列表)$/
+      /^(?:account history|archived accounts|all accounts|other accounts|previous accounts|trade history|order history|orders|open orders|closed positions|position history|trades|recent trades|watchlist|favorites|all markets|markets|order entry|order form|place order|new order|buy[ /]+sell|历史账户|全部账户|其他账户|成交历史|历史持仓|订单历史|下单|自选|市场列表)$/
   };
   const marketFields = new Set(['bid', 'ask', 'mark', 'open', 'quoteTime']);
+  const accountContexts = new WeakMap();
+  const observedResults = new Map();
+  const currentAccountArea =
+    /^(?:(?:current|selected|active) account(?: overview| summary| details)?|account (?:overview|summary|details)|(?:当前|所选)账户(?:概览|详情)?|账户(?:概览|摘要|详情))$/;
+  const accountIdentity = /^(?:(?:current |selected )?account (?:id|number)|(?:当前)?账户(?:编号|号码|id))$/;
+  const resultLabel =
+    /^(?:(?:evaluation|challenge) (?:status|result|outcome)|(?:current )?account status|考核(?:结果|状态)|(?:当前)?账户状态)$/;
+  function outcome(text, label) {
+    const value = norm(text);
+    if (
+      /^(?:(?:evaluation|challenge) (?:has been |was )?passed|passed (?:the )?(?:evaluation|challenge)|考核(?:已)?通过|已通过考核)$/.test(
+        value
+      )
+    )
+      return 'passed';
+    if (
+      /^(?:(?:account|evaluation|challenge) (?:has been |was )?(?:failed|blown)|failed (?:the )?(?:evaluation|challenge)|(?:账户|考核)(?:已)?失败|(?:账户)?已爆号|账户爆号)$/.test(
+        value
+      )
+    )
+      return 'failed';
+    if (/^(evaluation|challenge|考核)/.test(label) && /^(passed|通过|已通过)$/.test(value)) return 'passed';
+    if (resultLabel.test(label) && /^(failed|失败|已失败|爆号|blown)$/.test(value)) return 'failed';
+  }
   const unsafe =
     'script,style,template,noscript,head,form,input,textarea,select,nav,[role="dialog"],dialog,[contenteditable]:not([contenteditable="false"]),[hidden],[inert],[aria-hidden="true"]';
   const norm = (s) =>
@@ -225,8 +249,8 @@
     }
     function fieldValue(k, text) {
       if (k === 'stage') {
-        if (/^(?:funded(?: account)?|出金(?:阶段|账户)?)$/i.test(text)) return 'funded';
-        if (/^(?:challenge|evaluation|考核(?:中|账户|阶段)?)$/i.test(text)) return 'challenge';
+        if (/^(?:live|(?:live )?funded(?: account)?|出金(?:阶段|账户)?)$/i.test(text)) return 'funded';
+        if (/^(?:(?:challenge|evaluation)(?: phase)?|考核(?:中|账户|阶段)?)$/i.test(text)) return 'challenge';
         return;
       }
       if (k === 'open') {
@@ -284,6 +308,90 @@
     const take = (k) => (values.get(k)?.size === 1 ? [...values.get(k)][0] : undefined);
     const quote = {},
       account = {};
+    // Bind terminal outcomes to a single visible current-account summary. Account IDs
+    // stay inside this document. Only an ephemeral, unrelated token leaves the reader.
+    const panels = [
+      ...doc.querySelectorAll('section,article,aside,[role="region"],[data-testid*="account"],[aria-label]')
+    ].filter((panel) => {
+      const heading = panel.querySelector(
+        ':scope > h2,:scope > h3,:scope > header > h2,:scope > header > h3'
+      );
+      if (
+        ![panel.getAttribute('aria-label'), panel.getAttribute('data-testid'), shortText(heading)].some((s) =>
+          currentAccountArea.test(norm(s))
+        )
+      )
+        return false;
+      if (
+        !visible(panel) ||
+        panel.closest(
+          'tr,li,table,[role="row"],[role="listitem"],[role="option"],[role="menu"],[role="listbox"]'
+        )
+      )
+        return false;
+      for (let parent = panel.parentElement; parent && parent !== doc.body; parent = parent.parentElement) {
+        if (group(parent) === 'excluded') return false;
+      }
+      return true;
+    });
+    let identifier, terminal, reportedAt;
+    const boundFields = new Map();
+    if (panels.length === 1) {
+      const panel = panels[0],
+        ids = new Set(),
+        results = new Set(),
+        times = new Set();
+      for (const label of panel.querySelectorAll('dt,span,p,label,small,strong,b,div')) {
+        if (
+          label.children.length ||
+          !visible(label) ||
+          label.closest('table,ul,ol,button,a,[role="list"],[role="tablist"]')
+        )
+          continue;
+        const key = norm(direct(label));
+        const accountField = fieldMap.get(key);
+        if (
+          !accountIdentity.test(key) &&
+          !resultLabel.test(key) &&
+          (!accountField || marketFields.has(accountField))
+        )
+          continue;
+        if (scope(label.parentElement) === 'excluded') continue;
+        const next = label.nextElementSibling;
+        if (!next || next.matches('button,a,dt') || next.querySelector('button,a')) continue;
+        const value = shortText(next);
+        if (accountIdentity.test(key)) {
+          if (/^#?(?=[A-Za-z\d_-]*\d)[A-Za-z\d_-]{1,80}$/.test(value)) ids.add(value);
+        } else if (resultLabel.test(key)) results.add(outcome(value, key));
+        else if (accountField === 'accountTime') times.add(fieldValue('accountTime', value));
+        else {
+          if (!boundFields.has(accountField)) boundFields.set(accountField, new Set());
+          boundFields.get(accountField).add(fieldValue(accountField, value));
+        }
+      }
+      if (ids.size === 1) identifier = [...ids][0];
+      if (results.size === 1) terminal = [...results][0];
+      if (times.size === 1) reportedAt = [...times][0];
+    }
+    if (identifier) {
+      for (const k of ['stage', 'balance', 'equity', 'used', 'free', 'accountTime']) values.delete(k);
+      for (const [key, items] of boundFields) values.set(key, items);
+      if (reportedAt) put('accountTime', reportedAt);
+      let context = accountContexts.get(doc);
+      if (context?.identifier !== identifier || context.symbol !== symbol) {
+        context = { identifier, symbol, token: win.crypto.randomUUID() };
+        accountContexts.set(doc, context);
+      }
+      account.accountContext = context.token;
+      if (terminal) {
+        const key = symbol + '/' + identifier;
+        const prior = observedResults.get(key);
+        const asOf = reportedAt ?? (prior?.status === terminal ? prior.asOf : new Date().toISOString());
+        account.outcome = { status: terminal, asOf };
+        observedResults.set(key, account.outcome);
+        if (observedResults.size > 256) observedResults.delete(observedResults.keys().next().value);
+      }
+    } else accountContexts.delete(doc);
     for (const k of [
       'bid',
       'ask',
@@ -424,4 +532,5 @@
     return result;
   }
   globalThis.readVisibleVest = readVisibleVest;
+  globalThis.resetVestAccountBinding = (doc) => accountContexts.delete(doc);
 })();

@@ -216,7 +216,7 @@ function renderVerdict(state, { title, detail, plan = '', vs = '', hype = '', vs
 export function showVerdictMessage(title, reason = '', kind = 'pending') {
   renderVerdict(kind === 'bad' ? 'bad' : 'pending', { title, detail: reason });
 }
-export function showVerdict(a, c, result) {
+export function showVerdict(a, c, result, matchedTitle = null) {
   const ok = c?.ok && !c.noTrade;
   const both = c?.vs && c?.hype;
   const state = ok ? 'matched' : !c?.noTrade && c?.status === 'one-sided' ? 'one-sided' : 'bad';
@@ -226,7 +226,7 @@ export function showVerdict(a, c, result) {
       : '仅可完成本阶段，详见续航验算。'
     : reason(c) || result?.reasons?.join(' · ') || '未找到可行候选，维持不交易。';
   renderVerdict(state, {
-    title: labelStatus(c),
+    title: ok && matchedTitle ? matchedTitle : labelStatus(c),
     detail,
     plan: a.ticker + ' · ' + (both ? planSide(c) + '，' : '当前没有可执行的双边方案'),
     vs: both ? 'VS ' + money(c.vs.notional) + '（' + totalQty(c, a, 'vs') + '），' : '',

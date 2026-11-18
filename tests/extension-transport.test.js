@@ -279,6 +279,34 @@ test('可见页被登录／访问检查覆盖时传递原因，并拒绝误用�
   assert.equal(s.p.messages.at(-1).snapshot, undefined);
 });
 
+test('考核结果独立计时，行情心跳不刷新，下一份账户快照中消失即撤回', () => {
+  const s = content('vs-content.js', vest);
+  const symbol = 'BTC-PERP',
+    accountContext = 'ba86575a-58c4-499e-bfcc-6657c7f49ef6';
+  const asOf = new Date(s.clock() - 3000).toISOString();
+  Object.assign(s.raw().account, { accountContext, outcome: { status: 'failed', asOf } });
+  s.p.onMessage.fire({ type: 'enable', symbol, token: 1 });
+  const account = () => s.p.messages.at(-1).snapshot.account;
+  assert.deepEqual(account().outcome, {
+    status: 'failed',
+    asOf,
+    symbol,
+    accountContext,
+    source: 'vest-page'
+  });
+  s.raw().quote.mark++;
+  s.advance();
+  assert.equal(account().outcome.asOf, asOf);
+  delete s.raw().account.outcome;
+  s.advance();
+  assert.equal(account().outcome, undefined);
+  delete s.raw().account.accountContext;
+  s.raw().account.outcome = { status: 'passed', asOf };
+  s.advance();
+  assert.equal(account().outcome, undefined);
+  assert.equal(account().accountContext, undefined);
+});
+
 test('中继按启动文档、路由和代次隔离；重复来源锁住，关闭看板撤销订阅', () => {
   const connect = service(),
     d = connect('vs-desk', desk),

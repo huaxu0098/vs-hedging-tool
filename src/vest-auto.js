@@ -7,7 +7,7 @@ export const vestAutoPanel = `
     <label class="fd-check"><input type="checkbox" id="feed-auto-public" checked>使用 Vest 公开行情读取买一、卖一和标记价</label>
     <div class="fd-row"><button type="button" id="feed-auto-start">开始自动识别</button><button type="button" id="feed-auto-stop" disabled>停止识别</button></div>
     <p id="feed-auto-status" role="status" aria-live="polite"></p>
-    <p id="feed-auto-spec"></p><p id="feed-auto-account"></p>
+    <p id="feed-auto-spec"></p><p id="feed-auto-account"></p><p id="feed-auto-outcome">VS 账户结果未知</p>
     <details><summary>同步已登录 VS 页面的余额和持仓</summary>
       <p>在 Chrome 或 Edge 的扩展管理页开启开发者模式，点「加载已解压的扩展程序」，选择本项目的 <code>extension</code> 文件夹。安装一次后，刷新匹配器和 VS 交易页，再点「开始自动识别」。两页需在同一浏览器配置中打开。</p>
       <label>本机扩展位置<input id="feed-extension-path" readonly></label>
@@ -79,6 +79,10 @@ export function mountVestAuto($, hooks) {
     const snap = msg.snapshot;
     try {
       const hasAccount = !!snap.account && Object.keys(snap.account).some((k) => k !== 'asOf');
+      if (!hasAccount && session.hadAccount) {
+        session.pageNote = 'VS 页面已不再显示先前的账户字段，请检查当前账户页。';
+        hooks.accountLost(session.pageNote);
+      }
       if (session.public) {
         if (hasAccount)
           hooks.apply(
@@ -100,10 +104,7 @@ export function mountVestAuto($, hooks) {
         hooks.accountLost('');
         session.pageNote =
           '已读取 VS 页面账户 · ' + new Date(snap.account.asOf ?? snap.asOf).toLocaleTimeString();
-      } else if (session.hadAccount) {
-        session.pageNote = 'VS 页面已不再显示先前的账户字段，请检查当前账户页。';
-        hooks.accountLost(session.pageNote);
-      } else session.pageNote = '交易页已连接，尚无可辨认的账户字段。';
+      } else if (!session.hadAccount) session.pageNote = '交易页已连接，尚无可辨认的账户字段。';
       updatePageNote();
     } catch (err) {
       session.pageNote = err.message;
@@ -125,7 +126,7 @@ export function mountVestAuto($, hooks) {
       hooks.issue('正在等待 ' + symbol + ' 的 VS 报价。');
       status.textContent = usePublic ? '正在连接 Vest 公开行情…' : '等待 VS 页面自动识别扩展…';
       updatePageNote();
-      if (usePublic) {
+      if (usePublic || location.pathname === '/trade.html') {
         const lookup = async () => {
           let contract;
           try {
