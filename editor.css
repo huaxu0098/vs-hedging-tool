@@ -1,0 +1,235 @@
+.ve-dialog {
+  width: min(680px, calc(100vw - 28px));
+  max-width: none;
+  max-height: min(90dvh, 860px);
+  padding: 0;
+  border: 1px solid #b7c9bf;
+  border-radius: 16px;
+  color: #20362d;
+  background: #fff;
+  box-shadow: 0 24px 80px #10271f42;
+  overflow: hidden;
+}
+
+.ve-dialog::backdrop {
+  background: rgb(19 35 29 / 47%);
+}
+
+.ve-dialog * {
+  box-sizing: border-box;
+}
+
+.ve-dialog button, .ve-dialog input, .ve-dialog select {
+  font: inherit;
+}
+
+.ve-form {
+  display: flex;
+  flex-direction: column;
+  max-height: min(90dvh, 860px);
+  margin: 0;
+}
+
+.ve-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 24px 14px;
+}
+
+.ve-title {
+  margin: 0;
+  color: #1c3429;
+  font-size: 21px;
+  font-weight: 650;
+  letter-spacing: -.02em;
+}
+
+.ve-close, .ve-tab, .ve-secondary, .ve-primary {
+  cursor: pointer;
+}
+
+.ve-close {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  color: #34493f;
+  background: #f0f4f1;
+  font-size: 23px !important;
+}
+
+.ve-tabs {
+  display: flex;
+  gap: 16px;
+  padding: 0 24px;
+  border-bottom: 1px solid #d7e1da;
+}
+
+.ve-tab {
+  padding: 10px 4px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: #53675d;
+  background: none;
+  font-size: 14px !important;
+}
+
+.ve-tab[aria-selected="true"] {
+  border-bottom-color: #167050;
+  color: #0f5a40;
+  font-weight: 700;
+}
+
+.ve-content {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 20px 24px;
+}
+
+.ve-panel[hidden] {
+  display: none;
+}
+
+.ve-group {
+  margin: 0;
+  padding: 0;
+  border: none;
+  min-width: 0;
+}
+
+.ve-group + .ve-group {
+  margin-top: 22px;
+  padding-top: 4px;
+}
+
+.ve-legend {
+  margin: 0 0 10px;
+  padding: 0;
+  font-size: 15px;
+  font-weight: 650;
+  color: #233d31;
+}
+
+.ve-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 16px;
+}
+
+.ve-field {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: end;
+  gap: 5px;
+  min-width: 0;
+}
+
+.ve-label, .ve-verify {
+  font-size: 13px;
+  line-height: 1.4;
+  color: #445d50;
+}
+
+.ve-dialog .ve-control:not([type="checkbox"]) {
+  display: block;
+  width: 100%;
+  height: 38px;
+  min-width: 0;
+  padding: 6px 9px;
+  border: 1px solid #b7c9bf;
+  border-radius: 6px;
+  color: #183629;
+  background: #fff;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ve-check-field {
+  flex-direction: row-reverse;
+  align-items: center;
+  justify-content: start;
+  gap: 7px;
+  min-height: 38px;
+}
+
+.ve-dialog input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  accent-color: #145f42;
+  flex: 0 0 auto;
+}
+
+.ve-footer {
+  padding: 12px 24px 18px;
+  border-top: 1px solid #d7e1da;
+  background: #f9fbf9;
+}
+
+.ve-verify {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.ve-error {
+  margin: 6px 0 0;
+  color: #9b4027;
+  font-size: 13px;
+}
+
+.ve-error:empty {
+  display: none;
+}
+
+.ve-actions {
+  display: flex;
+  justify-content: end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ve-secondary, .ve-primary {
+  min-height: 37px;
+  padding: 7px 15px;
+  border: 1px solid #b7c9bf;
+  border-radius: 7px;
+  color: #254333;
+  background: #fff;
+  font-size: 14px !important;
+}
+
+.ve-primary {
+  border-color: #19533b;
+  color: #fff;
+  background: #19533b;
+}
+
+.ve-primary:disabled {
+  opacity: .5;
+}
+
+.ve-dialog :focus-visible {
+  outline: 2px solid #247658;
+  outline-offset: 2px;
+}
+
+@media (max-width: 510px) {
+  .ve-heading, .ve-tabs, .ve-content, .ve-footer {
+    padding-left: 15px;
+    padding-right: 15px;
+  }
+  .ve-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ve-content {
+    padding-top: 15px;
+  }
+}
