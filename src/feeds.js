@@ -239,13 +239,16 @@ export async function readHype({
 
 export function feedIssues(snap, now = Date.now()) {
   if (!snap) return [];
+  const captureIssues = [snap.vsAutoIssue, snap.vsAutoAccountIssue, snap.vsAutoSpecIssue].filter(Boolean);
   if (snap.mode === 'offline' && !positive(snap.vs?.bid)) {
-    if (!snap.vs?.account) return [];
+    if (!snap.vs?.account) return captureIssues;
     const age = now - Date.parse(snap.vs.account.asOf);
-    return Number.isFinite(age) && age >= 0 && age <= snap.maxAgeMs ? [] : ['VS 账户数据过期或时间未知。'];
+    if (!Number.isFinite(age) || age < 0 || age > snap.maxAgeMs)
+      captureIssues.push('VS 账户数据过期或时间未知。');
+    return captureIssues;
   }
   const mixed = snap.mode === 'offline';
-  const issues = mixed ? [] : [...(snap.errors ?? [])];
+  const issues = [...captureIssues, ...(mixed ? [] : (snap.errors ?? []))];
   if (snap.frozen) issues.push('实时行情已冻结。');
   if (!snap.mappingVerified) issues.push('尚未确认当前 VS 与 Hype 合约、标的及报价映射。');
   for (const [name, leg] of mixed

@@ -1,7 +1,9 @@
 import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { makeBridge } from './bridge.js';
+import { readVestContract } from './vest-contract.js';
 
 const root = new URL('../', import.meta.url);
 const host = '127.0.0.1';
@@ -30,6 +32,19 @@ const server = createServer(async (request, response) => {
     response.writeHead(400).end();
     return;
   }
+  if (url.pathname === '/api/vest-contract' && request.method === 'GET') {
+    try {
+      const contract = await readVestContract(url.searchParams.get('symbol'));
+      response
+        .writeHead(contract ? 200 : 404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        .end(JSON.stringify(contract));
+    } catch {
+      response
+        .writeHead(502, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        .end('null');
+    }
+    return;
+  }
   if (await bridge(request, response, url.pathname)) return;
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     response.writeHead(405, { Allow: 'GET, HEAD' }).end();
@@ -38,6 +53,13 @@ const server = createServer(async (request, response) => {
   try {
     const path = decodeURIComponent(url.pathname);
     const file = path === '/' ? 'index.html' : path.slice(1);
+    if (file === 'config/extension-location.json') {
+      const location = JSON.stringify({ path: fileURLToPath(new URL('extension', root)) });
+      response
+        .writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        .end(request.method === 'HEAD' ? undefined : location);
+      return;
+    }
     if (
       !/^(?:index\.html|[a-z-]+\.css|src\/[a-z][a-z0-9-]*\.js|config\/example\.json|fixtures\/[\p{L}\d_-]+\.(?:csv|json))$/u.test(
         file

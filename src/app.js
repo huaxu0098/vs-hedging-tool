@@ -412,6 +412,11 @@ $('account-edit').onclick = guard(() => {
   });
 });
 $('feed-switch').onchange = guard((e) => feeds.setMode(e.target.value));
+$('auto-open').onclick = guard(() => {
+  location.hash = 'feeds';
+  tab();
+  feeds.focusAuto();
+});
 $('paste-open').onclick = guard(() => {
   location.hash = 'feeds';
   tab();

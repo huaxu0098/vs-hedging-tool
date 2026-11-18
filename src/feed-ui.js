@@ -1,5 +1,6 @@
 import { MAINNET, parseEndpoint, readHype, toMarketAsset, documentedQuote } from './feeds.js';
 import { parseVSText, captureScript } from './vs-parser.js';
+import { mountVestAuto, vestAutoPanel } from './vest-auto.js';
 export { toMarketAsset };
 
 const mapKey = (id) => 'vs-hype:feed-map:v1:' + id;
@@ -33,6 +34,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
   container.innerHTML = `
     <header><div><h2>行情与数据接入</h2><p>Hype 读取公开市场与可选地址。VS 使用已确认的页面数据。</p></div>
       <button type="button" id="feed-paste-open">粘贴识别 VS 页面</button></header>
+    ${vestAutoPanel}
     <div class="fd-card"><h3>行情连接</h3><div class="fd-grid">
       <label>数据模式<select id="feed-mode"><option value="offline">离线模拟</option><option value="live">Hype API 实时</option><option value="frozen">冻结实时快照</option></select></label>
       <label>自动轮询<select id="feed-period"><option value="1000">1 秒</option><option value="2000" selected>2 秒</option><option value="5000">5 秒</option></select></label>
@@ -49,7 +51,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
     <button type="button" id="feed-save-map">应用连接、映射与当前汇率</button></div>
     <div class="fd-card"><h3>已接收的数据</h3><div class="fd-reading" id="feed-values"></div>
     <details><summary>盘口五档与当前 DEX 公开持仓</summary><pre id="feed-depth"></pre></details></div>
-    <details class="fd-card"><summary>从 VS 页面推送到本机</summary><p>输入 VS 页面的 HTTPS 来源，配对当前品种后复制脚本。在该页面框选报价或账户文字，运行脚本并核对将发送的字段。配对有效 10 分钟。</p>
+    <details class="fd-card"><summary>手动采集其他 VS 来源（单次推送）</summary><p>输入 VS 页面的 HTTPS 来源，配对当前品种后复制脚本。在该页面框选报价或账户文字，运行脚本并核对将发送的字段。配对有效 10 分钟。</p>
     ${field('feed-origin', 'VS 页面来源（例如 https://trade.example.com）', 'url')}
     <div class="fd-row"><button type="button" id="feed-pair">配对此来源</button><button type="button" id="feed-revoke">撤销配对</button></div>
     <label>本机采集脚本<textarea id="feed-script" rows="3" readonly></textarea></label><button type="button" id="feed-copy">复制脚本</button>
@@ -66,6 +68,10 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
     pending = false,
     dirty = false,
     fx = null;
+  let auto,
+    vsAutoIssue = '',
+    vsAutoAccountIssue = '',
+    vsAutoSpecIssue = '';
   let scopeId = crypto.randomUUID(),
     publicAddress = '',
     sessionEndpoint = null,
@@ -127,6 +133,10 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
       })
     ]);
   }
+  function suggestedVestSymbol() {
+    if (supported.has(asset.id) && config.vsSymbol === asset.ticker) return asset.ticker + '-PERP';
+    return config.vsSymbol !== asset.ticker || /-PERP$/.test(config.vsSymbol) ? config.vsSymbol : '';
+  }
   function stampAccount(leg, expected) {
     if (!leg?.account) return leg;
     const a = leg.account;
@@ -150,6 +160,9 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
       frozen: mode === 'frozen',
       pending,
       maxAgeMs: config.maxAgeMs,
+      vsAutoIssue,
+      vsAutoAccountIssue,
+      vsAutoSpecIssue,
       mappingVerified: config.verified && !dirty,
       updatedAt: new Date().toISOString(),
       addressConfigured: !!config.address,
@@ -291,6 +304,10 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
   }
   function setMode(next) {
     if (!['offline', 'live', 'frozen'].includes(next)) return;
+    if (auto?.active && next !== 'live')
+      auto.stop(next === 'frozen' ? '已冻结，自动读取已暂停。' : '已切至离线，自动读取已停止。', {
+        retain: next === 'frozen'
+      });
     cancel();
     mode = next;
     $('feed-mode').value = next;
@@ -350,6 +367,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
       emit(false);
       return;
     }
+    if (auto?.active) auto.stop('已切换品种。');
     cancel();
     dialog?.close();
     if (old) vsRecords.set(old.id, vs);
@@ -368,6 +386,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
       maxAgeMs: Number($('feed-age').value) * 1000
     });
     $('feed-vssym').value = config.vsSymbol;
+    auto?.setURL(suggestedVestSymbol());
     $('feed-hsym').value = config.symbol;
     $('feed-dex').value = config.dex;
     $('feed-live-quote').value = config.quoteCurrency;
@@ -427,7 +446,10 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
         config.marginMode !== $('feed-margin-mode').value
       )
         scopeId = crypto.randomUUID();
-      if (config.vsSymbol !== vsSymbol) vs = null;
+      if (config.vsSymbol !== vsSymbol) {
+        auto?.stop('VS 映射已更改，自动识别已停止。');
+        vs = null;
+      }
       if (
         config.symbol !== symbol ||
         config.endpoint !== endpoint ||
@@ -449,6 +471,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
         marginMode: $('feed-margin-mode').value,
         fingerprint: fingerprint(asset)
       };
+      if (!auto?.active) auto?.setURL(suggestedVestSymbol());
       publicAddress = address;
       sessionEndpoint = endpoint;
       const { address: omitAddress, ...saved } = config;
@@ -497,11 +520,16 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
   };
   $('feed-save-map').onclick = saveConfig;
   $('feed-refresh').onclick = () => (mode === 'live' ? refresh() : setMode('live'));
-  function applyVS(candidate, source) {
+  function applyVS(candidate, source, partial = false) {
     if (candidate.symbol && candidate.symbol !== config.vsSymbol)
       throw Error('VS 报价代码 ' + candidate.symbol + ' 与映射 ' + config.vsSymbol + ' 不一致。');
     const hasPrice = [candidate.bid, candidate.ask, candidate.mark].some(Number.isFinite);
-    if (hasPrice && (!(candidate.bid > 0) || !(candidate.ask >= candidate.bid) || !(candidate.mark > 0)))
+    const complete = candidate.bid > 0 && candidate.ask >= candidate.bid && candidate.mark > 0;
+    if (
+      hasPrice &&
+      !complete &&
+      (!partial || (candidate.bid != null && candidate.ask != null && candidate.ask < candidate.bid))
+    )
       throw Error('请补齐正数买一、卖一、标记价，且卖一不低于买一。');
     const time = Date.parse(candidate.asOf),
       prev = Date.parse(vs?.asOf);
@@ -519,22 +547,31 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
         Date.parse(oldAccount?.asOf) > Date.parse(accountTime))
     )
       throw Error('账户快照时间无效或早于已确认的数据。');
-    const account = Object.keys(acct).length ? { ...acct, asOf: accountTime } : oldAccount;
+    const account = Object.keys(acct).length ? { ...acct, asOf: accountTime, source } : oldAccount;
     const base = hasPrice
       ? {
           symbol: candidate.symbol || config.vsSymbol,
+          sourceKind: 'page',
           bid: candidate.bid,
           ask: candidate.ask,
           mark: candidate.mark,
           open: candidate.open === true,
           timeSource: candidate.timeSource,
           asOf: candidate.asOf,
-          price: (candidate.ask + candidate.bid) / 2,
-          spread: candidate.ask - candidate.bid,
+          price: complete ? (candidate.ask + candidate.bid) / 2 : null,
+          spread: complete ? candidate.ask - candidate.bid : null,
           book: null
         }
       : (vs ?? {});
-    vs = stampAccount({ ...base, source, receivedAt: new Date().toISOString(), account }, config.vsSymbol);
+    vs = stampAccount(
+      {
+        ...base,
+        source: hasPrice ? source : base.source || source,
+        receivedAt: new Date().toISOString(),
+        account
+      },
+      config.vsSymbol
+    );
     sharedVSAccount = vs.account;
     vsRecords.set(asset.id, vs);
     emit();
@@ -622,6 +659,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
         if (!accountEdited && !accountObservedAt) parsed.account = {};
         else if (Object.keys(parsed.account).length)
           parsed.account.asOf = accountEdited ? new Date().toISOString() : accountObservedAt;
+        if (auto?.active) auto.stop('已切换到手工确认的数据。', { retain: true });
         applyVS(parsed, 'VS 确认');
         d.close();
       } catch (err) {
@@ -640,6 +678,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
     q('vs-paste-text').focus();
   }
   $('feed-clear-vs').onclick = () => {
+    auto?.stop('自动识别已停止。');
     vs = null;
     sharedVSAccount = null;
     vsRecords.delete(asset.id);
@@ -702,6 +741,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
       if (!record || dead || target !== asset.id || record.assetId !== target || record.sequence <= bridgeSeq)
         return;
       bridgeSeq = record.sequence;
+      if (auto?.active) return;
       applyVS(record.snapshot, 'VS 本机采集');
       $('feed-bridge-health').textContent = '已接收 ' + record.receivedAt;
     } catch (err) {
@@ -710,8 +750,87 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
       readingBridge = false;
     }
   }
+  auto = mountVestAuto($, {
+    prepare(symbol, usePublic) {
+      if (dirty) throw Error('请先应用已修改的合约映射，再开始自动识别。');
+      if (symbol !== config.vsSymbol && symbol !== suggestedVestSymbol())
+        throw Error('交易页代码 ' + symbol + ' 与所选品种的 VS 映射不一致。请先核对并应用准确的映射。');
+      if (config.vsSymbol !== symbol) {
+        config.vsSymbol = symbol;
+        config.verified = false;
+        $('feed-vssym').value = symbol;
+        $('feed-map-verify').checked = false;
+        scopeId = crypto.randomUUID();
+      }
+      vs = null;
+      sharedVSAccount = null;
+      vsRecords.delete(asset.id);
+      if (usePublic) localStorage.setItem('vs-hype:vest-public:' + asset.id, symbol);
+      else localStorage.removeItem('vs-hype:vest-public:' + asset.id);
+      if (mode !== 'live') setMode('live');
+    },
+    apply(candidate, source) {
+      const checked = parseVSText(JSON.stringify(candidate));
+      checked.timeSource = candidate.timeSource;
+      for (const k of ['mark', 'bid', 'ask'])
+        if (checked[k] != null && !(checked[k] > 0)) throw Error('VS 页面报价无效。');
+      applyVS(checked, source, true);
+    },
+    issue(reason) {
+      if (vsAutoIssue !== reason) {
+        vsAutoIssue = reason;
+        emit();
+      }
+    },
+    accountLost(reason) {
+      if (vsAutoAccountIssue !== reason) {
+        vsAutoAccountIssue = reason;
+        emit();
+      }
+    },
+    checkQuoteCurrency(symbol, contract) {
+      const reason =
+        contract?.symbol !== symbol || !contract.quote
+          ? '尚未核实 Vest 公开行情的报价币。'
+          : contract.quote !== asset.vs.quote
+            ? 'Vest 报价币为 ' +
+              contract.quote +
+              '，当前 VS 合约设为 ' +
+              asset.vs.quote +
+              '。请核对报价币和汇率后再匹配。'
+            : '';
+      if (vsAutoSpecIssue !== reason) {
+        vsAutoSpecIssue = reason;
+        emit();
+      }
+      return reason;
+    },
+    end(retain) {
+      localStorage.removeItem('vs-hype:vest-public:' + asset.id);
+      vsAutoIssue = vsAutoAccountIssue = vsAutoSpecIssue = '';
+      if (!retain) {
+        vs = null;
+        sharedVSAccount = null;
+        vsRecords.delete(asset.id);
+      }
+      if (asset) emit();
+    }
+  });
   $('feed-mode').value = mode;
   selectAsset(getAsset());
+  const launch = new URL(location.href);
+  const launchSymbol = launch.searchParams.get('vest');
+  if (launchSymbol && launchSymbol === suggestedVestSymbol()) {
+    launch.searchParams.delete('vest');
+    history.replaceState(history.state, '', launch);
+    auto.startPublic();
+  } else if (
+    mode === 'live' &&
+    suggestedVestSymbol() &&
+    localStorage.getItem('vs-hype:vest-public:' + asset.id) === suggestedVestSymbol()
+  ) {
+    auto.startPublic();
+  }
   const watch = setInterval(() => {
     if (asset && (mode !== 'offline' || vs)) emit(false);
   }, 200);
@@ -721,8 +840,13 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
     refresh,
     openPaste,
     getSnapshot: () => snapshot(),
+    focusAuto: () => {
+      $('feed-auto-url').scrollIntoView({ block: 'center' });
+      $('feed-auto-start').focus({ preventScroll: true });
+    },
     destroy() {
       dead = true;
+      auto?.destroy();
       cancel();
       clearInterval(watch);
       clearInterval(bridgeTimer);

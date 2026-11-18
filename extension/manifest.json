@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "VS × Hype 本地只读采集",
+  "version": "1.0.0",
+  "description": "在本机匹配器明确启动后读取指定 VS 交易页的可见报价和账户字段。",
+  "background": { "service_worker": "service.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://next.vestmarkets.com/trade/*"],
+      "js": ["extract.js", "vs-content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["http://127.0.0.1/*"],
+      "js": ["config.js", "desk-content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

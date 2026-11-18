@@ -33,6 +33,7 @@ const reason = (c) => (c?.reasons ?? []).join(' · ');
 function localQuote(leg, side) {
   const live = leg[side] ?? leg.book?.[side === 'bid' ? 'bids' : 'asks']?.[0]?.[0];
   if (Number.isFinite(live)) return live;
+  if (leg.sourceKind === 'live' || leg.sourceKind === 'page') return null;
   return Number.isFinite(mark(leg)) ? mark(leg) + ((side === 'bid' ? -1 : 1) * (leg.spread ?? 0)) / 2 : null;
 }
 function asClock(iso) {
@@ -60,9 +61,6 @@ export function showVenue(v, a, acct, config, limits, c, snapshot) {
       info('等待公开地址的有效余额与抵押币换算，暂不能计算可开额度。');
     return;
   }
-  const equity = acct[v + 'Equity'],
-    used = acct[v + 'Used'],
-    free = acct[v + 'Free'];
   const threshold = acct.stage === 'funded' ? config.payoutTarget : config.challengeTarget;
   const fail = acct.stage === 'funded' ? config.fundedFail : config.challengeFail;
   const externalAccount =
@@ -71,9 +69,12 @@ export function showVenue(v, a, acct, config, limits, c, snapshot) {
         ? snapshot.vs?.account
         : snapshot.mode !== 'offline' && a.hype.account
       : null;
+  const equity = externalAccount ? externalAccount.equity : acct[v + 'Equity'];
+  const used = externalAccount ? externalAccount.used : acct[v + 'Used'];
+  const free = externalAccount ? externalAccount.free : acct[v + 'Free'];
   let source = '本地账户';
   if (externalAccount) {
-    if (isVS) source = 'VS 已确认快照';
+    if (isVS) source = externalAccount.source ?? 'VS 已确认快照';
     else source = snapshot.mode === 'frozen' ? '公开地址冻结快照' : '公开地址同步';
   }
   const fresh = externalAccount?.asOf ? ' · ' + asClock(externalAccount.asOf) : '';
@@ -122,9 +123,12 @@ export function showCross(a, c, result, snap) {
   const vsPx = mark(v) / v.ratio,
     hyPx = mark(y) / y.ratio,
     basis = both ? Math.abs(vsPx - hyPx) : null;
-  const spread =
-    (localQuote(v, 'ask') - localQuote(v, 'bid')) / v.ratio +
-    (localQuote(y, 'ask') - localQuote(y, 'bid')) / y.ratio;
+  const spreads = [v, y].map((leg) => {
+    const ask = localQuote(leg, 'ask'),
+      bid = localQuote(leg, 'bid');
+    return Number.isFinite(ask) && Number.isFinite(bid) ? (ask - bid) / leg.ratio : null;
+  });
+  const spread = spreads.every(Number.isFinite) ? spreads[0] + spreads[1] : null;
   const iv = result.interval ?? {},
     cost = c?.costs ?? {},
     lim = result.limits ?? {};
