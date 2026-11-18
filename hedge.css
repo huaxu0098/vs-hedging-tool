@@ -334,3 +334,57 @@ label input[type='checkbox'] {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+#account-readout {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding-block: 28px;
+}
+#account-readout .observation-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+#account-readout .card {
+  margin: 0;
+}
+#account-readout .readout-number {
+  display: block;
+  font-size: clamp(20px, 2.4vw, 32px);
+  color: #174c5b;
+  margin: 7px 0;
+}
+#account-readout .observation-verdict {
+  padding: 12px 15px;
+  background: #fff4dd;
+  border-left: 3px solid #b77e21;
+  margin: 17px 0;
+}
+#account-readout .readout-heading {
+  margin: 22px 0 10px;
+}
+#account-readout dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 14px;
+  margin: 12px 0 0;
+}
+#account-readout dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+#account-readout dt,
+.observation-meta {
+  color: var(--muted);
+}
+#account-readout li {
+  margin-block: 0.5em;
+}
+@media (max-width: 600px) {
+  #account-readout .observation-grid {
+    grid-template-columns: 1fr;
+  }
+  #account-readout dl {
+    grid-template-columns: 1fr 1.35fr;
+  }
+}

@@ -16,7 +16,8 @@
     "hedge": "node scripts/serve.js --hedge",
     "test:hedge": "node --test tests/hedge-*.test.js",
     "test:hedge:browser": "node scripts/qa/hedge-browser.js",
-    "test:hedge:live": "node scripts/qa/hedge-live.js"
+    "test:hedge:live": "node scripts/qa/hedge-live.js",
+    "hedge:observe": "node scripts/read-hedge-tabs.js"
   },
   "engines": {
     "node": ">=22"

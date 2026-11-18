@@ -188,6 +188,38 @@ try {
   assert.equal(await run(by('reserve') + '.value'), '10000');
   assert.deepEqual(chrome.faults, []);
   console.log('通过 手机 390×844 的重算、宽度、桌面 1390×1040、刷新持久化，浏览器异常 0');
+  const ledgerBeforeObservation = await workspace();
+  const at = new Date().toISOString();
+  const observed = {
+    version: 1,
+    vs: {
+      symbol: 'BTC-PERP',
+      at,
+      primary: true,
+      emptyPositions: true,
+      equity: '0.00',
+      free: '0.00',
+      capacity: '0.00',
+      positionMargin: '0.00',
+      orderMargin: '0.00'
+    },
+    hl: { symbol: 'BTC', at, disconnected: true, equity: null, free: null }
+  };
+  await send('Page.navigate', {
+    url: chrome.url + '/?accounts=last#' + new URLSearchParams({ observation: JSON.stringify(observed) })
+  });
+  await wait("document.querySelector('#account-readout')?.innerText.includes('不适用 · 主账户')");
+  assert.match(await text('#account-readout'), /Hype 本次新增名义额\$0.00/);
+  assert.match(await text('#account-readout'), /钱包未连接，无法读取/);
+  assert.equal(await run('location.hash'), '');
+  assert.deepEqual(await workspace(), ledgerBeforeObservation);
+  await send('Page.reload');
+  await wait("document.querySelector('#account-readout')?.innerText.includes('本次不开仓')");
+  assert.ok(await run('document.documentElement.scrollWidth<=innerWidth+1'));
+  await click('#account-readout a');
+  await wait("document.getElementById('mode')?.value==='live_readonly'");
+  assert.deepEqual(chrome.faults, []);
+  console.log('通过 账户快照、未连接占位值、盈亏口径、刷新、手机宽度与只读接入');
 } finally {
   await chrome.close();
   await rm(dir, { recursive: true, force: true });
