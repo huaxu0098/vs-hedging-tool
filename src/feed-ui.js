@@ -1,6 +1,7 @@
 import { MAINNET, parseEndpoint, readHype, toMarketAsset, documentedQuote } from './feeds.js';
 import { parseVSText, captureScript } from './vs-parser.js';
 import { mountVestAuto, vestAutoPanel } from './vest-auto.js';
+import { mountUsdRates } from './usd-rates.js';
 export { toMarketAsset };
 
 const mapKey = (id) => 'vs-hype:feed-map:v1:' + id;
@@ -46,9 +47,11 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
     <div class="fd-card"><h3>品种映射及汇率</h3><p id="feed-target"></p><div class="fd-grid">
       ${field('feed-vssym', 'VS 页面精确代码')}${field('feed-hsym', 'Hype universe 精确代码')}${field('feed-dex', 'HIP-3 DEX（主永续留空）')}${field('feed-live-quote', 'Hype 实际报价币（按合约规格）')}
       <label>拟用 Hype 保证金模式<select id="feed-margin-mode"><option value="cross">全仓</option><option value="isolated">逐仓</option></select></label>
-    </div><div class="fd-grid" id="feed-fx"></div>
+    </div><label>美元汇率来源<select id="feed-fx-mode"><option value="auto">自动 · 美元现货盘口</option><option value="manual">手动确认</option></select></label>
+    <div id="feed-fx-status" class="fd-reading"></div><div class="fd-grid" id="feed-fx" hidden></div>
+    <button type="button" id="feed-fx-confirm" hidden>确认手动汇率</button>
     <label class="fd-check"><input type="checkbox" id="feed-map-verify">我已核对两边合约的标的、规格、结算币和价格关系</label>
-    <button type="button" id="feed-save-map">应用连接、映射与当前汇率</button></div>
+    <button type="button" id="feed-save-map">应用连接与合约映射</button></div>
     <div class="fd-card"><h3>已接收的数据</h3><div class="fd-reading" id="feed-values"></div>
     <details><summary>盘口五档与当前 DEX 公开持仓</summary><pre id="feed-depth"></pre></details></div>
     <details class="fd-card"><summary>手动采集其他 VS 来源（单次推送）</summary><p>输入 VS 页面的 HTTPS 来源，配对当前品种后复制脚本。在该页面框选报价或账户文字，运行脚本并核对将发送的字段。配对有效 10 分钟。</p>
@@ -67,7 +70,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
     errors = [],
     pending = false,
     dirty = false,
-    fx = null;
+    vestContract = null;
   let auto,
     vsAutoIssue = '',
     vsAutoAccountIssue = '',
@@ -85,8 +88,8 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
     bridgeTimer,
     readingBridge = false,
     lastHealth = '';
-  const vsRecords = new Map(),
-    fxRecords = new Map();
+  const vsRecords = new Map();
+  const usd = mountUsdRates($, () => emit());
 
   function freshMap(a) {
     let saved = {};
@@ -168,7 +171,10 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
       addressConfigured: !!config.address,
       marginMode: config.marginMode,
       quoteCurrency: config.quoteCurrency,
-      fx
+      vestContract,
+      fxMode: usd.mode,
+      usdRates: usd.rates,
+      fx: usd.manual
     };
     return result;
   }
@@ -230,7 +236,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
             '　可用 ' +
             display(leg.account.free) +
             ' ' +
-            (leg.account.currency ?? 'U')
+            (leg.account.currency ?? (label === 'VS' ? 'USD 等值' : 'U'))
         );
     }
     if (hype)
@@ -248,6 +254,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
   }
   function emit(force = true) {
     if (dead || !asset) return;
+    syncFX();
     const s = snapshot(),
       health = showHealth(s);
     if (force || health !== lastHealth) onUpdate(s);
@@ -319,38 +326,28 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
       emit();
     }
   }
-  function fillFX() {
-    const grid = $('feed-fx');
-    grid.replaceChildren();
-    for (const side of ['vs', 'hype'])
-      for (const [key, currency] of [
-        ['quoteUsd', 'quote'],
-        ['settleUsd', 'settle']
-      ]) {
-        const code =
-          side === 'hype' && currency === 'quote'
-            ? $('feed-live-quote').value.trim().toUpperCase()
-            : asset[side][currency];
-        if (!code || code === 'USD') continue;
-        const label = document.createElement('label'),
-          input = document.createElement('input');
-        label.textContent =
-          (side === 'vs' ? 'VS' : 'Hype') +
-          ' ' +
-          (currency === 'quote' ? '报价' : '结算') +
-          '汇率（1 ' +
-          code +
-          ' 折 USD）';
-        input.type = 'number';
-        input.min = '0';
-        input.step = 'any';
-        input.dataset.side = side;
-        input.dataset.rate = key;
-        input.value = fx?.[side]?.[key] ?? asset[side][key] ?? '';
-        input.addEventListener('input', markDirty);
-        label.append(input);
-        grid.append(label);
-      }
+  function syncFX() {
+    const liveVest =
+      vestContract &&
+      vestContract.symbol === config.vsSymbol &&
+      (vs?.source === 'Vest 公开行情' || (!vs?.bid && auto?.active));
+    const bindings = [
+      { side: 'vs', kind: 'quote', code: liveVest ? vestContract.quote : asset.vs.quote },
+      { side: 'vs', kind: 'settle', code: asset.vs.settle },
+      { side: 'vs', kind: 'account', code: vs?.account?.currency },
+      { side: 'hype', kind: 'quote', code: config.quoteCurrency || asset.hype.quote },
+      { side: 'hype', kind: 'settle', code: asset.hype.settle }
+    ];
+    usd.configure(
+      bindings,
+      mode === 'live' ||
+        (mode === 'offline' &&
+          (vs?.bid > 0 ||
+            (vs?.account?.currency && vs.account.currency !== 'USD') ||
+            vs?.account?.positions?.some((item) => item.currency && item.currency !== 'USD'))),
+      config.maxAgeMs,
+      config.period
+    );
   }
   function markDirty() {
     dirty = true;
@@ -378,7 +375,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
     const quote = vsRecords.get(asset.id);
     vs = quote || sharedVSAccount ? { ...quote, account: sharedVSAccount } : null;
     hype = null;
-    fx = fxRecords.get(asset.id) ?? null;
+    vestContract = null;
     errors = [];
     dirty = false;
     Object.assign(config, {
@@ -400,7 +397,6 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
     $('feed-target').textContent = asset.name + ' · ' + asset.ticker + '，代码区分大小写。';
     $('feed-depth').textContent = '';
     $('feed-script').value = '';
-    fillFX();
     mode === 'live' ? refresh() : emit();
   }
   function saveConfig() {
@@ -428,13 +424,6 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
           (symbol.includes(':') ? symbol.split(':')[0] !== dex : !!dex))
       )
         throw Error('HIP-3 代码前缀必须与 DEX 一致。');
-      const nextFX = { vs: {}, hype: {} };
-      for (const input of $('feed-fx').querySelectorAll('input')) {
-        const n = numberOrNull(input.value);
-        if (!(n > 0)) throw Error('请填写有效的正数汇率。');
-        nextFX[input.dataset.side][input.dataset.rate] = n;
-        nextFX[input.dataset.side].asOf = new Date().toISOString();
-      }
       cancel();
       if (
         config.vsSymbol !== vsSymbol ||
@@ -476,8 +465,6 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
       sessionEndpoint = endpoint;
       const { address: omitAddress, ...saved } = config;
       localStorage.setItem(mapKey(asset.id), JSON.stringify(saved));
-      fx = nextFX;
-      fxRecords.set(asset.id, fx);
       dirty = false;
       errors = [];
       mode === 'live' ? refresh() : emit();
@@ -502,7 +489,6 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
   ])
     $(id).addEventListener('input', markDirty);
   $('feed-live-quote').oninput = markDirty;
-  $('feed-live-quote').onchange = fillFX;
   $('feed-map-verify').onchange = () => {
     dirty = true;
     emit();
@@ -763,6 +749,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
         scopeId = crypto.randomUUID();
       }
       vs = null;
+      vestContract = null;
       sharedVSAccount = null;
       vsRecords.delete(asset.id);
       if (usePublic) localStorage.setItem('vs-hype:vest-public:' + asset.id, symbol);
@@ -771,6 +758,13 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
     },
     apply(candidate, source) {
       const checked = parseVSText(JSON.stringify(candidate));
+      const accountCurrency = candidate.account?.currency;
+      if (
+        Object.keys(checked.account).length &&
+        typeof accountCurrency === 'string' &&
+        /^[A-Z0-9]{2,12}$/.test(accountCurrency)
+      )
+        checked.account.currency = accountCurrency;
       checked.timeSource = candidate.timeSource;
       for (const k of ['mark', 'bid', 'ask'])
         if (checked[k] != null && !(checked[k] > 0)) throw Error('VS 页面报价无效。');
@@ -789,17 +783,20 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
       }
     },
     checkQuoteCurrency(symbol, contract) {
-      const reason =
-        contract?.symbol !== symbol || !contract.quote
-          ? '尚未核实 Vest 公开行情的报价币。'
-          : contract.quote !== asset.vs.quote
-            ? 'Vest 报价币为 ' +
-              contract.quote +
-              '，当前 VS 合约设为 ' +
-              asset.vs.quote +
-              '。请核对报价币和汇率后再匹配。'
-            : '';
-      if (vsAutoSpecIssue !== reason) {
+      const valid =
+        contract?.symbol === symbol &&
+        symbol === config.vsSymbol &&
+        typeof contract.quote === 'string' &&
+        /^[A-Z0-9._-]{1,16}$/.test(contract.quote);
+      const next = valid ? { symbol, quote: contract.quote } : null;
+      const reason = valid ? '' : '尚未核实 Vest 公开行情的报价币。';
+      const changed = vestContract?.quote !== next?.quote || vestContract?.symbol !== next?.symbol;
+      if (changed && vestContract && next && config.verified) {
+        config.verified = false;
+        $('feed-map-verify').checked = false;
+      }
+      vestContract = next;
+      if (changed || vsAutoSpecIssue !== reason) {
         vsAutoSpecIssue = reason;
         emit();
       }
@@ -809,6 +806,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
       localStorage.removeItem('vs-hype:vest-public:' + asset.id);
       vsAutoIssue = vsAutoAccountIssue = vsAutoSpecIssue = '';
       if (!retain) {
+        vestContract = null;
         vs = null;
         sharedVSAccount = null;
         vsRecords.delete(asset.id);
@@ -846,6 +844,7 @@ export function mountFeedUI(container, { getAsset, onUpdate }) {
     },
     destroy() {
       dead = true;
+      usd.destroy();
       auto?.destroy();
       cancel();
       clearInterval(watch);

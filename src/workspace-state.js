@@ -1,3 +1,4 @@
+import { fxIsCurrent } from './feeds.js';
 import { createTemplates } from './assets.js';
 import { DEFAULT_CONFIG } from './decision.js';
 
@@ -71,9 +72,18 @@ export function dashboardAccount(local, manual, snapshot, asset, assets, legacyH
       active || venue === 'vs'
         ? venue === 'hype'
           ? (asset.hype.account ?? null)
-          : snapshot?.vs?.account
+          : Object.hasOwn(asset.vs, 'account')
+            ? asset.vs.account
+            : snapshot?.fxMode === undefined &&
+                (!snapshot?.vs?.account?.currency || snapshot.vs.account.currency === 'USD')
+              ? snapshot?.vs?.account
+              : null
         : null;
-    if (!source) continue;
+    if (!source) {
+      if (snapshot?.[venue]?.account && (active || venue === 'vs'))
+        issues.push((venue === 'vs' ? 'VS' : 'Hype') + ' 账户尚无可靠的美元估值。');
+      continue;
+    }
     if (venue === 'vs' && source.stage) account.stage = source.stage;
     const equity = source.equity,
       positions = source.positions;
@@ -101,10 +111,25 @@ export function dashboardAccount(local, manual, snapshot, asset, assets, legacyH
       account.positions = account.positions.filter((p) => p.venue !== venue);
       for (const p of positions) {
         if (p.qty === 0) continue;
-        const matched =
-          p.assetId === asset.id || p.symbol === snapshot[venue].symbol || p.symbol === asset[venue].symbol;
-        const id = p.assetId ?? (matched ? asset.id : 'external:' + String(p.symbol));
-        const spec = matched ? asset : assets.find((a) => a.id === id);
+        const matchesCurrent =
+          p.symbol && [snapshot?.[venue]?.symbol, asset[venue].symbol].includes(p.symbol);
+        const sameSource = (a) => a.feedMode === 'live' || (venue === 'vs' && a.mixedSource);
+        // An imported external wallet can contain other markets. Only attach
+        // corroborated live specs; an offline template cannot price its liquidation.
+        const candidates = assets.filter(
+          (a) =>
+            (!active || sameSource(a)) &&
+            (!p.assetId || p.assetId === a.id) &&
+            (!p.symbol || p.symbol === a[venue].symbol)
+        );
+        const matched = matchesCurrent && (!p.assetId || p.assetId === asset.id);
+        const spec = matched
+          ? asset
+          : candidates.length === 1 && (p.symbol || p.assetId)
+            ? candidates[0]
+            : undefined;
+        if (p.assetId === asset.id && !spec && p.symbol) issues.push(venue + ' 持仓代码与当前合约不一致。');
+        const id = spec?.id ?? (p.assetId === asset.id ? null : p.assetId) ?? 'external:' + String(p.symbol);
         account.positions.push({
           ...p,
           assetId: id,
@@ -155,7 +180,9 @@ export function resolveHeldMarket(candidate, heldAsset, now = Date.now()) {
       a[v].quote,
       a[v].settle,
       a[v].multiplier,
-      a[v].ratio,
+      family(a) === 'live' || (family(a) === 'mixed' && v === 'vs')
+        ? Number((a[v].ratio * a[v].quoteUsd).toPrecision(12))
+        : a[v].ratio,
       a[v].quoteScale ?? 1,
       a[v].qtyUnit
     ]);
@@ -169,6 +196,8 @@ export function resolveHeldMarket(candidate, heldAsset, now = Date.now()) {
     reasons.push(candidate.ticker + ' 已有仓位的行情来源或合约规格与当前设置不同。请切回原来源并刷新。');
   }
   for (const leg of [asset.vs, asset.hype]) {
+    if (!fxIsCurrent(leg, asset.maxAgeSec, now))
+      reasons.push(asset.ticker + ' 已有仓位的 USD 换算汇率过期，须更新后才能估值。');
     const t = typeof leg.asOf === 'number' ? leg.asOf : Date.parse(leg.asOf);
     if (!Number.isFinite(t) || t > now || now - t > asset.maxAgeSec * 1000)
       reasons.push(asset.ticker + ' 已有仓位的报价过期，须更新后才能估值。');

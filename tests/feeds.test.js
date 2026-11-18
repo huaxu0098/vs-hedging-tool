@@ -261,14 +261,296 @@ test('实时与冻结冷启动不借用模板价格，返回离线后恢复模�
   assert.equal(waiting.referencePrice, null);
   assert.equal(waiting.vs.price, null);
   assert.equal(waiting.hype.price, null);
-  assert.ok(waiting.sourceIssues.some(issue => issue.includes('缺少买一')));
+  assert.ok(waiting.sourceIssues.some((issue) => issue.includes('缺少买一')));
   const h = await readHype({ symbol: 'BTC', fetchImpl: reply().fetchImpl });
   const frozen = toMarketAsset(a, { ...snap, mode: 'frozen', frozen: true, hype: h }, t);
   assert.equal(frozen.referencePrice, null);
   assert.equal(frozen.hype.mark, h.mark);
-  assert.ok(frozen.sourceIssues.some(issue => issue.includes('冻结')));
+  assert.ok(frozen.sourceIssues.some((issue) => issue.includes('冻结')));
   const offline = toMarketAsset(a, { ...snap, mode: 'offline', hype: h }, t);
   assert.equal(offline.referencePrice, a.referencePrice);
   assert.equal(offline.hype.price, a.hype.price);
   assert.notEqual(offline.hype.sourceKind, 'live');
+});
+
+function observedRate(currency, rate, source = 'Bitstamp', time = t) {
+  return {
+    currency,
+    quote: 'USD',
+    bid: rate - 0.0001,
+    ask: rate + 0.0001,
+    rate,
+    asOf: new Date(time).toISOString(),
+    source
+  };
+}
+
+async function fxSnapshot(wallet = false) {
+  const a = createTemplates(t)[0];
+  const h = await readHype({
+    symbol: 'BTC',
+    address: wallet ? '0x' + '0'.repeat(40) : '',
+    fetchImpl: reply().fetchImpl
+  });
+  const v = (h.mark * 0.98) / 1.02;
+  return {
+    a,
+    s: {
+      assetId: 'btc',
+      mode: 'live',
+      mappingVerified: true,
+      maxAgeMs: 5000,
+      fxMode: 'auto',
+      marginMode: 'cross',
+      quoteCurrency: 'USDT',
+      addressConfigured: wallet,
+      vestContract: { symbol: 'BTC-PERP', quote: 'USDC' },
+      hype: h,
+      vs: {
+        symbol: 'BTC-PERP',
+        source: 'Vest 公开行情',
+        open: true,
+        bid: v - 0.5,
+        ask: v + 0.5,
+        price: v,
+        mark: v,
+        asOf: h.asOf
+      },
+      usdRates: { USDC: observedRate('USDC', 1.02), USDT: observedRate('USDT', 0.98, 'Kraken', t - 60) }
+    }
+  };
+}
+
+const nearFX = (a, b) => assert.ok(Math.abs(a - b) < 1e-7, a + ' vs ' + b);
+
+test('非平价 USDT/USDC 稳定映射到原生美元轴；乘数、结算币和账户权益各按自己的单位换算', async () => {
+  const { analyzeCandidate } = await import('../src/decision.js');
+  const { a, s } = await fxSnapshot(true);
+  s.vs.account = {
+    asOf: s.vs.asOf,
+    currency: 'USDT',
+    balance: 10000,
+    equity: 10015,
+    used: 20,
+    free: 9995,
+    positions: [{ symbol: 'BTC-PERP', qty: 0.02, entry: 60000, liqPrice: 52000, upnl: 15, marginUsed: 20 }]
+  };
+  const live = toMarketAsset(a, s, t);
+  assert.deepEqual(live.sourceIssues, []);
+  assert.equal(a.vs.quote, 'USD');
+  assert.equal(live.vs.quote, 'USDC');
+  assert.equal(live.vs.settle, 'USD');
+  nearFX(live.referencePrice, s.vs.mark * 1.02);
+  nearFX(live.referencePrice, s.hype.mark * 0.98);
+  nearFX(live.vs.ratio, 1 / 1.02);
+  nearFX(live.hype.ratio, 1 / 0.98);
+  assert.equal(live.hype.fxDetails.quote.source, 'Kraken');
+  assert.equal(live.hype.fxAsOf, s.usdRates.USDT.asOf);
+  nearFX(live.hype.account.cash, 400 * 1.02);
+  nearFX(live.hype.account.positions[0].upnl, 5 * 1.02);
+  assert.equal(live.hype.account.positions[0].liqPrice, 64500);
+  nearFX(live.hype.tiers[1].lowerBound, 150000000 * 1.02);
+  nearFX(live.vs.account.balance, 9800);
+  nearFX(live.vs.account.positions[0].marginUsed, 19.6);
+  assert.equal(live.vs.account.positions[0].entry, 60000);
+  assert.equal(live.vs.account.positions[0].liqPrice, 52000);
+  assert.equal(live.vs.account.sourceCurrency, 'USDT');
+  assert.equal(s.vs.account.balance, 10000);
+  const rec = analyzeCandidate(
+    live,
+    { stage: 'challenge', vsBalance: 10000, hypeCash: 409, positions: [] },
+    {},
+    { vsUsd: 18000, hypeUsd: 3000, vsLong: true },
+    t
+  );
+  assert.ok(Number.isFinite(rec.liq), rec.reasons.join(' '));
+  nearFX(rec.vs.delta, rec.vs.qty / 1.02);
+  nearFX(rec.hype.delta, (-rec.hype.qty * 1.02) / 0.98);
+  nearFX(rec.liq, live.referencePrice + (rec.liqMark - s.hype.mark) * 0.98);
+});
+
+test('自动汇率必须有同一币/USD、实盘来源、新鲜时刻及双边价格；无效数据不会退回模板或手工 1', async () => {
+  const { a, s } = await fxSnapshot(true);
+  s.fx = { hype: { quoteUsd: 1, settleUsd: 1, asOf: s.hype.asOf } };
+  for (const mutate of [
+    (r) => {
+      delete r.USDC;
+    },
+    (r) => {
+      r.USDC.rate = 0;
+    },
+    (r) => {
+      r.USDC.source = '  ';
+    },
+    (r) => {
+      r.USDC.currency = 'USDT';
+    },
+    (r) => {
+      r.USDC.quote = 'USDT';
+    },
+    (r) => {
+      r.USDC.bid = r.USDC.ask + 1;
+    },
+    (r) => {
+      r.USDC.rate = r.USDC.ask + 0.1;
+    },
+    (r) => {
+      r.USDC.asOf = t + 1;
+    },
+    (r) => {
+      r.USDC.asOf = t - 5001;
+    }
+  ]) {
+    const copy = structuredClone(s);
+    mutate(copy.usdRates);
+    const result = toMarketAsset(a, copy, t);
+    assert.equal(result.hype.settleUsd, null);
+    assert.equal(result.hype.account, null);
+    assert.equal(result.referencePrice, null);
+    assert.equal(result.verified, false);
+    assert.ok(result.sourceIssues.some((i) => i.includes('USDC') && i.includes('汇率')));
+  }
+});
+
+test('手工确认按币种绑定；错误 Vest 合约元数据不覆盖原规格，其他来源不能借用 Vest 报价币', async () => {
+  const { a, s } = await fxSnapshot();
+  s.fxMode = 'manual';
+  s.fx = {
+    vs: { quoteCurrency: 'USDC', quoteUsd: 1.02, asOf: s.vs.asOf },
+    hype: {
+      quoteCurrency: 'USDT',
+      settleCurrency: 'USDC',
+      quoteUsd: 0.98,
+      settleUsd: 1.02,
+      asOf: s.hype.asOf
+    }
+  };
+  assert.deepEqual(toMarketAsset(a, s, t).sourceIssues, []);
+  s.fx.hype.quoteCurrency = 'USDC';
+  assert.equal(toMarketAsset(a, s, t).hype.quoteUsd, null);
+  assert.match(toMarketAsset(a, { ...s, assetId: 'eth' }, t).sourceIssues.join(' '), /精确代码/);
+  s.vestContract.symbol = 'ETH-PERP';
+  assert.match(toMarketAsset(a, s, t).sourceIssues.join(' '), /精确代码/);
+  s.vs.source = '手工确认';
+  s.vs.quote = 'EUR';
+  s.vs.settle = 'EUR';
+  const manual = toMarketAsset(a, s, t);
+  assert.equal(manual.vs.quote, 'USD');
+  assert.equal(manual.vs.settle, 'USD');
+  s.vs.account = { balance: 10000, asOf: s.vs.asOf };
+  assert.equal(toMarketAsset(a, s, t).vs.account.balance, 10000);
+});
+
+test('识别的每克价格标尺随汇率浮动；原映射不一致必须拒绝', async () => {
+  const { a, s } = await fxSnapshot();
+  Object.assign(a.vs, { quoteScale: 1 / 31.1034768, ratio: 1 / 31.1034768 });
+  for (const key of ['bid', 'ask', 'mark', 'price']) s.vs[key] /= 31.1034768;
+  const live = toMarketAsset(a, s, t);
+  assert.deepEqual(live.sourceIssues, []);
+  nearFX(live.vs.ratio, 1 / 31.1034768 / 1.02);
+  nearFX(live.referencePrice, s.hype.mark * 0.98);
+  a.vs.ratio = 1;
+  const wrong = toMarketAsset(a, s, t);
+  assert.equal(wrong.vs.ratio, null);
+  assert.ok(wrong.sourceIssues.some((i) => i.includes('报价比例')));
+});
+
+test('账户部分字段按原币独立换算；已有 USD 手工输入、缺失金额和跨品种原价格保持原义', async () => {
+  const { dashboardAccount } = await import('../src/workspace-state.js');
+  const { a, s } = await fxSnapshot();
+  s.vs.account = {
+    currency: 'USDC',
+    asOf: s.vs.asOf,
+    equity: 100,
+    positions: [{ assetId: 'eth', symbol: 'ETH-PERP', qty: 3, entry: 500, upnl: 7 }]
+  };
+  const live = toMarketAsset(a, s, t),
+    usd = live.vs.account;
+  nearFX(usd.equity, 102);
+  nearFX(usd.positions[0].upnl, 7.14);
+  assert.equal(usd.positions[0].entry, 500);
+  assert.ok(!Object.hasOwn(usd, 'free'));
+  const acc = {
+    stage: 'challenge',
+    vsBalance: 10000,
+    hypeCash: 409,
+    vsEquity: 10000,
+    hypeEquity: 409,
+    vsFree: 10000,
+    hypeFree: 409,
+    vsUsed: 0,
+    hypeUsed: 0,
+    positions: []
+  };
+  const board = dashboardAccount(acc, null, s, live, [live, ...createTemplates(t).slice(1)]);
+  nearFX(board.account.vsEquity, 102);
+  assert.ok(board.issues.some((i) => i.includes('vsFree')));
+  const accountOnly = { ...s, mode: 'offline', vs: { account: s.vs.account } };
+  const mixed = toMarketAsset(a, accountOnly, t);
+  nearFX(mixed.vs.account.equity, 102);
+  assert.equal(mixed.vs.quote, 'USD');
+  assert.equal(mixed.referencePrice, a.referencePrice);
+  delete s.usdRates.USDC;
+  const invalid = toMarketAsset(a, s, t);
+  assert.equal(invalid.vs.account, null);
+  assert.ok(dashboardAccount(acc, null, s, invalid, [invalid]).issues.some((i) => i.includes('美元估值')));
+  s.vs.account.currency = 'USD';
+  nearFX(toMarketAsset(a, s, t).vs.account.equity, 100);
+});
+
+test('换汇时刻独立过期，阻断异品种持仓估值和平仓；有效新汇率不改变原合约身份', async () => {
+  const { resolveHeldMarket } = await import('../src/workspace-state.js');
+  const { verifyQuotes } = await import('../src/simulation.js');
+  const { a, s } = await fxSnapshot();
+  const first = toMarketAsset(a, s, t);
+  const fresh = structuredClone(s);
+  fresh.usdRates.USDC = observedRate('USDC', 1.021);
+  const next = toMarketAsset(a, fresh, t);
+  assert.deepEqual(resolveHeldMarket(next, first, t).sourceIssues, []);
+  const now = t + 4960;
+  const late = resolveHeldMarket(first, first, now);
+  assert.ok(late.sourceIssues.some((i) => i.includes('汇率过期')));
+  assert.throws(() => verifyQuotes(first, now), /汇率过期/);
+  const modified = structuredClone(next);
+  modified.vs.multiplier *= 2;
+  assert.ok(resolveHeldMarket(modified, first, t).sourceIssues.some((i) => i.includes('规格')));
+});
+
+test('跨市场持仓可用各自显式金额币，缺少其汇率时只保留已知金额，严禁使用离线规格重估', async () => {
+  const { dashboardAccount } = await import('../src/workspace-state.js');
+  const { analyzeCandidate } = await import('../src/decision.js');
+  const { a, s } = await fxSnapshot();
+  s.vs.account = {
+    asOf: s.vs.asOf,
+    currency: 'USD',
+    balance: 10000,
+    equity: 10007,
+    free: 500,
+    used: 0,
+    positions: [
+      { assetId: 'eth', symbol: 'ETH-PERP', qty: 2, entry: 500, currency: 'EUR', upnl: 7, margin: 10 }
+    ]
+  };
+  s.usdRates.EUR = observedRate('EUR', 1.08, '美元直盘', t - 4700);
+  const live = toMarketAsset(a, s, t),
+    row = live.vs.account.positions[0];
+  nearFX(row.upnl, 7.56);
+  nearFX(row.margin, 10.8);
+  assert.equal(row.entry, 500);
+  assert.equal(row.currency, 'USD');
+  assert.equal(live.vs.account.equity, 10007);
+  const account = { stage: 'challenge', vsBalance: 10000, hypeCash: 409, positions: [] };
+  const otherTemplate = createTemplates(t)[1];
+  const board = dashboardAccount(account, null, s, live, [live, otherTemplate]);
+  assert.equal(board.account.positions[0].asset, undefined);
+  const otherLive = { ...otherTemplate, feedMode: 'live', vs: { ...otherTemplate.vs, symbol: 'ETH-PERP' } };
+  const attached = dashboardAccount(account, null, s, live, [live, otherLive]);
+  assert.equal(attached.account.positions[0].asset.id, 'eth');
+  const late = analyzeCandidate(live, account, {}, { vsUsd: 18000, hypeUsd: 3000, vsLong: true }, t + 301);
+  assert.ok(late.reasons.some((r) => r.includes('汇率已过期')));
+  delete s.usdRates.EUR;
+  const incomplete = toMarketAsset(a, s, t);
+  assert.equal(incomplete.vs.account.equity, 10007);
+  assert.equal(incomplete.vs.account.positions[0].upnl, null);
+  assert.equal(incomplete.verified, false);
 });

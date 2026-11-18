@@ -155,13 +155,16 @@ try {
   await wait("document.querySelector('#hype-panel').textContent.includes('公开地址同步')", 18000);
   await wait("/最大总仓位[\\d,.]+ U/.test(document.querySelector('#hype-panel').textContent)", 18000);
   report.publicAddressProbe = await text('#hype-panel');
-  const received = await text('#feed-values');
-  const values = [...received.matchAll(/净值 ([\d,.]+)　已用 ([\d,.]+)　可用 ([\d,.]+)/g)];
-  assert.ok(values.length >= 2, '两平台均有账户来源');
-  const free = Number(values.at(-1)[3].replaceAll(',', ''));
-  const panelFree = await text('#hype-panel .big');
-  assert.ok(Math.abs(Number(panelFree.split('U')[0].trim().replaceAll(',', '')) - free) < 0.006);
-  report.liveWithdrawable = free;
+  const amounts = await run(`(() => {
+    const rows = [...document.querySelector('#feed-values').textContent.matchAll(/净值 ([\\d,.]+)　已用 ([\\d,.]+)　可用 ([\\d,.]+)/g)];
+    return { rows:rows.length, raw: Number(rows.at(-1)?.[3].replaceAll(',','')),
+      rate:Number(document.querySelector('#hype-panel [data-usd-rate]')?.dataset.usdRate),
+      dollars:Number(document.querySelector('#hype-panel .big').textContent.split('U')[0].trim().replaceAll(',','')) };
+  })()`);
+  assert.ok(amounts.rows >= 2 && amounts.rate > 0, '两平台账户及抵押币汇率均有来源');
+  assert.ok(Math.abs(amounts.dollars - amounts.raw * amounts.rate) < 0.006, '原币可用额 × 当次美元汇率');
+  report.liveWithdrawable = amounts.raw;
+  report.liveWithdrawableUsd = amounts.dollars;
   done('公开零地址 clearinghouseState 读回，并刷新可用保证金及开仓上限');
   await send('Fetch.enable', { patterns: [{ urlPattern: '*/api/hype-info' }] });
   await click('#feed-refresh');

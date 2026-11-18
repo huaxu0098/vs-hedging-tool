@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { makeBridge } from './bridge.js';
 import { readVestContract } from './vest-contract.js';
+import { createUsdRatesReader } from './usd-rates.js';
 
 const root = new URL('../', import.meta.url);
 const host = '127.0.0.1';
@@ -16,6 +17,7 @@ const types = {
   json: 'application/json'
 };
 const bridge = makeBridge();
+const readUsdRates = createUsdRatesReader();
 
 const server = createServer(async (request, response) => {
   const validHost = ['localhost', '127.0.0.1'].some(
@@ -30,6 +32,32 @@ const server = createServer(async (request, response) => {
     url = new URL(request.url, 'http://localhost');
   } catch {
     response.writeHead(400).end();
+    return;
+  }
+  if (url.pathname === '/api/usd-rates') {
+    if (
+      (request.headers.origin && request.headers.origin !== 'http://' + request.headers.host) ||
+      request.headers['sec-fetch-site'] === 'cross-site'
+    ) {
+      response.writeHead(403).end();
+      return;
+    }
+    if (request.method !== 'GET') {
+      response.writeHead(405, { Allow: 'GET' }).end();
+      return;
+    }
+    if (url.search) {
+      response.writeHead(400).end();
+      return;
+    }
+    const result = await readUsdRates();
+    response
+      .writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff'
+      })
+      .end(JSON.stringify(result));
     return;
   }
   if (url.pathname === '/api/vest-contract' && request.method === 'GET') {

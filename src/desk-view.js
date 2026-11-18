@@ -61,12 +61,18 @@ export function showVenue(v, a, acct, config, limits, c, snapshot) {
       info('等待公开地址的有效余额与抵押币换算，暂不能计算可开额度。');
     return;
   }
+  if (isVS && config.useExternalAccounts !== false && snapshot?.vs?.account && !a.vs.account) {
+    $('vs-panel').innerHTML =
+      '<div class="eyebrow">PROP FIRM</div><h2>VS 考核账户</h2><div class="big">—</div>' +
+      info('等待有效的 VS 账户美元换算，暂不能计算可开额度。');
+    return;
+  }
   const threshold = acct.stage === 'funded' ? config.payoutTarget : config.challengeTarget;
   const fail = acct.stage === 'funded' ? config.fundedFail : config.challengeFail;
   const externalAccount =
     config.useExternalAccounts !== false && snapshot
       ? isVS
-        ? snapshot.vs?.account
+        ? a.vs.account
         : snapshot.mode !== 'offline' && a.hype.account
       : null;
   const equity = externalAccount ? externalAccount.equity : acct[v + 'Equity'];
@@ -90,6 +96,19 @@ export function showVenue(v, a, acct, config, limits, c, snapshot) {
     '</h2><div class="big">' +
     n(free) +
     '<small>U 可用</small></div>' +
+    (externalAccount?.sourceCurrency &&
+    externalAccount.sourceCurrency !== 'USD' &&
+    Number.isFinite(externalAccount.fxRate)
+      ? '<p class="hint" data-usd-rate="' +
+        h(externalAccount.fxRate) +
+        '">账户折算 · 1 ' +
+        h(externalAccount.sourceCurrency) +
+        ' = ' +
+        n(externalAccount.fxRate, 8) +
+        ' USD · ' +
+        h(externalAccount.fxSource) +
+        '</p>'
+      : '') +
     progress(ratio(used, equity)) +
     defs([
       ['当前净值', money(equity)],
@@ -155,8 +174,8 @@ export function showCross(a, c, result, snap) {
     h(a.ticker) +
     '</span></div><h2>跨平台价格与仓位</h2>' +
     '<div class="quote">' +
-    metric('VS 买一 / 卖一', n(localQuote(v, 'bid'), 5) + ' / ' + n(localQuote(v, 'ask'), 5)) +
-    metric('Hype 买一 / 卖一', n(localQuote(y, 'bid'), 5) + ' / ' + n(localQuote(y, 'ask'), 5)) +
+    metric('VS 买一 / 卖一 · ' + v.quote, n(localQuote(v, 'bid'), 5) + ' / ' + n(localQuote(v, 'ask'), 5)) +
+    metric('Hype 买一 / 卖一 · ' + y.quote, n(localQuote(y, 'bid'), 5) + ' / ' + n(localQuote(y, 'ask'), 5)) +
     '</div>' +
     defs([
       [

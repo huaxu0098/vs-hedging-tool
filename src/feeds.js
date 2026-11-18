@@ -277,10 +277,168 @@ export function feedIssues(snap, now = Date.now()) {
   return [...new Set(issues)];
 }
 
+function readUsdRate(snap, venue, field, currency, now) {
+  if (currency === 'USD') return { currency, quote: 'USD', rate: 1, source: '美元本币' };
+  if (typeof currency !== 'string' || !/^[A-Z0-9][A-Z0-9._-]{0,15}$/.test(currency)) return null;
+  const limit = snap.fxMaxAgeMs ?? snap.maxAgeMs;
+  if (!(Number.isFinite(limit) && limit > 0)) return null;
+  let record;
+  if (snap.fxMode === 'auto') {
+    const item = Object.hasOwn(snap.usdRates ?? {}, currency) ? snap.usdRates[currency] : null;
+    if (
+      !item ||
+      item.currency !== currency ||
+      item.quote !== 'USD' ||
+      typeof item.source !== 'string' ||
+      !item.source.trim() ||
+      ![item.bid, item.ask, item.rate].every((n) => Number.isFinite(n) && n > 0) ||
+      item.bid > item.ask ||
+      item.rate < item.bid ||
+      item.rate > item.ask
+    )
+      return null;
+    record = {
+      currency,
+      quote: 'USD',
+      bid: item.bid,
+      ask: item.ask,
+      rate: item.rate,
+      asOf: item.asOf,
+      source: item.source
+    };
+  } else if (snap.fxMode === 'manual' || snap.fxMode === undefined) {
+    const item = snap.fx?.[venue];
+    const bound = item?.[field + 'Currency'];
+    // Pre-FX-mode saved snapshots had no currency labels and were already
+    // scoped to a venue/configuration. New manual confirmations must be bound.
+    if (!item || ((snap.fxMode === 'manual' || bound !== undefined) && bound !== currency)) return null;
+    const rate = item[field + 'Usd'];
+    if (!Number.isFinite(rate) || rate <= 0) return null;
+    record = { currency, quote: 'USD', rate, asOf: item.asOf, source: '用户确认' };
+  } else return null;
+  const time = typeof record.asOf === 'number' ? record.asOf : Date.parse(record.asOf);
+  if (!Number.isFinite(time) || time <= 0 || time > now || now - time > limit) return null;
+  return { ...record, asOf: new Date(time).toISOString(), validUntil: time + limit };
+}
+
+// Venue price and collateral FX can expire independently. Frozen offline
+// templates have no observed FX clock; captured conversions retain one.
+export function fxIsCurrent(leg, maxAgeSec, now) {
+  if (leg.fxAsOf == null && leg.fxValidUntil == null) return true;
+  const stamp = typeof leg.fxAsOf === 'number' ? leg.fxAsOf : Date.parse(leg.fxAsOf);
+  const expiry = leg.fxValidUntil ?? stamp + maxAgeSec * 1000;
+  return Number.isFinite(stamp) && Number.isFinite(expiry) && stamp <= now && now <= expiry;
+}
+
+function valueLegFx(asset, snap, venue, leg, now, issues) {
+  const details = {};
+  for (const kind of ['quote', 'settle']) {
+    const result = readUsdRate(snap, venue, kind, leg[kind], now);
+    details[kind] = result;
+    leg[kind + 'Usd'] = result?.rate ?? null;
+    if (!result)
+      issues.push(
+        (venue === 'vs' ? 'VS' : 'Hype') +
+          ' 的 ' +
+          (leg[kind] || '未知币种') +
+          (snap.fxMode === 'auto'
+            ? ' 自动 USD 汇率缺失、过期或不可验证。'
+            : ' 汇率缺少匹配币种的新鲜手工确认。')
+      );
+  }
+  const observed = Object.values(details)
+    .filter((r) => r?.asOf)
+    .sort((a, b) => Date.parse(a.asOf) - Date.parse(b.asOf));
+  leg.fxDetails = details;
+  leg.fxAsOf = observed[0]?.asOf ?? null;
+  leg.fxValidUntil = observed.length ? Math.min(...observed.map((r) => r.validUntil)) : null;
+  leg.fxSource =
+    [...new Set(observed.map((r) => r.source))].join(' / ') ||
+    (details.quote && details.settle ? '美元本币' : null);
+  if (snap.fxMode !== undefined) {
+    const configured = asset[venue],
+      scale = configured.quoteScale ?? 1;
+    const priorRate = configured.quote === 'USD' ? 1 : configured.quoteUsd;
+    // The stored mapping is calibrated in its original quote currency. Preserve
+    // its physical scale (e.g. troy ounces per gram); only the currency factor floats.
+    const calibration = configured.ratio * priorRate;
+    const mappedNow =
+      leg.quote === configured.quote && details.quote && configured.ratio * details.quote.rate;
+    const validScale = (value) =>
+      Number.isFinite(value) && value > 0 && positive(scale) && Math.abs(value / scale - 1) <= 0.000100000001;
+    if (validScale(calibration)) leg.ratio = details.quote ? calibration / details.quote.rate : null;
+    else if (positive(priorRate) || !validScale(mappedNow)) {
+      leg.ratio = null;
+      issues.push((venue === 'vs' ? 'VS' : 'Hype') + ' 原合约报价比例与标的单位未验证，无法套用实时汇率。');
+    }
+  }
+}
+
+function usdAccount(raw, rate, rowRate, issues, venue) {
+  if (!raw || !rate) return null;
+  const account = { ...raw };
+  const clocks = [rate];
+  const scale = (obj, fields, fx) => {
+    for (const key of fields)
+      if (Object.hasOwn(obj, key) && Number.isFinite(obj[key])) obj[key] = fx ? obj[key] * fx.rate : null;
+  };
+  scale(account, ['cash', 'balance', 'equity', 'free', 'used'], rate);
+  if (Array.isArray(raw.positions)) {
+    account.positions = raw.positions.map((p) => {
+      const next = { ...p };
+      const fx = p.currency === undefined || p.currency === rate.currency ? rate : rowRate(p.currency);
+      if (!fx)
+        issues.push(venue + ' 持仓 ' + (p.symbol ?? p.assetId ?? '') + ' 金额币种缺少已验证的 USD 汇率。');
+      else clocks.push(fx);
+      scale(
+        next,
+        ['upnl', 'unrealized', 'margin', 'marginUsed', 'maintenance', 'maintenanceMargin', 'closeFee'],
+        fx
+      );
+      if (p.currency !== undefined) {
+        next.currency = fx ? 'USD' : null;
+        next.sourceCurrency = p.currency;
+      }
+      return next;
+    });
+    if (Object.hasOwn(raw, 'position'))
+      account.position = account.positions.find((p) => p.symbol === raw.position?.symbol) ?? null;
+  }
+  const observations = clocks.filter((fx) => fx.asOf).sort((a, b) => Date.parse(a.asOf) - Date.parse(b.asOf));
+  return {
+    ...account,
+    currency: 'USD',
+    sourceCurrency: rate.currency,
+    fxRate: rate.rate,
+    fxAsOf: observations[0]?.asOf ?? null,
+    fxValidUntil: observations.length ? Math.min(...observations.map((f) => f.validUntil)) : null,
+    fxSource: rate.source
+  };
+}
+
+function valueVSAccount(snap, leg, now, issues) {
+  const raw = snap.vs?.account;
+  if (!raw) return null;
+  // Manual fields historically mean USD-equivalent and must not be converted
+  // again just because the contract quotes or settles in another currency.
+  const read = (currency) => {
+    const kind = currency === leg.settle ? 'settle' : currency === leg.quote ? 'quote' : 'account';
+    return readUsdRate(snap, 'vs', kind, currency, now);
+  };
+  const rate = read(raw.currency === undefined ? 'USD' : raw.currency);
+  if (!rate) issues.push('VS 账户币种缺少已验证的 USD 汇率。');
+  return usdAccount(raw, rate, read, issues, 'VS');
+}
+
 export function toMarketAsset(asset, snap, now = Date.now()) {
   const mixed = snap?.mode === 'offline' && positive(snap.vs?.bid);
-  if (!snap || (snap.mode === 'offline' && !mixed))
-    return { ...asset, feedMode: 'offline', sourceIssues: feedIssues(snap, now) };
+  if (!snap || (snap.mode === 'offline' && !mixed)) {
+    const sourceIssues = feedIssues(snap, now);
+    const vs = snap?.vs?.account
+      ? { ...asset.vs, account: valueVSAccount(snap, asset.vs, now, sourceIssues) }
+      : asset.vs;
+    return { ...asset, vs, feedMode: 'offline', sourceIssues };
+  }
   const sourceIssues = feedIssues(snap, now);
   if (snap.assetId !== asset.id) sourceIssues.push('当前品种与行情快照不一致。');
   const vs = {
@@ -342,67 +500,54 @@ export function toMarketAsset(asset, snap, now = Date.now()) {
       hype[key] = asset.hype[key];
     }
   }
-  for (const [key, leg] of mixed
-    ? [['vs', vs]]
-    : [
-        ['vs', vs],
-        ['hype', hype]
-      ]) {
-    for (const [currency, rate] of [
-      ['quote', 'quoteUsd'],
-      ['settle', 'settleUsd']
-    ]) {
-      if (leg[currency] === 'USD') {
-        leg[rate] = 1;
-        continue;
-      }
-      const fx = snap.fx?.[key];
-      const age = now - Date.parse(fx?.asOf);
-      if (!positive(fx?.[rate]) || !Number.isFinite(age) || age > snap.maxAgeMs || age < 0) {
-        sourceIssues.push(
-          (key === 'vs' ? 'VS' : 'Hype') + ' 的 ' + leg[currency] + ' 汇率缺少新鲜的手工确认。'
-        );
-        leg[rate] = null;
-      } else {
-        leg[rate] = fx[rate];
-        leg.fxAsOf = fx.asOf;
-        leg.fxSource = '用户确认';
-      }
+  // Feed observations describe prices, not a replacement contract specification.
+  vs.quote = asset.vs.quote;
+  vs.settle = asset.vs.settle;
+  vs.quoteScale = asset.vs.quoteScale;
+  vs.ratio = asset.vs.ratio;
+  hype.settle = asset.hype.settle;
+  if (snap.vs?.source === 'Vest 公开行情') {
+    const meta = snap.vestContract;
+    if (
+      snap.assetId === asset.id &&
+      meta &&
+      typeof meta.symbol === 'string' &&
+      meta.symbol === snap.vs.symbol &&
+      typeof meta.quote === 'string' &&
+      /^[A-Z0-9][A-Z0-9._-]{0,15}$/.test(meta.quote)
+    ) {
+      vs.quote = meta.quote;
+    } else if (snap.fxMode !== undefined || meta) {
+      vs.quote = null;
+      sourceIssues.push('Vest 公开行情与合约元数据的精确代码或报价币未核实。');
     }
   }
+  valueLegFx(asset, snap, 'vs', vs, now, sourceIssues);
+  vs.account = valueVSAccount(snap, vs, now, sourceIssues);
+  if (!mixed) valueLegFx(asset, snap, 'hype', hype, now, sourceIssues);
   if (!mixed && snap.hype) {
     const fx = hype.settleUsd,
       raw = snap.hype.account;
     hype.account = null;
     if (positive(fx)) {
-      // The API reports collateral-currency amounts. Quantity, entry, and liquidation prices retain venue units.
+      // The API reports collateral-currency amounts. Prices and quantities retain venue units.
       if (raw && raw.currency === hype.settle) {
-        const positions = raw.positions.map((p) => ({
-          ...p,
-          upnl: p.upnl * fx,
-          marginUsed: p.marginUsed * fx
-        }));
-        hype.account = {
-          ...raw,
-          cash: raw.cash * fx,
-          equity: raw.equity * fx,
-          free: raw.free * fx,
-          used: raw.used * fx,
-          positions,
-          position: positions.find((p) => p.symbol === hype.symbol) ?? null,
-          currency: 'USD',
-          sourceCurrency: raw.currency,
-          fxRate: fx,
-          fxAsOf: hype.fxAsOf,
-          source: 'clearinghouseState × 已确认结算币汇率'
-        };
+        hype.account = usdAccount(
+          raw,
+          hype.fxDetails.settle,
+          (currency) =>
+            readUsdRate(snap, 'hype', currency === hype.quote ? 'quote' : 'account', currency, now),
+          sourceIssues,
+          'Hype'
+        );
+        hype.account.source = 'clearinghouseState × ' + hype.fxDetails.settle.source;
       }
       if (raw && !hype.account) sourceIssues.push('账户抵押币与本合约的结算币不一致。');
       if (Array.isArray(snap.hype.tiers))
         hype.tiers = snap.hype.tiers.map((t) => ({
           ...t,
           lowerBound: t.lowerBound * fx,
-          maxNotional: t.maxNotional === null ? null : t.maxNotional * fx,
+          maxNotional: t.maxNotional == null ? null : t.maxNotional * fx,
           deduction: t.deduction * fx
         }));
     }

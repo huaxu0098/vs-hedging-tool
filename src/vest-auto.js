@@ -136,7 +136,8 @@ export function mountVestAuto($, hooks) {
           } catch {}
           if (active !== session) return;
           const msg = hooks.checkQuoteCurrency(symbol, contract);
-          $('feed-auto-spec').textContent = msg || 'Vest 报价币 · ' + contract.quote;
+          $('feed-auto-spec').textContent =
+            msg || '已采用 Vest 合约 ' + symbol + ' 的报价币 ' + contract.quote;
           if (!contract) session.lookupTimer = setTimeout(lookup, 15000);
         };
         hooks.checkQuoteCurrency(symbol, null);

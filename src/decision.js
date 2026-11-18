@@ -1,3 +1,4 @@
+import { fxIsCurrent } from './feeds.js';
 import { grid, tradableQty, validateLeg } from './engine.js';
 
 export const DEFAULT_CONFIG = Object.freeze({
@@ -198,6 +199,11 @@ function issues(asset, account, c, now) {
       rates,
       reasons
     );
+    if (
+      !fxIsCurrent(leg, asset.maxAgeSec, now) ||
+      (leg.account && !fxIsCurrent(leg.account, asset.maxAgeSec, now))
+    )
+      reasons.push(venue + ' 行情估值依赖的 USD 汇率已过期');
     if (!nn(leg.minNotional ?? 0)) reasons.push(venue + ' 最小成交名义额无效');
     if (!nn(leg.slippageBps ?? 0) || (leg.slippageBps ?? 0) >= 10000) reasons.push(venue + ' 入场滑点无效');
     const bid = topQuote(leg, false),
@@ -382,7 +388,8 @@ function orderLeg(asset, account, v, usd, sign, exactQty) {
   let qty;
   if (exactQty !== undefined) {
     const lots = lotIndex(exactQty, leg.step);
-    if (lots === null || (lots && Math.sign(lots) !== sign)) return { error: '精确目标数量与方向或步长不一致' };
+    if (lots === null || (lots && Math.sign(lots) !== sign))
+      return { error: '精确目标数量与方向或步长不一致' };
     qty = fromLots(Math.abs(lots), leg.step);
   } else {
     if (!nn(usd)) return { error: '目标美元名义值无效' };
@@ -491,6 +498,8 @@ function otherState(asset, account, venue, c, now) {
     if (spec) {
       const stamp = typeof spec.asOf === 'number' ? spec.asOf : Date.parse(spec.asOf);
       if (
+        p.asset.sourceIssues?.length ||
+        !fxIsCurrent(spec, p.asset.maxAgeSec, now) ||
         spec.open !== true ||
         !positive(p.asset.maxAgeSec) ||
         !Number.isFinite(stamp) ||

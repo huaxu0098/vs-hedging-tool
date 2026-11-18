@@ -1,3 +1,4 @@
+import { fxIsCurrent } from './feeds.js';
 import { analyzeCandidate, DEFAULT_CONFIG, settleLeg } from './decision.js';
 import { getLedger, LEDGER_KEY } from './ledger.js';
 
@@ -141,7 +142,8 @@ function contractSnapshot(asset) {
     'liqEntry',
     'liqCollateral',
     'liqMarginMode',
-    'fxAsOf'
+    'fxAsOf',
+    'fxValidUntil'
   ];
   for (const v of venues) copy[v] = pick(asset[v], keys);
   return copy;
@@ -381,6 +383,7 @@ export function verifyQuotes(a, now) {
         Math.abs((leg.quoteUsd * leg.ratio) / (leg.quoteScale ?? 1) - 1) < 0.000100000002,
       label + ' 基准、报价单位或汇率无法验证'
     );
+    need(fxIsCurrent(leg, a.maxAgeSec, now), label + ' 换算汇率过期或时间不可验证');
     const ts = typeof leg.asOf === 'number' ? leg.asOf : Date.parse(leg.asOf);
     need(
       finite(ts) && ts <= now && finite(a.maxAgeSec) && now - ts <= a.maxAgeSec * 1000,

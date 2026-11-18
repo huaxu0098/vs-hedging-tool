@@ -8,7 +8,7 @@
     "start": "node scripts/serve.js",
     "test": "node --test",
     "test:browser": "node scripts/browser-acceptance.js",
-    "test:vest": "node scripts/qa/vest-auto.js && node scripts/qa/vest-public.js"
+    "test:vest": "node scripts/qa/vest-auto.js && node scripts/qa/vest-public.js && node scripts/qa/vest-fx.js"
   },
   "engines": {
     "node": ">=22"
