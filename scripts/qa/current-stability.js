@@ -26,11 +26,15 @@ const install = `(() => {
           pfMark:s.ctx.market.pf.mark,hlMark:s.ctx.market.hl.mark, count:s.sets.legal.count,
           revaluation:r.revaluation, sequence:data.version, protect:s.ctx.book.B, reserve:s.ctx.params.R,
           rep:rep && {pf:rep.pfValue, hl:rep.hypeValue, fail:rep.fail, success:rep.success},
-          bins:s.buckets.filter(b=>b.legal).map(b=>{
-            const group=['both','protect','survive','risk','legal'].find(k=>b.ranges[k]), v=b.ranges[group];
-            return {group,above:b.above,through:b.through,count:v.count,pf:v.pfValue,hl:v.hlValue,qa:v.pfQty,qb:v.hlQty,fail:v.failure,pass:v.successHype,
-              consume:v.consumption[1],rawFailure:b.ranges.legal.failure,rawSuccess:b.ranges.legal.successHype,
-              failProfit:b.failProfit,passProfit:b.passProfit,profit:b.profit};
+          bins:s.buckets.flatMap((b,index)=>{
+            if(!b.legal)return [];
+            const groups=[b.risk?'risk':'legal'];
+            if(b.both && b.both<b.risk)groups.push('both');
+            return groups.map(group=>{
+              const v=b.ranges[group];
+              return {group,index,both:b.both,risk:b.risk,count:v.count,pf:v.pfValue,hl:v.hlValue,qa:v.pfQty,qb:v.hlQty,
+                fail:v.failure,pass:v.successHype,protect:b.protect,survive:b.survive,profit:b.profit,above:b.above,through:b.through};
+            });
           })};
       }});
     }
@@ -50,7 +54,7 @@ const install = `(() => {
       if(desk.dataset.state==='updating') test.pendingPaints++;
       if(desk.dataset.state==='paused') test.pausedPaints++;
       if(e('scan-focus').hidden || e('scan-results').hidden || !e('scan-fail-cash').textContent ||
-        !e('scan-pass-cash').textContent || !e('scan-buckets').rows.length || ['protect','survive','both','profit'].some(k=>!e('scan-'+k).textContent || e('scan-'+k).textContent.includes('等待有效数据'))) test.blanks++;
+        !e('scan-pass-cash').textContent || ['scan-pass-cash','scan-fail-cash'].some(k=>e(k).textContent==='—') || !e('scan-buckets').rows.length || ['protect','survive','both','profit'].some(k=>!e('scan-'+k).textContent || e('scan-'+k).textContent.includes('等待有效数据'))) test.blanks++;
       if(e('ratio-analysis').hidden || !e('ratio-neighbors').rows.length ||
         !e('ratio-neighbors').querySelector('.representative-range') || !e('ratio-counts').textContent) test.neighborBlanks=(test.neighborBlanks||0)+1;
       if(neighborBody!==e('ratio-neighbors') || neighborCell!==e('ratio-neighbors').rows[0]?.cells[0]) test.neighborRemounts=(test.neighborRemounts||0)+1;
@@ -65,7 +69,7 @@ const install = `(() => {
       firstRow??=e('scan-buckets').rows[0];lastId=id;
       test.commits.push({ ...test.results[id], prices:[e('scan-pf-price').textContent,e('scan-hl-price').textContent],
         cash:[e('scan-fail-cash').textContent,e('scan-pass-cash').textContent], position:e('scan-position').textContent,
-        rows:[...e('scan-buckets').rows].map(tr=>[...tr.cells].map(td=>td.innerText)),
+        rows:[...e('scan-buckets').rows].map(tr=>({index:Number(tr.dataset.band),group:tr.dataset.subset,cells:[...tr.cells].map(td=>td.innerText)})),
         height:e('scan-results').getBoundingClientRect().bottom, status:e('scan-status').textContent});
     }
     requestAnimationFrame(frame);
@@ -76,8 +80,8 @@ const cash = (v) => dec(v).toFixed(4) + ' U';
 try {
   await send('Page.addScriptToEvaluateOnNewDocument', { source: install });
   await send('Emulation.setDeviceMetricsOverride', {
-    width: 1440,
-    height: 900,
+    width: 1280,
+    height: 720,
     deviceScaleFactor: 1,
     mobile: false
   });
@@ -87,7 +91,8 @@ try {
     125000
   );
   assert.ok(await run(`!document.getElementById('desk-details').open && !document.getElementById('scan-basis') &&
-    !/USDC_per_USDT|参考价差|相邻仓位/.test(document.body.innerText) &&
+    document.querySelectorAll('#scan-desk > section').length===4 &&
+    !/USDC_per_USDT|参考价差|相邻仓位|[0-9,]+ 组|AUTO_|杠杆档位|费用流水/.test(document.body.innerText) &&
     ['pf','hl'].every(k=>['bid','ask','price'].every(s=>Number(document.getElementById('scan-'+k+'-'+s).textContent)>0))`));
   const frames = await run('window.scanTest.commits');
   for (const f of frames) {
@@ -95,23 +100,29 @@ try {
     assert.equal(f.rows.length, f.bins.length);
     assert.deepEqual(f.cash, [cash(f.rep.fail), cash(f.rep.success)]);
     assert.ok(f.prices.every((px) => Number(px) > 0));
-    for (const [i, bin] of f.bins.entries()) {
-      const cells = f.rows[i];
-      for (const [j, values, qty] of [
-        [1, bin.pf, bin.qa],
-        [2, bin.hl, bin.qb]
-      ]) {
-        assert.ok(cells[j].includes(qty.join(' – ')), cells[j]);
-        for (const v of values) assert.ok(cells[j].includes(dec(v).toFixed(2) + ' U'), cells[j]);
-      }
-      assert.ok(cells[0].includes(bin.count.toLocaleString('en-US')));
-      assert.equal(cells.length, 3);
-      if (bin.group === 'both') {
-        assert.ok(bin.fail.every((v) => dec(v).gte(f.protect)));
-        assert.ok(bin.pass.every((v) => dec(v).gte(f.reserve)));
+    const range = (values, digits) => {
+      const parts = values.map(x => digits == null ? x : dec(x).toFixed(digits));
+      return dec(values[0]).eq(values[1]) ? parts[0] : parts.join(' – ');
+    };
+    for (const bin of f.bins) {
+      const matches = f.rows.filter(row => row.index === bin.index && row.group === bin.group);
+      assert.equal(matches.length,1);
+      const cells = matches[0].cells;
+      assert.equal(cells.length,6);
+      for (const [j, values, qty] of [[1,bin.pf,bin.qa],[2,bin.hl,bin.qb]])
+        assert.equal(cells[j],range(values,2)+'\n'+range(qty)+' BTC');
+      assert.equal(cells[3],bin.group==='legal'?'未验证':range(bin.fail,4));
+      assert.equal(cells[4],bin.group==='legal'?'未验证':range(bin.pass,4));
+      if(bin.group==='both' || (bin.group==='risk' && bin.risk===bin.both)) {
+        assert.ok(bin.fail.every(v=>dec(v).gte(f.protect)) && bin.pass.every(v=>dec(v).gte(f.reserve)));
+        assert.ok(cells[5].includes('失败回本 · 成功留存'));
+      } else if(bin.group==='legal') assert.ok(cells[5].includes('未通过'));
+      else {
+        if(bin.protect<bin.risk) assert.match(cells[5],/未回本|无法回本/);
+        if(bin.survive<bin.risk) assert.match(cells[5],/留存不足/);
       }
     }
-    assert.ok(f.height <= 900, '主要计算区域超出桌面首屏 ' + f.height);
+    assert.ok(f.height<=720,'主要计算区域超出桌面首屏 '+f.height);
   }
   assert.ok(frames.every((f, i) => !i || f.sequence > frames[i - 1].sequence));
   assert.ok(frames.slice(1).some((f) => f.revaluation.marketOnly));
@@ -121,6 +132,19 @@ try {
   evidence.observation = await run(
     '(({paints,pendingPaints,blanks,neighborBlanks=0,neighborRemounts=0,replacedFirstRow=false,remounts=0,unreadable=false,posted,elapsedMs,quoteChanges})=>({paints,pendingPaints,blanks,neighborBlanks,neighborRemounts,replacedFirstRow,remounts,unreadable,posted,elapsedMs,quoteChanges}))(window.scanTest)'
   );
+  evidence.viewports = [];
+  for (const [width,height] of [[1280,720],[390,844],[1440,900]]) {
+    await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<500});
+    const layout = await run(`(() => {
+      const at = selector => Math.ceil(document.querySelector(selector).getBoundingClientRect().bottom);
+      return {width:innerWidth, height:innerHeight, contentWidth:document.documentElement.scrollWidth,
+        quotes:at('.book-table'), cash:at('#scan-cash'), ranges:at('.scan-sets'),
+        secondBand:at('#scan-buckets tr:nth-child(2)'), table:at('#scan-results')};
+    })()`);
+    assert.ok(layout.contentWidth <= width && layout.secondBand <= height, JSON.stringify(layout));
+    if (width>=1000) assert.ok(layout.table <= height, JSON.stringify(layout));
+    evidence.viewports.push(layout);
+  }
   // Hold one legitimate request, supersede it with a new rule, then deliver
   // the old response after dispatch. It must never become visible.
   await run('window.scanTest.hold=true');

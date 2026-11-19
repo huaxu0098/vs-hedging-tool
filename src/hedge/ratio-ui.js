@@ -1,4 +1,5 @@
 import { dec } from './math.js';
+import { inspectRatio, ratioSlice } from './ratio-scan.js';
 import { reportGroups, subsetGroups } from './range-report.js';
 import { ledgerLabels, presentLedger } from './settlement-ledger.js';
 
@@ -43,13 +44,52 @@ const names = {
   failProfit: '失败路径净盈利',
   passProfit: '成功路径净盈利'
 };
+// The existing scan already prices both directions. Inspect its legal lots on
+// demand at the representative size, using the same settlement ledgers.
+function executionComparison(scan, row) {
+  const lines = ['同规模双边成交成本 · PF ' + dec(row.pf).abs() + ' / Hype ' + dec(row.hl).abs() +
+    '（各自合约数量）；价格为原生报价，费用与深度滑点为 U。'];
+  for (const sign of [1, -1]) {
+    const direction = (sign === 1 ? 'PF 多 / ' : 'PF 空 / ') +
+      (row.j === 0 ? 'Hype 空仓' : sign === 1 ? 'Hype 空' : 'Hype 多');
+    let candidate = row;
+    if (sign !== row.sign) {
+      if (!scan.cells) { lines.push(direction + ' · 历史快照未保留反向盘口'); continue; }
+      if (!ratioSlice(scan, sign, row.i).some(([lo, hi]) => lo <= row.j && row.j <= hi)) {
+        lines.push(direction + ' · 当前模式或盘口不支持同规模反向仓位');
+        continue;
+      }
+      try {
+        candidate = inspectRatio(scan.ctx, { sign, i: row.i, j: row.j });
+      } catch (error) {
+        lines.push(direction + ' · 成本未验证 · ' + error.message);
+        continue;
+      }
+    }
+    const fill = (leg, entry) => {
+      const q = entry ? dec(leg.adjustment) : dec(leg.target).neg();
+      if (q.isZero()) return '无需成交';
+      const field = entry ? 'entry' : 'exit';
+      return (q.gt(0) ? '买 Ask ' : '卖 Bid ') + fmt(leg[field + 'Price'], 5) +
+        '（费 ' + fmt(leg[field + 'Fee'], 5) + '，滑点 ' + fmt(leg[field + 'Slippage'], 5) + '）';
+    };
+    for (const [label, path, entry] of [['开仓/调仓', 'fail', true], ['失败平仓', 'fail', false], ['成功平仓', 'pass', false]]) {
+      const stop = !entry && (path === 'fail' ? candidate.failStop : candidate.passStop);
+      const legs = candidate.paths?.[path];
+      lines.push(direction + ' · ' + label + ' · ' + (stop || (!legs ? '未验证' :
+        'PF ' + fill(legs.pf, entry) + ' / Hype ' + fill(legs.hl, entry))));
+    }
+  }
+  return lines;
+}
 function auditText() {
-  if (!$('scan-detail').open || !audit) {
+  if (!$('scan-detail').open || !$('desk-details').open || !$('audit-details').open || !audit) {
     write('scan-audit', '');
     return;
   }
   const { row, scan } = audit;
   const lines = [
+    ...executionComparison(scan, row),
     '源快照 ' + frameKey + ' · 分成到账前计入 Hype 权益 0 U',
     '建议档位 ' + (row.lev ?? '空仓') + ' · 初始占用 ' + usd(row.initial) + ' · 开仓后可用 ' + usd(row.free),
     'Hype 压力后维持余量 ' + (row.stress ? usd(row.surplus) : '未配置，基础情景 ' + usd(row.surplus)),
@@ -111,15 +151,15 @@ function showRepresentative(scan, result) {
       ' PF ' +
       (row.sign > 0 ? '多 ' : '空 ') +
       usd(row.pfValue) +
-      '（数量 ' +
-      row.pf +
+      '（' +
+      dec(row.pf).abs() +
       ' ' +
       (scan.ctx.market.pf.unit === 'contract' ? '张' : scan.ctx.market.pf.unit) +
       '） · Hype ' +
       (row.j === 0 ? '空仓 ' : row.sign > 0 ? '空 ' : '多 ') +
       usd(row.hypeValue) +
-      '（数量 ' +
-      row.hl +
+      '（' +
+      dec(row.hl).abs() +
       ' ' +
       (scan.ctx.market.hl.unit === 'contract' ? '张' : scan.ctx.market.hl.unit) +
       '）' +
@@ -132,6 +172,7 @@ function showRepresentative(scan, result) {
   const thin = row.cushion.thin;
   const stressIncomplete = result.stress?.missing.length || result.stress?.zero.length;
   $('scan-fail-net').classList.toggle('thin-buffer', thin);
+  $('scan-fail-summary').classList.toggle('thin-buffer', thin && !row.failStop);
   write('scan-fail-cash', row.failStop ?? settlementAmount(row.fail));
   write(
     'scan-fail-net',
@@ -154,10 +195,11 @@ function showRepresentative(scan, result) {
   );
   write(
     'scan-pass-title',
-    row.funded ? '若 PF 达到提款线 · Hype 到账前权益' : '若 PF 达到通过线 · Hype 平仓权益'
+    row.funded ? '提款线 · Hype 到账前剩余' : '通过后 · Hype 剩余'
   );
   write('scan-pass-cash', row.passStop ?? settlementAmount(row.success));
   const diff = dec(row.successPersonal).minus(B);
+  const hypeVsCapital = dec(row.success).minus(B);
   write(
     'scan-pass-net',
     row.passStop
@@ -186,11 +228,8 @@ function showRepresentative(scan, result) {
     'scan-pass-summary',
     row.passStop
       ? '提前触线 · 清算结余未知'
-      : (row.survives ? '满足 ' : '低于 ') +
-          usd(params.R) +
-          ' 留存 · ' +
-          (diff.lt(0) ? '个人资金距本金差 ' : '个人资金高于本金 ') +
-          settlementAmount(diff.abs())
+      : (hypeVsCapital.lt(0) ? '距保护本金差 ' : '比保护本金多 ') +
+          settlementAmount(hypeVsCapital.abs()) + ' · ' + (row.survives ? '满足 ' : '低于 ') + usd(params.R) + ' 留存'
   );
   const cutoff = row.deadline;
   write(
@@ -294,13 +333,17 @@ function patchRows(body, next) {
       body.append(incoming);
       continue;
     }
+    if (incoming.hasAttribute('data-band')) {
+      if (row.dataset.band !== incoming.dataset.band) row.dataset.band = incoming.dataset.band;
+      if (row.dataset.subset !== incoming.dataset.subset) row.dataset.subset = incoming.dataset.subset;
+    }
     if (row.className !== incoming.className) row.className = incoming.className;
     const cells = Array.from(incoming.cells);
     for (const [j, cell] of cells.entries()) {
       const old = row.cells[j];
       if (!old) row.append(cell);
       else if (!old.isEqualNode(cell)) {
-        old.title = cell.title;
+        if (old.title !== cell.title) old.title = cell.title;
         if (old.colSpan !== cell.colSpan) old.colSpan = cell.colSpan;
         const sameLayout =
           old.childNodes.length === cell.childNodes.length &&
@@ -309,6 +352,8 @@ function patchRows(body, next) {
           [...old.childNodes].forEach((node, k) => {
             const nextText = cell.childNodes[k].nodeValue;
             if (node.nodeType === Node.TEXT_NODE && node.nodeValue !== nextText) node.nodeValue = nextText;
+            if (node.nodeType === Node.ELEMENT_NODE && !node.isEqualNode(cell.childNodes[k]))
+              node.replaceWith(cell.childNodes[k].cloneNode(true));
           });
         } else old.replaceChildren(...cell.childNodes);
       }
@@ -466,19 +511,68 @@ function renderAnalysis(scan) {
   write('ratio-change', message);
 }
 
+// Render from one completed scan. The full band and its qualifying subset
+// retain their own position and settlement extrema.
+function positionBand(body, scan, bin, segment, group) {
+  const metrics = bin.ranges[group];
+  const subset = group === 'both';
+  const checked = group !== 'legal';
+  const rep = scan.representative;
+  const row = body.insertRow();
+  row.dataset.band = String(segment);
+  row.dataset.subset = group;
+  const allProtected = checked && (subset || bin.both === bin.risk);
+  row.classList.toggle('qualified', allProtected);
+  const belongs = rep?.segment === segment && (group === 'legal' || rep.row.physical);
+  const ownSubsetRow = rep?.row.both && bin.both < bin.risk;
+  const containsRep = belongs && (subset ? rep.row.both : !ownSubsetRow);
+  row.classList.toggle('representative-range', containsRep);
+  const head = document.createElement('th');
+  head.scope = 'row';
+  const lo = bin.above, hi = bin.through ?? scan.sets[group].max.h;
+  // The minimum intersection ratio is itself a cut. Its boundary row can
+  // describe a single ratio even if its parent band contains many ratios.
+  const exact = subset && dec(hi).eq(scan.sets.both.min.h);
+  head.textContent = lo == null || exact ? pct(hi) : '＞' + intervalText(lo, hi);
+  head.title = (lo == null || exact ? '单一比例' : '下界不含，上界含') + (containsRep ? ' · 含代表方案' : '');
+  if (subset) head.append(document.createElement('br'), '双保护规模');
+  row.append(head);
+  const limits = (values, format) =>
+    dec(values[0]).eq(values[1]) ? format(values[0]) : values.map(format).join(' – ');
+  for (const venue of ['pf', 'hl']) {
+    const cell = row.insertCell();
+    const quantity = document.createElement('small');
+    const unit = scan.ctx.market[venue].unit;
+    quantity.textContent = limits(metrics[venue + 'Qty'], String) + ' ' + (unit === 'contract' ? '张' : unit);
+    cell.append(limits(metrics[venue + 'Value'], (v) => fmt(v, 2)), quantity);
+  }
+  for (const key of ['failure', 'successHype'])
+    row.insertCell().textContent = checked ? limits(metrics[key], (v) => fmt(v, 4)) : '未验证';
+  const risk = row.insertCell();
+  if (!checked) risk.textContent = '保证金或清算风险未通过';
+  else if (allProtected) risk.textContent = '失败回本 · 成功留存';
+  else {
+    const failure = !bin.protect ? '失败无法回本' : bin.protect < bin.risk ? '部分未回本' : '失败回本';
+    const success = !bin.survive ? '成功留存不足' : bin.survive < bin.risk ? '部分留存不足' : '成功留存';
+    risk.append(failure, document.createElement('br'), success);
+  }
+  if (checked && !subset && bin.profit > 0)
+    risk.append(document.createElement('br'), bin.profit === bin.risk ? '双端净盈利' : '部分规模双端净盈利');
+}
+
 function draw(result) {
   frame = result.ratioScan ?? null;
   frameKey = result.trace?.id ?? '';
   audit = null;
-  auditText();
   const scan = frame,
     rep = scan?.representative;
   renderAnalysis(scan);
-  $('scan-results').hidden = !scan;
-  $('scan-focus').hidden = !rep;
+  $('bands-empty').hidden = !!scan?.sets.legal.count;
   const aggregate = document.createElement('tbody');
   const bands = document.createElement('tbody');
-  const noProfit = '当前资金规则及已配置条件下，没有双路径净盈利比例。';
+  write('capital-threshold', scan ? ' · ' + scan.ctx.book.B + ' U' : '');
+  write('reserve-threshold', scan ? ' · ' + scan.ctx.params.R + ' U' : '');
+  const noProfit = '无';
   for (const key of reportGroups) {
     const s = scan?.sets[key];
     const unknown =
@@ -495,14 +589,6 @@ function draw(result) {
             ? noProfit
             : '无符合条件的仓位';
     write('scan-' + key, s?.min && !unknown ? intervalText(s.min.h, s.max.h) : empty);
-    write(
-      'scan-' + key + '-count',
-      !s || unknown
-        ? ''
-        : s.count.toLocaleString() +
-            ' 组' +
-            (key === 'profit' ? ' · 两端净现金均高于累计投入' : ' · 离散数量网格')
-    );
     $('scan-' + key).title =
       s?.min && !unknown
         ? dec(s.min.h).times(100).toString() + '% 至 ' + dec(s.max.h).times(100).toString() + '%'
@@ -510,6 +596,7 @@ function draw(result) {
     if (scan) summaryRow(aggregate, names[key], unknown ? null : s.range, empty);
     if (key === 'profit') $('profit-panel').classList.toggle('no-profit', !s?.count && empty === noProfit);
   }
+  const qualifiedBands = document.createElement('tbody');
   const excluded = [];
   for (const [n, bin] of (scan?.buckets ?? []).entries()) {
     const label =
@@ -517,33 +604,9 @@ function draw(result) {
         ? '0% · Hype 空仓'
         : '＞' + (bin.through == null ? pct(bin.above) : intervalText(bin.above, bin.through, ' 至 ≤'));
     if (bin.legal) {
-      const group = ['both', 'protect', 'survive', 'risk', 'legal'].find((key) => bin.ranges[key]);
-      const includesRepresentative = rep?.segment === n && (rep.group === group || group === 'risk');
-      const tr = bands.insertRow(),
-        metrics = bin.ranges[group];
-      const title = document.createElement('th');
-      title.scope = 'row';
-      title.append(
-        label,
-        document.createElement('br'),
-        (group === 'both' ? '交集' : names[group]) + ' ' + metrics.count.toLocaleString() + ' 组'
-      );
-      tr.append(title);
-      tr.classList.toggle('representative-range', includesRepresentative);
-      title.title =
-        '交集 ' + bin.both.toLocaleString() + ' 组' + (includesRepresentative ? ' · 含代表方案' : '');
-      for (const [qty, value, unit] of [
-        [metrics.pfQty, metrics.pfValue, scan.ctx.market.pf.unit],
-        [metrics.hlQty, metrics.hlValue, scan.ctx.market.hl.unit]
-      ]) {
-        const cell = tr.insertCell();
-        cell.append(
-          pair(value, usd),
-          document.createElement('br'),
-          pair(qty, (v) => v) + ' ' + (unit === 'contract' ? '张' : unit)
-        );
-      }
-
+      const fullBand = bin.both && bin.both === bin.risk ? qualifiedBands : bands;
+      positionBand(fullBand, scan, bin, n, bin.risk ? 'risk' : 'legal');
+      if (bin.both && bin.both < bin.risk) positionBand(qualifiedBands, scan, bin, n, 'both');
     }
     if (bin.legal)
       excluded.push(
@@ -563,6 +626,9 @@ function draw(result) {
   }
   renderSubsets();
   patchRows($('scan-rows'), aggregate);
+  const featured = qualifiedBands.querySelector('.representative-range');
+  if (featured) qualifiedBands.prepend(featured);
+  bands.prepend(...Array.from(qualifiedBands.rows));
   patchRows($('scan-buckets'), bands);
   write('scan-risk-counts', excluded.join('\n'));
   write(
@@ -577,6 +643,7 @@ function draw(result) {
   );
   if (rep) showRepresentative(scan, result);
   else {
+    auditText();
     for (const field of [
       'scan-representative',
       'scan-position',
@@ -591,7 +658,9 @@ function draw(result) {
       'scan-deadline-note'
     ])
       write(field, '');
-    if (scan) write('scan-status', $('scan-status').textContent + ' · 当前没有通过风控检查的代表仓位');
+    write('scan-fail-cash', '—');
+    write('scan-pass-cash', '—');
+    if (scan) write('scan-representative', '当前条件下无可推荐仓位');
   }
 }
 export function renderScan(result, m, r, plan, status) {
@@ -615,6 +684,9 @@ export function renderScan(result, m, r, plan, status) {
       c?.quoteAsset && c?.baseAsset ? c.quoteAsset + '/' + c.baseAsset : '报价币待核实'
     );
     const prefix = 'scan-' + key + '-';
+    const clock = observed.timing?.clocks?.[key];
+    const paused = m.errors?.[key] || old || clock?.ok === false;
+    write(prefix + 'health', (q?.mark || old) && paused ? ' · 已失效' : '');
     write(prefix + 'price', q?.mark ?? old?.mark ?? '—');
     const markSource = '标记时间 ' + time(q?.markAt ?? old?.markAt ?? q?.asOf ?? old?.asOf);
     if ($(prefix + 'price').title !== markSource) $(prefix + 'price').title = markSource;
@@ -629,7 +701,7 @@ export function renderScan(result, m, r, plan, status) {
   }
   const displayed = result.ratioScan ? result : result.retained;
   const tr = displayed?.trace;
-  write('scan-source', plan ? '预设资金规划 · 条件结果' : '当前账户快照');
+  write('scan-source', plan ? '预设资金规划' : '当前账户快照');
   const f = result.funding;
   write(
     'scan-capital',
@@ -692,6 +764,14 @@ export function renderScan(result, m, r, plan, status) {
         : '暂停仓位建议 · ' + (networkError || observed.currencies?.error || specError || result.issues?.[0] || status) +
           (unverifiedVest ? '。可在高级详情核对 Vest 合约规格。' : '');
   write('scan-status', [progress, outdated && (state === 'updating' ? '上次完成' : '上次完成 · 历史结果，当前未验证'), stamp].filter(Boolean).join(' ｜ '));
+  const currentTime = tr && new Date(tr.at).toLocaleTimeString('zh-CN', { hour12: false });
+  const shortState = state === 'ready' ? (displayed?.autoStatus === 'AUTO_PARTIAL' ? '条件估算' : '条件结果')
+    : state === 'updating' ? (tr ? '更新中 · 上次结果' : '首次计算中')
+    : tr ? '数据待核实 · 历史结果' : waitingForMarket ? '连接盘口中' : '暂不可计算 · 见高级详情';
+  write('desk-state', [shortState, currentTime].filter(Boolean).join(' · '));
+  if (!displayed || !displayed.ratioScan.sets.legal.count)
+    write('bands-empty', displayed ? '当前扫描范围没有合法仓位'
+      : !plan && result.inputGaps?.length ? '请在高级详情录入当前账户权益、持仓与可用保证金。' : shortState);
   write(
     'scan-runtime',
     [
@@ -718,15 +798,19 @@ export function renderScan(result, m, r, plan, status) {
   }
 }
 export function setupScan() {
-  $('scan-detail').ontoggle = auditText;
+  for (const id of ['desk-details', 'audit-details', 'scan-detail'])
+    $(id).addEventListener('toggle', auditText);
   $('subset-detail').ontoggle = renderSubsets;
   for (const id of ['range-columns', 'bin-columns', 'subset-columns']) {
     const tr = $(id).insertRow();
     for (const title of id === 'bin-columns'
       ? [
-          '对冲比例 h',
-          'PF 仓位 / 数量',
-          'Hype 仓位 / 数量'
+          '对冲比例范围',
+          'PF 名义额 / 数量',
+          'Hype 名义额 / 数量',
+          '失败回收',
+          '成功 Hype 剩余',
+          '风险状态'
         ]
       : columns) {
       const cell = document.createElement('th');

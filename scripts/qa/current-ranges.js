@@ -20,7 +20,7 @@ async function ready(condition = 'true') {
 }
 async function record(label) {
   const x = await run(
-    `(()=>{const t=id=>document.getElementById(id).textContent;return Object.fromEntries(['scan-status','scan-pf-quote','scan-hl-quote','scan-capital','scan-protect','scan-survive','scan-both','scan-both-count','scan-funded','scan-deadline','scan-profit','scan-profit-count','scan-intersection','scan-representative','scan-position','scan-cash','scan-fail-cash','scan-pass-cash','scan-pass-net','scan-risk','scan-buckets','scan-rows','trace-id'].map(k=>[k,t(k)]));})()`
+    `(()=>{const t=id=>document.getElementById(id).textContent;return Object.fromEntries(['scan-status','scan-pf-quote','scan-hl-quote','scan-capital','scan-protect','scan-survive','scan-both','scan-funded','scan-deadline','scan-profit','scan-intersection','scan-representative','scan-position','scan-cash','scan-fail-cash','scan-pass-cash','scan-pass-net','scan-risk','scan-buckets','scan-rows','trace-id'].map(k=>[k,t(k)]));})()`
   );
   evidence.push({ label, ...x });
   console.log(
@@ -53,7 +53,7 @@ try {
     !document.querySelector('#scan-desk input,#scan-desk select,#scan-rows [tabindex]')`)
   );
   assert.match(await text('#scan-capital'), /预设资金规划/);
-  assert.equal(await text('#scan-profit'), '当前资金规则及已配置条件下，没有双路径净盈利比例。');
+  assert.equal(await text('#scan-profit'), '无');
   assert.ok(await run("document.getElementById('profit-panel').classList.contains('no-profit')"));
   assert.ok(
     await run(
@@ -116,7 +116,7 @@ try {
     );
     const range = sets[k].range;
     if (!range) {
-      assert.match(captured.rows[n][1], /没有双路径净盈利比例|无符合条件的仓位/);
+      assert.match(captured.rows[n][1], /^无$|无符合条件的仓位/);
       continue;
     }
     assert.equal(range.count, sets[k].count);
@@ -145,9 +145,13 @@ try {
   await run("document.getElementById('desk-details').open=false");
   await click('#scan-config');
   assert.ok(await run("document.getElementById('desk-details').open"));
-  await run(
-    "document.getElementById('scan-detail').open=true;document.getElementById('scan-detail').ontoggle()"
-  );
+  await run("document.getElementById('audit-details').open=true");
+  await click('#scan-detail > summary');
+  await wait("document.querySelector('#scan-audit').textContent.includes('同规模双边成交成本')");
+  const comparison = await text('#scan-audit');
+  for (const label of ['PF 多 / Hype 空', 'PF 空 / Hype 多'])
+    for (const phase of ['开仓/调仓', '失败平仓', '成功平仓'])
+      assert.ok(comparison.includes(label + ' · ' + phase), label + ' · ' + phase);
   assert.match(await text('#scan-audit'), /调仓深度滑点/);
   await run("document.getElementById('desk-details').open=false");
   await send('Emulation.setDeviceMetricsOverride', {
@@ -190,7 +194,11 @@ try {
   await ready();
   // Hold this actual source frame and its original timestamps steady during the 10-second fault.
   await run(`(()=>{const el=id=>document.getElementById(id), box=el('trace-inputs').parentElement;
-    box.open=true;box.ontoggle();el('manual-quote').value=JSON.stringify(JSON.parse(el('trace-inputs').textContent).market);
+    box.open=true;box.ontoggle();
+    const captured=JSON.parse(el('trace-inputs').textContent).market;
+    el('manual-quote').value=JSON.stringify(captured);
+    const read=window.fetch;window.restoreMarket=()=>{window.fetch=read};
+    window.fetch=(...args)=>String(args[0]).includes('/api/current-market') ? Promise.resolve(Response.json(captured)) : read(...args);
     el('confirm-quote').click()})()`);
   await ready("document.querySelector('#scan-pf-quote').textContent.includes('手工确认盘口')");
   // Induce a worker timeout only after successful mainnet scans. Source data and other cases stay live.
@@ -202,9 +210,11 @@ try {
     "document.getElementById('scan-status').textContent.includes('更新中') && document.getElementById('scan-status').textContent.includes('上次完成')",
     1000
   );
-  await wait('window.timeoutSeen', 18000);
+  await wait('window.timeoutSeen', 18000).catch(async error => {
+    throw Error(error.message + ' ' + await text('#scan-status'));
+  });
   console.log('RANGE08 已在浏览器实际触发超时并显示上版和原因');
-  await run('window.resumeRangeWorker()');
+  await run('window.resumeRangeWorker();window.restoreMarket()');
   await set('#quote-source', 'api');
   await set('#R_free', '0', 'input');
   await ready();
@@ -227,7 +237,7 @@ try {
   await set('#funding-view', 'account');
   assert.ok(
     await run(
-      "document.querySelector('#scan-results').hidden && document.querySelector('#hl-equity').value===''"
+      "!document.querySelector('#bands-empty').hidden && document.querySelector('#scan-buckets').rows.length===0 && document.querySelector('#scan-fail-cash').textContent==='—' && document.querySelector('#scan-pass-cash').textContent==='—' && document.querySelector('#hl-equity').value===''"
     )
   );
   await record('切换到未接入的真实账户');

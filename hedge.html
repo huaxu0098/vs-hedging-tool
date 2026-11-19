@@ -11,56 +11,50 @@
     <script type="module" src="/src/hedge/entry.js"></script>
   </head>
   <body>
-    <header>
-      <div class="brand">VS <em>×</em> Hyperliquid</div>
-      <span class="readonly">只读计算 · 不自动下单</span>
+    <header class="desk-header">
+      <div class="desk-bar"><b>VS <em>×</em> Hyperliquid</b><span>只读工作台</span></div>
     </header>
     <main id="current" class="live-desk">
-      <div class="heading">
-        <h1>实时对冲比例扫描</h1><span id="scan-source"></span>
-
+      <div class="desk-title">
+        <h1>对冲比例与仓位</h1>
+        <span id="scan-source"></span><small id="desk-state" role="status"></small>
       </div>
-
-      <section id="scan-desk" aria-label="实时比例扫描">
-        <div class="scan-quotes">
-          <div>
-            <b id="scan-pf-product">Vest 永续</b> <span id="scan-pf-unit"></span>
-            <div class="native-book">
-              <div>买一 Bid<strong id="scan-pf-bid">—</strong></div>
-              <div>卖一 Ask<strong id="scan-pf-ask">—</strong></div>
-            </div>
-            <small>Mark <span id="scan-pf-price">—</span> · <span id="scan-pf-quote"></span></small>
-          </div>
-          <div>
-            <b id="scan-hl-product">Hyperliquid 永续</b> <span id="scan-hl-unit"></span>
-            <div class="native-book">
-              <div>买一 Bid<strong id="scan-hl-bid">—</strong></div>
-              <div>卖一 Ask<strong id="scan-hl-ask">—</strong></div>
-            </div>
-            <small>Mark <span id="scan-hl-price">—</span> · <span id="scan-hl-quote"></span></small>
-          </div>
-        </div>
-
-        <p id="scan-status" role="status"></p>
-        <div class="scan-sets">
-          <article><h2>失败端本金回收区间</h2><strong id="scan-protect">—</strong><small id="scan-protect-count"></small></article>
-          <article><h2>成功端最低留存区间</h2><strong id="scan-survive">—</strong><small id="scan-survive-count"></small></article>
-          <article><h2>失败回本 + 成功端最低留存交集</h2><strong id="scan-both">—</strong><small id="scan-both-count"></small></article>
-          <article id="profit-panel"><h2>个人净盈利区间</h2><strong id="scan-profit">—</strong><small id="scan-profit-count"></small></article>
-        </div>
-        <div id="scan-focus" hidden>
-          <div id="scan-cash" class="scan-paths">
-            <article><h2>若 VS 失败 · 预计回收</h2><strong id="scan-fail-cash">—</strong><small id="scan-fail-summary"></small></article>
-            <article><h2 id="scan-pass-title">若 VS 通过 · 预计剩余</h2><strong id="scan-pass-cash">—</strong><small id="scan-pass-summary"></small></article>
-          </div>
-          <div class="scan-rep"><b id="scan-representative"></b><span id="scan-position"></span></div>
-        </div>
-        <section id="scan-results" hidden>
-          <h2>各比例段的仓位与数量</h2>
-          <div class="table-wrap"><table><thead id="bin-columns"></thead><tbody id="scan-buckets"></tbody></table></div>
+      <div id="scan-desk">
+        <section class="scan-quotes" aria-labelledby="book-heading">
+          <h2 id="book-heading">实时盘口</h2>
+          <table class="book-table">
+            <thead><tr><th scope="col">永续合约</th><th scope="col">Bid 买一</th><th scope="col">Ask 卖一</th><th scope="col">Mark 标记</th></tr></thead>
+            <tbody>
+              <tr><th scope="row"><b id="scan-pf-product">Vest</b><small><span id="scan-pf-unit"></span><span id="scan-pf-health"></span></small></th>
+                <td id="scan-pf-bid">—</td><td id="scan-pf-ask">—</td><td id="scan-pf-price">—</td></tr>
+              <tr><th scope="row"><b id="scan-hl-product">Hyperliquid</b><small><span id="scan-hl-unit"></span><span id="scan-hl-health"></span></small></th>
+                <td id="scan-hl-bid">—</td><td id="scan-hl-ask">—</td><td id="scan-hl-price">—</td></tr>
+            </tbody>
+          </table>
         </section>
-
-      </section>
+        <section id="scan-focus" aria-labelledby="cash-heading">
+          <h2 id="cash-heading">资金结果</h2>
+          <div id="scan-cash" class="scan-paths">
+            <div><h3>失败后 · 个人回收</h3><strong id="scan-fail-cash">—</strong><small id="scan-fail-summary"></small></div>
+            <div><h3 id="scan-pass-title">通过后 · Hype 剩余</h3><strong id="scan-pass-cash">—</strong><small id="scan-pass-summary"></small></div>
+          </div>
+          <p class="scan-rep"><b id="scan-representative"></b> <span id="scan-position"></span></p>
+        </section>
+        <section id="ratio-intervals" aria-labelledby="range-heading">
+          <h2 id="range-heading">自动比例区间</h2>
+          <dl class="scan-sets">
+            <div><dt>失败端本金回收<span id="capital-threshold"></span></dt><dd id="scan-protect">—</dd></div>
+            <div><dt>成功端最低留存<span id="reserve-threshold"></span></dt><dd id="scan-survive">—</dd></div>
+            <div><dt>双路径保护交集</dt><dd id="scan-both">—</dd></div>
+            <div id="profit-panel"><dt>双路径净盈利</dt><dd id="scan-profit">—</dd></div>
+          </dl>
+        </section>
+        <section id="scan-results" aria-labelledby="bands-heading">
+          <div class="bands-heading"><h2 id="bands-heading">比例与仓位</h2><small>双保护规模优先 · 金额 U · 数量为绝对值</small></div>
+          <div class="table-wrap"><table class="bands-table"><thead id="bin-columns"></thead><tbody id="scan-buckets"></tbody></table></div>
+          <p id="bands-empty">等待有效盘口和资金规则</p>
+        </section>
+      </div>
       <details id="desk-details"><summary id="scan-config">高级详情</summary>
       <details class="desk-group" id="account-details"><summary>账户、持仓与资金规则</summary>
         <div class="selectors">
@@ -479,7 +473,8 @@
           </table></div>
           <p id="ratio-theory"></p><p id="ratio-change"></p>
         </section>
-        <small id="advanced-frame"></small>
+        <small id="advanced-frame"></small><p id="scan-status"></p>
+        <p>Vest <span id="scan-pf-quote"></span> · Hyperliquid <span id="scan-hl-quote"></span></p>
       <p id="scan-capital"></p><p id="scan-intersection"></p>
       <p id="scan-fail-net"></p><p id="scan-pass-net"></p><p id="scan-risk"></p>
       <p><strong id="scan-deadline"></strong> <span id="scan-deadline-note"></span></p><p id="scan-funded"></p>
@@ -489,7 +484,7 @@
         <details id="subset-detail"><summary>逐段核对七类候选的数量、现金、手续费与风险</summary><p>各类数量可重叠。全部合法仓位包含提前强平的组合，该类现金列为假设能到达终点的估值。其余六类均通过路径保证金检查。</p><div class="table-wrap"><table><thead id="subset-columns"></thead><tbody id="scan-subsets"></tbody></table></div></details>
         <details id="scan-exclusions"><summary>各段未达到两端约束的数量</summary><div id="scan-risk-counts"></div></details>
       </details>
-      <details id="scan-detail"><summary>自动代表方案的价格路径、费用流水与清算依据</summary><pre id="scan-audit"></pre></details>
+      <details id="scan-detail"><summary>双向成交成本、代表方案流水与清算依据</summary><pre id="scan-audit"></pre></details>
 
       <details class="card" id="trace-panel">
         <summary>本次计算依据 · <span id="trace-id"></span></summary>
