@@ -7,6 +7,8 @@ import {
   includeBand,
   finishReport,
   reportGroups,
+  subsetGroups,
+  mergeReport,
   recoveryCushion
 } from './range-report.js';
 import { evaluateLeverageGrid } from './leverage.js';
@@ -446,14 +448,44 @@ function scanSegments(ctx, venue, sign) {
   return segments.filter((s) => s.lo <= lot && lot <= s.hi).map((s) => ({ ...s, lo: lot, hi: lot }));
 }
 
-export function buildRatioScan(ctx, { maxVisits = 3500000 } = {}) {
+export function buildRatioScan(ctx, { maxVisits = 3500000, cache } = {}) {
+  const legs = {};
+  for (const venue of ['pf', 'hl']) {
+    const calc = () => [1, -1].map((sign) => scanSegments(ctx, venue, sign));
+    const leg = ctx.market[venue];
+    legs[venue] = cache
+      ? cache.reuse(
+          'lots-' + venue,
+          [
+            ctx.market.id,
+            ctx.params.mode,
+            leg,
+            ctx.book[venue],
+            Object.values(ctx.book.positions).filter((p) => p.venue === venue)
+          ],
+          calc
+        )
+      : calc();
+  }
+  const scan = () => scanLotRanges(ctx, maxVisits, legs, cache);
+  if (!cache) return scan();
+  // Quantity changes deeper than the executable frontier leave all affine
+  // segments unchanged. Reuse the exact subdivision and its subset reports.
+  const terms = ['pf', 'hl'].map((side) => {
+    const { bids, asks, ...rest } = ctx.market[side];
+    return rest;
+  });
+  const { now, ...checks } = ctx.checks;
+  const previous = cache.reuse('ranges', [ctx.book, ctx.params, checks, terms, legs, maxVisits], scan);
+  return { ...previous, ctx };
+}
+function scanLotRanges(ctx, maxVisits, legs, cache) {
   const p = profileInputs(ctx.book, ctx.params, ctx.market);
   const constant = decimal(normalizeExposure(ctx.market.hl.step, ctx.market.hl)).div(
     normalizeExposure(ctx.market.pf.step, ctx.market.pf)
   );
   const sets = Object.fromEntries([...keys, 'high'].map((k) => [k, empty()])),
     cells = [];
-  const reports = Object.fromEntries(reportGroups.map((k) => [k, newReport()]));
   let visits = 0,
     complete = true;
   const old = position(ctx.book, 'hl');
@@ -465,8 +497,8 @@ export function buildRatioScan(ctx, { maxVisits = 3500000 } = {}) {
     ? validateMargin(ctx.book, ctx.market, 'hl', out(old), ['0', out(delay), out(delay.neg())]).at(-1)
     : null;
   for (const sign of [1, -1]) {
-    const hypeSegment = scanSegments(ctx, 'hl', -sign);
-    for (const pfSegment of scanSegments(ctx, 'pf', sign)) {
+    const hypeSegment = legs.hl[sign > 0 ? 1 : 0];
+    for (const pfSegment of legs.pf[sign > 0 ? 0 : 1]) {
       const common = pfBoundary(ctx, pfSegment, p);
       for (const h of hypeSegment) {
         const c = cell(ctx, p, pfSegment, h, common);
@@ -486,24 +518,18 @@ export function buildRatioScan(ctx, { maxVisits = 3500000 } = {}) {
           }
           c.scannedTo = i;
           const bands = slices(c, i);
-          if (bands.risk) {
-            const row = metricRow(c.metrics, i);
-            for (const key of reportGroups)
-              if (bands[key]) includeBand(reports[key], row, i, ...bands[key], sign);
-          }
           for (const k of keys) if (bands[k]) add(sets[k], ...bands[k], i, sign);
           for (const band of highRiskBands(bands)) add(sets.high, ...band, i, sign);
         }
       }
     }
   }
-  for (const key of reportGroups) sets[key].range = finishReport(reports[key], ctx, p);
   for (const set of Object.values(sets)) {
     if (!Number.isSafeInteger(set.count)) throw Error('扫描数量超过安全计数范围');
     for (const side of ['min', 'max'])
       if (set[side]) set[side].h = out(constant.times(set[side].j).div(set[side].i));
   }
-  const buckets = reportBuckets(ctx, p, sets, cells);
+  const buckets = reportBuckets(ctx, p, sets, cells, cache);
   return {
     buckets,
     constant: out(constant),
@@ -517,7 +543,7 @@ export function buildRatioScan(ctx, { maxVisits = 3500000 } = {}) {
 }
 // Actual executable fractions, including zero, partition the already scanned domain.
 // Boundaries are compared as lot-index fractions, without rounding to the displayed %.
-function reportBuckets(ctx, p, sets, cells) {
+function reportBuckets(ctx, p, sets, cells, cache) {
   const edges = [
     { i: 1, j: 0, h: '0' },
     ...reportGroups.flatMap((k) => [sets[k].min, sets[k].max]).filter(Boolean)
@@ -525,37 +551,71 @@ function reportBuckets(ctx, p, sets, cells) {
   const cmp = (a, b) => Number(BigInt(a.j) * BigInt(b.i) - BigInt(b.j) * BigInt(a.i));
   edges.sort(cmp);
   const cuts = edges.filter((point, k) => k === 0 || cmp(point, edges[k - 1]) !== 0);
-  const counted = ['legal', ...reportGroups];
+  const counted = [...subsetGroups, 'risk'];
+  const accumulators = () => Object.fromEntries(counted.map((key) => [key, newReport()]));
+  const totals = accumulators();
   const buckets = [...cuts, null].map((edge, n) => ({
     above: cuts[n - 1]?.h ?? null,
     through: edge?.h ?? null,
     throughLots: edge ? { i: edge.i, j: edge.j } : null,
-    ...Object.fromEntries(counted.map((k) => [k, 0])),
-    stats: newReport()
+    stats: accumulators()
   }));
   const ratios = cuts.map((c) => [BigInt(c.j), BigInt(c.i)]);
-  for (const cell of cells) {
+  function summarizeCell(cell) {
+    const parts = new Map();
     for (let i = cell.from; i <= cell.scannedTo; i++) {
       const bands = slices(cell, i);
       if (!bands.legal) continue;
       const limits = ratios.map(([a, b]) => Number((a * BigInt(i)) / b));
-      const row = bands.risk ? metricRow(cell.metrics, i) : null;
-      for (const key of [...counted, 'risk']) {
+      const row = metricRow(cell.metrics, i);
+      for (const key of counted) {
         if (!bands[key]) continue;
         const [lo, hi] = bands[key];
         let start = lo;
         for (let n = 0; n < buckets.length && start <= hi; n++) {
           const end = Math.min(hi, limits[n] ?? hi);
           if (end < start) continue;
-          if (key === 'risk') includeBand(buckets[n].stats, row, i, start, end, cell.sign);
-          else buckets[n][key] += end - start + 1;
+          if (!parts.has(n)) parts.set(n, {});
+          const part = parts.get(n);
+          includeBand((part[key] ??= newReport()), row, i, start, end, cell.sign);
           start = end + 1;
         }
       }
     }
+    return parts;
+  }
+  // A tick at one depth level can change just a few executable cells. Reuse
+  // the exact subtotal only if lot bounds, inequalities, cash/fee/risk models
+  // AND the bin edges still match. Never reuse a previous candidate sample.
+  const nextCells = new Map();
+  for (const cell of cells) {
+    let subtotal;
+    if (cache) {
+      const signature = JSON.stringify([cell, ratios], (_, v) => (typeof v === 'bigint' ? v.toString() : v));
+      subtotal = cache.cells?.get(signature);
+      if (subtotal) cache.hits.subsetCells = (cache.hits.subsetCells ?? 0) + 1;
+      subtotal ??= summarizeCell(cell);
+      nextCells.set(signature, subtotal);
+    } else subtotal = summarizeCell(cell);
+    for (const [n, part] of subtotal)
+      for (const [key, stats] of Object.entries(part)) mergeReport(buckets[n].stats[key], stats);
     delete cell.metrics;
   }
-  return buckets.map(({ stats, ...bin }) => ({ ...bin, range: finishReport(stats, ctx, p) }));
+  if (cache) cache.cells = nextCells;
+  const result = buckets.map(({ stats, ...bin }) => {
+    const ranges = {};
+    for (const key of counted) {
+      mergeReport(totals[key], stats[key]);
+      bin[key] = stats[key].count;
+      ranges[key] = finishReport(stats[key], ctx, p);
+    }
+    return { ...bin, ranges };
+  });
+  for (const key of counted) {
+    if (totals[key].count !== sets[key].count) throw Error('分段与总计不一致 · ' + key);
+    sets[key].range = finishReport(totals[key], ctx, p);
+  }
+  return result;
 }
 export function ratioSlice(scan, sign, i, kind = 'legal') {
   const bands = [];

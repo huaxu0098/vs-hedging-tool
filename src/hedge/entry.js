@@ -441,8 +441,16 @@ function currentFrame(a, m, t) {
   const {context, key} = scanKeys(r, a, m, rates, [scope, $('quote-source').value, m.source]);
   if (running && running.context !== context) cancelAuto();
   wantedKey = key;
-  if (completed?.key === key)
+  if (completed?.key === key) {
+    // The book may return to the last completed inputs while a different tick
+    // is still in flight. Keep that validated result and discard the older job.
+    if (running && running.key !== key) {
+      const valid = completed;
+      cancelAuto();
+      completed = valid;
+    }
     return { ...completed.result, observed:base, frameState:'ready' };
+  }
 
   const trigger = !lastGood ? '首次扫描' : lastGood.context !== context ? '账户或规则已变更' : '行情更新';
   const waiting = (state, reason) => ({
@@ -501,7 +509,7 @@ function currentFrame(a, m, t) {
       worker.terminate(); worker = null;
       finish(null, '后台求解失败，保留上次结果');
     };
-    worker.postMessage({version:revision, r, a, m, rates:frameRates, t, priorTarget:
+    worker.postMessage({version:revision, reprice:lastGood?.context === context, r, a, m, rates:frameRates, t, priorTarget:
       lastGood?.context === context ? retained.advice?.pair : null});
   }
   return waiting('updating', trigger + '，后台重算中');

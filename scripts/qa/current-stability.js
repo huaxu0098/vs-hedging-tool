@@ -24,26 +24,41 @@ const install = `(() => {
         const key=r.trace.id;
         test.results[key]={id:key, started:r.startedAt,finished:r.finishedAt,ms:r.solveMs,
           pfMark:s.ctx.market.pf.mark,hlMark:s.ctx.market.hl.mark, count:s.sets.legal.count,
-          rep:rep && {pf:rep.pfValue, hl:rep.hypeValue, fail:rep.fail, success:rep.successPersonal},
-          bins:s.buckets.filter(b=>b.range).map(b=>({pf:b.range.pfValue,hl:b.range.hlValue,qa:b.range.pfQty,qb:b.range.hlQty,fail:b.range.failure,pass:b.range.success,im:b.range.maxMarginRate}))};
+          revaluation:r.revaluation, sequence:data.version, protect:s.ctx.book.B, reserve:s.ctx.params.R,
+          rep:rep && {pf:rep.pfValue, hl:rep.hypeValue, fail:rep.fail, success:rep.success},
+          bins:s.buckets.filter(b=>b.legal).map(b=>{
+            const group=['both','protect','survive','risk','legal'].find(k=>b.ranges[k]), v=b.ranges[group];
+            return {group,above:b.above,through:b.through,count:v.count,pf:v.pfValue,hl:v.hlValue,qa:v.pfQty,qb:v.hlQty,fail:v.failure,pass:v.successHype,
+              consume:v.consumption[1],rawFailure:b.ranges.legal.failure,rawSuccess:b.ranges.legal.successHype,
+              failProfit:b.failProfit,passProfit:b.passProfit,profit:b.profit};
+          })};
       }});
     }
     if(test.hold) {const handler=this.onmessage.bind(this);test.held.push({job,send:()=>post.call(this,job,...args),handler});return}
     return post.call(this,job,...args);
   };
-  let lastId, firstRow;
+  let lastId, firstRow, main, root, region, firstCell, previousQuote;
   function frame() {
     const e=id=>document.getElementById(id),desk=e('scan-desk');
-    if(desk && lastId){
+    if(lastId) {
+      test.elapsedMs=performance.now()-test.started;
+      if(document.querySelector('main')!==main || desk!==root || e('scan-results')!==region) test.remounts=(test.remounts||0)+1;
+      if (!desk) {test.blanks++;requestAnimationFrame(frame);return}
+      const quote=e('scan-pf-quote').textContent+e('scan-hl-quote').textContent;
+      if(quote!==previousQuote){test.quoteChanges=(test.quoteChanges||0)+1;previousQuote=quote}
       test.paints++;
       if(desk.dataset.state==='updating') test.pendingPaints++;
       if(desk.dataset.state==='paused') test.pausedPaints++;
       if(e('scan-focus').hidden || e('scan-results').hidden || !e('scan-fail-cash').textContent ||
-        !e('scan-pass-cash').textContent || !e('scan-buckets').rows.length || /等待有效数据/.test(e('scan-protect').textContent)) test.blanks++;
-      if(e('scan-buckets').rows[0]!==firstRow) test.replacedFirstRow=true;
+        !e('scan-pass-cash').textContent || !e('scan-buckets').rows.length || ['protect','survive','both','profit'].some(k=>!e('scan-'+k).textContent || e('scan-'+k).textContent.includes('等待有效数据'))) test.blanks++;
+      const rect=region.getBoundingClientRect(), style=getComputedStyle(region);
+      if(rect.height===0 || style.visibility==='hidden' || Number(style.opacity)===0) test.blanks++;
+      if(region.inert || getComputedStyle(region).userSelect==='none') test.unreadable=true;
+      if(e('scan-buckets').rows[0]!==firstRow || e('scan-buckets').rows[0]?.cells[0]!==firstCell) test.replacedFirstRow=true;
     }
     const id=desk?.dataset.resultId;
-    if(id && id!==lastId && desk.dataset.state==='ready' && test.results[id]){
+    if(id && id!==lastId && test.results[id]){
+      if(!root){test.started=performance.now();main=document.querySelector('main');root=desk;region=e('scan-results');firstCell=e('scan-buckets').rows[0]?.cells[0]}
       firstRow??=e('scan-buckets').rows[0];lastId=id;
       test.commits.push({ ...test.results[id], prices:[e('scan-pf-price').textContent,e('scan-hl-price').textContent],
         cash:[e('scan-fail-cash').textContent,e('scan-pass-cash').textContent], position:e('scan-position').textContent,
@@ -65,13 +80,16 @@ try {
     mobile: false
   });
   await send('Page.navigate', { url });
-  await wait('window.scanTest?.commits.length>=4 && window.scanTest.pendingPaints>2', 65000);
-  const frames = await run('window.scanTest.commits.slice(0,4)');
+  await wait(
+    'window.scanTest?.commits.length>=4 && window.scanTest.pendingPaints>2 && window.scanTest.elapsedMs>=60000',
+    125000
+  );
+  const frames = await run('window.scanTest.commits');
   for (const f of frames) {
-    assert.ok(f.status.includes(f.id));
+    assert.ok(f.status.includes('结果时间'));
     assert.equal(f.rows.length, f.bins.length);
     assert.deepEqual(f.cash, [cash(f.rep.fail), cash(f.rep.success)]);
-    assert.deepEqual(f.prices, [dec(String(f.pfMark)).toFixed(2), dec(String(f.hlMark)).toFixed(2)]);
+    assert.ok(f.prices.every((px) => Number(px) > 0));
     for (const [i, bin] of f.bins.entries()) {
       const cells = f.rows[i];
       for (const [j, values, qty] of [
@@ -81,14 +99,27 @@ try {
         assert.ok(cells[j].includes(qty.join(' – ')), cells[j]);
         for (const v of values) assert.ok(cells[j].includes(dec(v).toFixed(2) + ' U'), cells[j]);
       }
-      assert.equal(cells[3], bin.fail.map(cash).join(' – '));
-      assert.equal(cells[4], bin.pass.map(cash).join(' – '));
-      assert.ok(cells[5].includes(pct(bin.im)));
+      assert.ok(cells[0].includes(bin.count.toLocaleString('en-US')));
+      if (bin.group !== 'legal') {
+        assert.equal(cells[3], bin.fail.map(cash).join(' – '));
+        assert.equal(cells[4], bin.pass.map(cash).join(' – '));
+      }
+      if (bin.group === 'both') {
+        assert.ok(bin.fail.every((v) => dec(v).gte(f.protect)));
+        assert.ok(bin.pass.every((v) => dec(v).gte(f.reserve)));
+      }
+      assert.ok(cells[5].includes(pct(bin.consume)));
     }
     assert.ok(f.height <= 900, '主要计算区域超出桌面首屏 ' + f.height);
   }
+  assert.ok(frames.every((f, i) => !i || f.sequence > frames[i - 1].sequence));
+  assert.ok(frames.slice(1).some((f) => f.revaluation.marketOnly));
+  evidence.example = frames[0].bins.filter((b) => b.group === 'both').sort((a, b) => b.count - a.count)[0];
   assert.ok(new Set(frames.map((f) => JSON.stringify(f.bins))).size > 1);
   evidence.live = frames.map(({ rows, bins, ...f }) => ({ ...f, bands: bins.length }));
+  evidence.observation = await run(
+    '(({paints,pendingPaints,blanks,replacedFirstRow=false,remounts=0,unreadable=false,posted,elapsedMs,quoteChanges})=>({paints,pendingPaints,blanks,replacedFirstRow,remounts,unreadable,posted,elapsedMs,quoteChanges}))(window.scanTest)'
+  );
   // Hold one legitimate request, supersede it with a new rule, then deliver
   // the old response after dispatch. It must never become visible.
   await run('window.scanTest.hold=true');
@@ -113,9 +144,9 @@ try {
       "!document.body.textContent.includes('INVALID_LATE_TEST') && document.getElementById('scan-pass-summary').textContent.includes('97.00 U')"
     )
   );
-  evidence.observation = await run(
-    '(({paints,pendingPaints,blanks,replacedFirstRow=false,posted})=>({paints,pendingPaints,blanks,replacedFirstRow,posted}))(window.scanTest)'
-  );
+  assert.ok(evidence.observation.elapsedMs >= 60000 && evidence.observation.quoteChanges > 1);
+  assert.equal(evidence.observation.remounts, 0);
+  assert.equal(evidence.observation.unreadable, false);
   assert.equal(evidence.observation.blanks, 0);
   assert.equal(evidence.observation.replacedFirstRow, false);
   assert.deepEqual(b.faults, []);

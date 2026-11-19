@@ -40,7 +40,7 @@
           <div class="scan-rep"><b id="scan-representative"></b><span id="scan-position"></span></div>
         </div>
         <section id="scan-results" hidden>
-          <h2>各比例下的仓位与资金范围</h2>
+          <h2>各比例段的仓位与现金 · 优先展示交集合格组</h2>
           <div class="table-wrap"><table><thead id="bin-columns"></thead><tbody id="scan-buckets"></tbody></table></div>
         </section>
       </section>
@@ -77,6 +77,7 @@
       <p id="scan-runtime"></p>
       <details><summary>四类区间的完整统计与费用</summary>
         <div class="table-wrap"><table><thead id="range-columns"></thead><tbody id="scan-rows"></tbody></table></div>
+        <details id="subset-detail"><summary>逐段核对七类候选的数量、现金、手续费与风险</summary><p>各类数量可重叠。全部合法仓位包含提前强平的组合，该类现金列为假设能到达终点的估值。其余六类均通过路径保证金检查。</p><div class="table-wrap"><table><thead id="subset-columns"></thead><tbody id="scan-subsets"></tbody></table></div></details>
         <details id="scan-exclusions"><summary>各段未达到两端约束的数量</summary><div id="scan-risk-counts"></div></details>
       </details>
       <details id="scan-detail"><summary>自动代表方案的价格路径、费用流水与清算依据</summary><pre id="scan-audit"></pre></details>

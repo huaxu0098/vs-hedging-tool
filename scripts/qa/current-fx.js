@@ -14,7 +14,7 @@ async function capture(asset) {
     65000
   );
   const frame = await run(`(()=>{const e=id=>document.getElementById(id),box=e('trace-inputs').parentElement;
-    box.open=true;box.ontoggle();return {trace:e('trace-id').textContent, clock:e('scan-clock').textContent,
+    box.open=true;box.ontoggle();return {trace:e('trace-id').textContent, resultId:e('scan-desk').dataset.resultId, clock:e('scan-clock').textContent,
     basis:e('scan-basis').textContent, metadata:e('fx-source').textContent, position:e('scan-position').textContent,
     failure:e('scan-fail-cash').textContent,success:e('scan-pass-cash').textContent,profit:e('scan-profit').textContent,
     status:e('scan-status').textContent,source:e('scan-source').textContent, input:JSON.parse(e('trace-inputs').textContent)}})()`);
@@ -36,8 +36,8 @@ async function capture(asset) {
     .div(String(rates.USDC.bid))
     .minus(m.pf.levels[0][0][0]);
   assert.ok(frame.metadata.includes(entry.toFixed(5)) && frame.metadata.includes(exit.toFixed(5)));
-  assert.ok(frame.status.includes(frame.trace.split(' / ')[1]));
-  assert.match(frame.status, /AUTO_PARTIAL/);
+  assert.equal(frame.resultId, frame.trace.split(' / ')[1]);
+  assert.match(frame.status, /条件估算/);
   assert.match(frame.source, /预设资金规划/);
   evidence.push({
     asset,
@@ -83,7 +83,7 @@ try {
     await wait(
       "document.getElementById('scan-basis').textContent===" +
         JSON.stringify(expected) +
-        " && !document.getElementById('scan-focus').hidden && document.getElementById('scan-results').inert && document.getElementById('scan-desk').dataset.state==='paused'",
+        " && !document.getElementById('scan-focus').hidden && !document.getElementById('scan-results').hidden && document.getElementById('scan-desk').dataset.state==='paused'",
       35000
     );
     evidence.push({ injectedFault: fault, state: expected, oldResultsWithdrawn: true });

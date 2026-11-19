@@ -87,7 +87,7 @@ try {
     assert.ok(filename, '真实浏览器保存核算文件');
     const saved = JSON.parse(await readFile(path.join(downloadDir, filename), 'utf8'));
     assert.equal(filename, 'hedge-' + saved.id + '.json');
-    assert.equal(saved.model, 'AUTO-0.21');
+    assert.equal(saved.model, 'AUTO-0.21.1');
     assert.equal(saved.inputs.accounts.hl.equity, '409');
     assert.equal(saved.outputs.autoStatus, 'AUTO_PARTIAL');
     assert.ok(saved.outputs.conservative.candidate);

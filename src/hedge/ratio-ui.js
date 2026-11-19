@@ -1,10 +1,13 @@
 import { dec } from './math.js';
-import { reportGroups } from './range-report.js';
+import { reportGroups, subsetGroups } from './range-report.js';
 import { ledgerLabels, presentLedger } from './settlement-ledger.js';
 
 const $ = (id) => document.getElementById(id);
 const write = (id, text) => {
-  if ($(id).textContent !== text) $(id).textContent = text;
+  const el = $(id);
+  if (el.textContent === text) return;
+  if (el.childNodes.length === 1 && el.firstChild.nodeType === Node.TEXT_NODE) el.firstChild.data = text;
+  else el.textContent = text;
 };
 const fmt = (x, n = 2) => (x == null ? '未验证' : dec(String(x)).toFixed(n));
 const usd = (x) =>
@@ -33,7 +36,11 @@ const names = {
   protect: '失败端本金回收',
   survive: '成功端最低留存',
   both: '失败回本 + 成功端最低留存',
-  profit: '个人净盈利'
+  profit: '双路径均净盈利',
+  legal: '全部合法仓位',
+  risk: '通过保证金检查',
+  failProfit: '失败路径净盈利',
+  passProfit: '成功路径净盈利'
 };
 function auditText() {
   if (!$('scan-detail').open || !audit) {
@@ -145,9 +152,9 @@ function showRepresentative(scan, result) {
   );
   write(
     'scan-pass-title',
-    row.funded ? '若 PF 达到提款参考线 · 到账前条件结余' : '若 PF 达到通过线 · 条件结余'
+    row.funded ? '若 PF 达到提款线 · Hype 到账前权益' : '若 PF 达到通过线 · Hype 平仓权益'
   );
-  write('scan-pass-cash', row.passStop ?? settlementAmount(row.successPersonal));
+  write('scan-pass-cash', row.passStop ?? settlementAmount(row.success));
   const diff = dec(row.successPersonal).minus(B);
   write(
     'scan-pass-net',
@@ -180,7 +187,7 @@ function showRepresentative(scan, result) {
       : (row.survives ? '满足 ' : '低于 ') +
           usd(params.R) +
           ' 留存 · ' +
-          (diff.lt(0) ? '距本金差 ' : '高于本金 ') +
+          (diff.lt(0) ? '个人资金距本金差 ' : '个人资金高于本金 ') +
           settlementAmount(diff.abs())
   );
   const cutoff = row.deadline;
@@ -239,7 +246,7 @@ const columns = [
   '范围及组合数',
   'PF 数量 / 名义额',
   'Hype 数量 / 名义额',
-  '失败回收 / 成功剩余',
+  '失败个人回收 / 成功 Hype 权益',
   '失败 / 成功双边成交手续费',
   '失败缺口 / B · 成功消耗 / Hype 权益',
   '最大保证金 / Hype 权益 · 最小强平距离 / 标记价'
@@ -264,7 +271,7 @@ function summaryRow(body, label, range, emptyText) {
   const lines = [
     [pair(range.pfQty, (v) => v), pair(range.pfValue, usd)],
     [pair(range.hlQty, (v) => v), pair(range.hlValue, usd)],
-    [pair(range.failure, settlementAmount), pair(range.success, settlementAmount)],
+    [pair(range.failure, settlementAmount), pair(range.successHype, settlementAmount)],
     [pair(range.failureFee, settlementAmount), pair(range.successFee, settlementAmount)],
     [pair(range.gapRate, pct), pair(range.consumption, pct)],
     [
@@ -290,7 +297,19 @@ function patchRows(body, next) {
     for (const [j, cell] of cells.entries()) {
       const old = row.cells[j];
       if (!old) row.append(cell);
-      else if (!old.isEqualNode(cell)) old.replaceWith(cell);
+      else if (!old.isEqualNode(cell)) {
+        old.title = cell.title;
+        if (old.colSpan !== cell.colSpan) old.colSpan = cell.colSpan;
+        const sameLayout =
+          old.childNodes.length === cell.childNodes.length &&
+          [...old.childNodes].every((node, k) => node.nodeName === cell.childNodes[k].nodeName);
+        if (sameLayout) {
+          [...old.childNodes].forEach((node, k) => {
+            const nextText = cell.childNodes[k].nodeValue;
+            if (node.nodeType === Node.TEXT_NODE && node.nodeValue !== nextText) node.nodeValue = nextText;
+          });
+        } else old.replaceChildren(...cell.childNodes);
+      }
     }
     while (row.cells.length > cells.length) row.deleteCell(-1);
   }
@@ -300,6 +319,29 @@ function intervalText(lo, hi, separate = ' – ') {
   let digits = 4;
   while (digits < 48 && !dec(lo).eq(hi) && pct(lo, digits) === pct(hi, digits)) digits++;
   return pct(lo, digits) + separate + pct(hi, digits);
+}
+function renderSubsets() {
+  if (!$('subset-detail').open) return;
+  const details = document.createElement('tbody');
+  for (const bin of frame?.buckets ?? []) {
+    if (!bin.legal) continue;
+    const label =
+      bin.above == null
+        ? '0%'
+        : '＞' + (bin.through == null ? pct(bin.above) : intervalText(bin.above, bin.through, ' 至 ≤'));
+    for (const key of subsetGroups) {
+      const unknown =
+        (key === 'profit' || key.endsWith('Profit')) &&
+        (frame.ctx.params.profitBasis == null || frame.ctx.params.externalPriced === false);
+      summaryRow(
+        details,
+        label + ' · ' + names[key],
+        unknown ? null : bin.ranges[key],
+        unknown ? '投入基准待核实' : '0 组'
+      );
+    }
+  }
+  patchRows($('scan-subsets'), details);
 }
 function draw(result) {
   frame = result.ratioScan ?? null;
@@ -312,7 +354,7 @@ function draw(result) {
   $('scan-focus').hidden = !rep;
   const aggregate = document.createElement('tbody');
   const bands = document.createElement('tbody');
-  const noProfit = '当前条件下无净盈利比例';
+  const noProfit = '当前资金规则及已配置条件下，没有双路径净盈利比例。';
   for (const key of reportGroups) {
     const s = scan?.sets[key];
     const unknown =
@@ -350,16 +392,17 @@ function draw(result) {
       bin.above == null
         ? '0% · Hype 空仓'
         : '＞' + (bin.through == null ? pct(bin.above) : intervalText(bin.above, bin.through, ' 至 ≤'));
-    if (bin.range) {
-      const includesRepresentative = rep?.segment === n;
+    if (bin.legal) {
+      const group = ['both', 'protect', 'survive', 'risk', 'legal'].find((key) => bin.ranges[key]);
+      const includesRepresentative = rep?.segment === n && (rep.group === group || group === 'risk');
       const tr = bands.insertRow(),
-        metrics = bin.range;
+        metrics = bin.ranges[group];
       const title = document.createElement('th');
       title.scope = 'row';
       title.append(
         label,
         document.createElement('br'),
-        bin.both ? '两端达标 ' + bin.both.toLocaleString() + ' 组' : '无两端达标组合'
+        (group === 'both' ? '交集' : names[group]) + ' ' + metrics.count.toLocaleString() + ' 组'
       );
       tr.append(title);
       tr.classList.toggle('representative-range', includesRepresentative);
@@ -376,16 +419,20 @@ function draw(result) {
           pair(qty, (v) => v) + ' ' + (unit === 'contract' ? '张' : unit)
         );
       }
-      tr.insertCell().textContent = pair(metrics.failure, settlementAmount);
-      tr.insertCell().textContent = pair(metrics.success, settlementAmount);
+      tr.insertCell().textContent =
+        group === 'legal' ? '路径结余未验证' : pair(metrics.failure, settlementAmount);
+      tr.insertCell().textContent =
+        group === 'legal' ? '路径结余未验证' : pair(metrics.successHype, settlementAmount);
       const risk = tr.insertCell();
       risk.append(
         '缺口 ' + pct(metrics.gapRate?.[1], 2),
         document.createElement('br'),
-        '占用 ' + pct(metrics.maxMarginRate, 2)
+        '消耗 ' + pct(metrics.consumption?.[1], 2)
       );
       risk.title =
-        '失败缺口 / 本金，初始保证金 / Hype 起始权益 · 成功消耗 ' +
+        '初始保证金占用 ' +
+        pct(metrics.maxMarginRate, 2) +
+        ' · 成功消耗 ' +
         pair(metrics.consumption, pct) +
         ' · 最小强平距离 / 标记价 ' +
         pct(metrics.minBufferRate);
@@ -406,6 +453,7 @@ function draw(result) {
           ' 组'
       );
   }
+  renderSubsets();
   patchRows($('scan-rows'), aggregate);
   patchRows($('scan-buckets'), bands);
   write('scan-risk-counts', excluded.join('\n'));
@@ -525,12 +573,12 @@ export function renderScan(result, m, r, plan, status) {
     write('scan-funded', 'Funded 分成 · 等待有效快照，到账状态待核实');
   const state = result.frameState ?? 'paused',
     id = tr?.id ?? '';
-  const stamp = tr ? '结果快照 ' + time(tr.at) + ' · ' + id : '';
+  const stamp = tr ? '结果时间 ' + time(tr.at) : '';
   const desk = $('scan-desk');
   const outdated = !!tr && state !== 'ready';
   desk.dataset.state = state;
   desk.dataset.resultId = id;
-  $('scan-results').inert = outdated;
+
   const progress =
     state === 'updating'
       ? '更新中 · ' + (result.trigger ?? '后台重算')
@@ -538,7 +586,7 @@ export function renderScan(result, m, r, plan, status) {
         ? [
             displayed?.ratioScan?.complete === false ? '部分网格' : '',
             displayed?.stress?.missing?.length ? '基础路径 · 压力待补' : '',
-            displayed?.autoStatus ?? '条件结果'
+            displayed?.autoStatus === 'AUTO_PARTIAL' ? '条件估算' : '条件结果'
           ]
             .filter(Boolean)
             .join(' · ')
@@ -553,7 +601,8 @@ export function renderScan(result, m, r, plan, status) {
       displayed && '耗时 ' + displayed.solveMs + ' ms',
       displayed?.ratioScan && '覆盖 ' + displayed.ratioScan.sets.legal.count.toLocaleString() + ' 组',
       displayed?.stress?.label,
-      stamp
+      stamp,
+      tr && tr.model + ' / ' + id
     ]
       .filter(Boolean)
       .join(' · ')
@@ -566,7 +615,8 @@ export function renderScan(result, m, r, plan, status) {
 export function setupScan(onConfig) {
   $('scan-config').onclick = onConfig;
   $('scan-detail').ontoggle = auditText;
-  for (const id of ['range-columns', 'bin-columns']) {
+  $('subset-detail').ontoggle = renderSubsets;
+  for (const id of ['range-columns', 'bin-columns', 'subset-columns']) {
     const tr = $(id).insertRow();
     for (const title of id === 'bin-columns'
       ? [
@@ -575,7 +625,7 @@ export function setupScan(onConfig) {
           'Hype 仓位 / 数量',
           '失败回收',
           '成功剩余',
-          '最大缺口率 / 保证金占用率'
+          '失败缺口 / 成功消耗（最大）'
         ]
       : columns) {
       const cell = document.createElement('th');

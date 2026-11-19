@@ -309,6 +309,19 @@ function requiredAtMove(book, m, p, old, sign, percent) {
 }
 
 export function solveAuto(book, m, params, options = {}) {
+  const { marketCache, now, seeds, ...constraints } = options;
+  if (!marketCache) return rankCandidates(book, m, params, options);
+  // Dates and FX freshness are validated before ranking. FX-only observations
+  // with identical ledger inputs reuse the proof; changed books reprice its branches.
+  const slot = 'ranking-' + (params.cashFloor == null ? params.objective : 'cashFloor');
+  const seedLots = seeds?.map((c) => [c.vsTargetQuantity, c.hlTargetQuantity]);
+  const value = marketCache.reuse(slot, [book, m, params, constraints, seedLots], () =>
+    rankCandidates(book, m, params, options)
+  );
+  // calculateCurrent attaches coverage flags to the result for this frame.
+  return { ...value };
+}
+function rankCandidates(book, m, params, options) {
   if (!m.hl.exchangeMaxLeverage || !m.hl.tiers?.length || m.hl.marginMode !== 'cross')
     return { code: 'LEVERAGE_UNVERIFIED', candidates: [], rejected: [], searchComplete: false, pressure: {} };
   // An optimistic grid bound. Candidate admission still checks the tier at the actual rounded notional.
@@ -418,9 +431,24 @@ export function solveAuto(book, m, params, options = {}) {
     .div(10000);
   const branches = [],
     domain = [];
+  function domainSegments(side, sign, held) {
+    if (!options.marketCache) return segments(book, m, side, sign, held, true, audit);
+    const part = options.marketCache.reuse(
+      'branches-' + side + sign,
+      [m.id, m[side], book[side], Object.values(book.positions).filter((p) => p.venue === side), held],
+      () => {
+        const record = { domains: [], rows: [], omitted: 0 };
+        return { grid: segments(book, m, side, sign, held, true, record), audit: record };
+      }
+    );
+    audit.domains.push(...part.audit.domains);
+    for (const row of part.audit.rows) recordBound(audit, row);
+    audit.omitted += part.audit.omitted;
+    return part.grid;
+  }
   for (const sign of [1, -1]) {
-    const pp = segments(book, m, 'pf', sign, current[0], true, audit),
-      hh = segments(book, m, 'hl', -sign, current[1], true, audit);
+    const pp = domainSegments('pf', sign, current[0]);
+    const hh = domainSegments('hl', -sign, current[1]);
     const edge = (segments) =>
       segments.length
         ? {

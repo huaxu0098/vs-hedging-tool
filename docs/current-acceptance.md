@@ -1,5 +1,34 @@
 # 实时双平台动态对冲工作台验收记录
 
+## 2026-11-20 · 七类候选逐段对账及 60 秒连续行情验收（AUTO-0.21.1）
+
+在本机 4181 用 Chrome 同时观察 Vest 与 Hyperliquid 主网 BTC 永续行情。资金采用预设空仓规划：个人本金 500 U，报名费 91 U，Hype 409 U，外部资金 0 U，考核权益 10,000 U，失败线 9,400 U，通过线 12,000 U，成功端 Hype 最低留存 100 U。
+
+### 分段验算
+
+旧版对交集单独计数，却用通过保证金检查的整个价格段来汇总金额。此次把每一段分别裁剪到七类候选，分别统计数量、仓位、双端现金、双端成交手续费、失败缺口、成功消耗、保证金占用与强平距离。每项现金、手续费和保证金极值保留对应的实际候选坐标。代表方案所有字段由同一坐标重新入账。
+
+03:55:45（上海），比例段大于 15.1818% 至 15.4386%（端点显示为四位小数），交集为 10,524 组。PF 仓位范围 0.0097 至 0.1109 BTC，Hype 反向仓位范围 0.00148 至 0.01705 BTC。交集失败回收 500.000017 至 501.505516 U，成功端 Hype 平仓权益 100.000088 至 104.989225 U。全段合法仓位的失败端最低终点估值为 479.397395 U，成功端最低终点估值为 79.317227 U，这两个值仅出现在对应的全段统计。全部合法行对提前触线的组合只展示假设到达终点的估值。资金及强平条件合格后才计入保护和盈利子集。
+
+同段失败路径净盈利 16,446 组、成功路径净盈利 0 组、双路径净盈利 0 组。该帧首页代表仓位为 PF 6,914.09 U 与反向 Hype 1,062.79 U，对应失败回收 500.002837 U、通过后 Hype 剩余 100.033490 U。该数字由预设账户和当时盘口计算。用户原先看到的 10,443 组属于另一行情时点。[分段原始数值与浏览器逐帧测量](../../../deliverables/vs-hedging-tool/subsets-stability-final.json)
+
+### 验收结果
+
+- **1、2、3 · 子集、现金及盈利计数。** 七种小网格情形逐仓穷举，与全局及每段每个子集的统计逐项对账，含已有仓位、手续费、外部资金、压力、档位和 Funded。另在实际浏览器打开高级详情，逐行核对七类统计数量及交集现金。增量重估与相同输入冷启动的分段、代表方案及剪枝证明一致。
+- **4、5 · 页面与连续行情。** Chrome 以 1440 × 900 连续观测 60.0635 秒。3,604 个绘制帧、1,077 个后台更新帧、37 次报价显示更新、31 个已发布计算版本。闪白 0 帧，主区域重挂 0 次，表格首行与首格原节点一直保留，更新时允许选取和阅读文本。另行延迟旧请求、阻断 Worker 触发超时，分别验证迟到回包被丢弃、超时保留结果和恢复后继续重算。
+- **6、7 · 标准永续及汇率。** 官方交易页和 `metaAndAssetCtxs` 对照读到 Mark 62,599、Oracle 62,627 USDT。本地买一 62,603、卖一 62,604，与相同交易所时间戳的独立 L2 事件一致。单测独立变更 USDC/USDT 参考 FX，验证基差和脱锚估值更新，Hype 原生 USDC 盈亏、费用、清算及分段结果保持一致。[Hyperliquid 官方合约规格](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/contract-specifications)
+- **8、9、10 · 规则、净盈利及首页。** 实际修改留存和回收缓冲后，四类区间及当前双边仓位自动重算。交易所行情变化时按新盘口重估。缺少双路径净盈利候选时，首页显示“当前资金规则及已配置条件下，没有双路径净盈利比例。”仓位、两个现金结果和风险概要在首屏，七类完整统计、公式、账本、版本及连接详情默认折叠。[浏览器资金规则及故障测试记录](../../../deliverables/vs-hedging-tool/subsets-paths-final.json)
+
+全库 `npm test` 实际通过 308/308，零跳过。真实用户的 Vest 和 Hype 权益、可用抵押品、现仓和挂单、其他全仓占用、账户杠杆设置、账户实际费率和压力参数尚未核实。市场数据及币种规格使用公开主网；账户数据保持规划标记，结果维持条件估算。
+
+### 本轮文件清单
+
+- 计算和对账：[ratio-scan.js](../src/hedge/ratio-scan.js)、[range-report.js](../src/hedge/range-report.js)、[current.js](../src/hedge/current.js)、[leverage.js](../src/hedge/leverage.js)、[auto.js](../src/hedge/auto.js)。
+- 行情重估和版本：[auto-worker.js](../src/hedge/auto-worker.js)、[scan-refresh.js](../src/hedge/scan-refresh.js)、[entry.js](../src/hedge/entry.js)、[trace.js](../src/hedge/trace.js)。
+- 首页及明细：[hedge.html](../hedge.html)、[ratio-ui.js](../src/hedge/ratio-ui.js)。
+- 测试：[hedge-auto.test.js](../tests/hedge-auto.test.js)、[current-stability.js](../scripts/qa/current-stability.js)、[current-ranges.js](../scripts/qa/current-ranges.js)、[current-fx.js](../scripts/qa/current-fx.js)、[current-live.js](../scripts/qa/current-live.js)。
+- 使用与验收：[README.md](../README.md) 及本验收记录。
+
 ## 2026-11-20 第 0.20、0.21 节 · 标准 BTC 永续和连续行情重算
 
 **合约和资金。** 本次确认的 Hyperliquid 市场是标准 BTC Perpetual。公开 `metaAndAssetCtxs` 与 `l2Book` 提供永续行情和盘口。BTC 价格以 USDT 表示，抵押、费用和损益以 USDC 入账。每 1 BTC 多头的原生报价上移 100 个点，毛收益为 100 USDC。两端分别从自己的当前价格出发，按各自乘数、实际数量及结算规则入账。基础情景假设双方原生报价平行移动，基差变化可另行施压。USDC_per_USDT 用于跨平台参考价差，USD 估值用于单列脱锚风险。[官方交易页](https://app.hyperliquid.xyz/trade/BTC) · [官方合约规格](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/contract-specifications)

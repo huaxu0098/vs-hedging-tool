@@ -21,9 +21,9 @@ function fingerprint(json) {
 }
 
 export function calculationTrace(rules, accounts, market, rates, at, settings = {}) {
-  const model = 'AUTO-0.21';
+  const model = 'AUTO-0.21.1';
   const options = Object.fromEntries(
-    ['cashSearchBudget', 'priorTarget', 'searchBudget', 'scanRatios']
+    ['cashSearchBudget', 'priorTarget', 'seedTargets', 'searchBudget', 'scanRatios']
       .filter((k) => settings[k] != null)
       .map((k) => [k, settings[k]])
   );

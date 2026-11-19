@@ -9,7 +9,7 @@ const evidence = [];
 async function ready(condition = 'true') {
   try {
     await wait(
-      "!document.querySelector('#scan-results').hidden&&!document.querySelector('#scan-results').inert&&document.querySelector('#scan-rows')?.rows.length>1 && (" +
+      "!document.querySelector('#scan-results').hidden&&document.querySelector('#scan-desk').dataset.state==='ready'&&document.querySelector('#scan-rows')?.rows.length>1 && (" +
         condition +
         ')',
       65000
@@ -53,7 +53,7 @@ try {
     !document.querySelector('#scan-desk input,#scan-desk select,#scan-rows [tabindex]')`)
   );
   assert.match(await text('#scan-capital'), /预设资金规划/);
-  assert.equal(await text('#scan-profit'), '当前条件下无净盈利比例');
+  assert.equal(await text('#scan-profit'), '当前资金规则及已配置条件下，没有双路径净盈利比例。');
   assert.ok(await run("document.getElementById('profit-panel').classList.contains('no-profit')"));
   assert.ok(
     await run(
@@ -70,21 +70,42 @@ try {
   await run("document.getElementById('desk-details').open=true");
   await ready("document.getElementById('trace-id').textContent.includes('AUTO-0.21')");
   await record('AUTOSEL01—AUTOSEL07 · 首次打开即自动展示两端与四个区间');
+  await run("document.getElementById('subset-detail').parentElement.open=true");
+  await click('#subset-detail > summary');
+  await ready("document.getElementById('scan-subsets').rows.length>=7");
   const captured =
     await run(`(()=>{const el=id=>document.getElementById(id), doc=el('trace-inputs').parentElement;doc.open=true;doc.ontoggle();
     return {input:JSON.parse(el('trace-inputs').textContent), time:el('trace-sources').textContent.match(/计算于 (\\S+)/)[1],id:el('trace-id').textContent,
       rows:[...el('scan-rows').rows].map(tr=>[...tr.cells].map(td=>td.textContent)),
+      subsets:[...el('scan-subsets').rows].map(tr=>[...tr.cells].map(td=>td.textContent)),
       rep:el('scan-representative').textContent,fail:el('scan-fail-cash').textContent,success:el('scan-pass-cash').textContent,
       cushion:el('scan-fail-net').textContent,thin:el('scan-fail-net').classList.contains('thin-buffer')};})()`);
   const { rules, accounts, market, rates, options } = captured.input;
   const x = calculateCurrent(rules, accounts, market, rates, Date.parse(captured.time), options);
   assert.ok(captured.id.endsWith(x.trace.id));
   const { sets, representative, buckets } = x.ratioScan;
+  const keys = ['legal','protect','survive','both','failProfit','passProfit','profit'];
+  const visible = buckets.filter(bin => bin.legal);
+  assert.equal(captured.subsets.length, keys.length * visible.length);
+  for (const [i, bin] of visible.entries()) for (const [j, key] of keys.entries()) {
+    const row = captured.subsets[i * keys.length + j], values = bin.ranges[key];
+    if (!values) { assert.equal(row[1], '0 组'); continue; }
+    assert.ok(row[0].endsWith(values.count.toLocaleString('en-US') + ' 组'));
+    assert.ok(row[1].includes(values.pfQty.join(' – ')));
+    assert.ok(row[2].includes(values.hlQty.join(' – ')));
+    if (key === 'both') {
+      assert.ok(dec(values.failure[0]).gte(x.funding.B));
+      assert.ok(dec(values.successHype[0]).gte(x.funding.R_success));
+      assert.ok(row[3].includes(dec(values.failure[0]).toFixed(4) + ' U'));
+      assert.ok(row[3].includes(dec(values.successHype[0]).toFixed(4) + ' U'));
+    }
+  }
+  await click('#subset-detail > summary');
   assert.equal(representative.group, 'both');
   assert.equal(representative.objective, 'max_pf');
   assert.ok(captured.rep.includes(dec(representative.row.h).times(100).toFixed(4) + '%'));
   assert.equal(captured.fail, dec(representative.row.fail).toFixed(4) + ' U');
-  assert.equal(captured.success, dec(representative.row.successPersonal).toFixed(4) + ' U');
+  assert.equal(captured.success, dec(representative.row.success).toFixed(4) + ' U');
   assert.equal(captured.thin, representative.row.cushion.thin);
   assert.ok(captured.cushion.includes('未设额外安全缓冲'));
   if (captured.thin) assert.match(captured.cushion, /极薄缓冲.*压力未验证/);
@@ -95,7 +116,7 @@ try {
     );
     const range = sets[k].range;
     if (!range) {
-      assert.ok(captured.rows[n][1].includes('无'));
+      assert.match(captured.rows[n][1], /没有双路径净盈利比例|无符合条件的仓位/);
       continue;
     }
     assert.equal(range.count, sets[k].count);

@@ -169,7 +169,15 @@ export function evaluateLeverageGrid(book, market, profile, pf, hl, checks) {
     const rank = { pass: 0, unknown: 1, fail: 2 };
     // Rows share the same cross pool, net exposure, fees and maintenance schedule.
     // Ascending enumeration makes the first passing setting the least leverage required.
-    if (!best || rank[row.status] < rank[best.row.status]) best = { row, extra, margin };
+    // An openable lot can still fail later on the path. Its diagnostic margin
+    // uses the lowest entry-admissible setting, even when all exit paths fail.
+    const entryOK = extra.every((c) => c.status === 'pass');
+    if (
+      !best ||
+      rank[row.status] < rank[best.row.status] ||
+      (checks.scanRiskOnly && row.status === best.row.status && entryOK && !best.entryOK)
+    )
+      best = { row, extra, margin, entryOK };
   }
   const constraints = [...common, ...best.extra];
   const code = constraints.some((c) => c.status === 'fail')

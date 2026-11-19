@@ -2,6 +2,7 @@ import { D, dec, out, max } from './math.js';
 import { unit, position } from './ratio-domain.js';
 
 export const reportGroups = ['protect', 'survive', 'both', 'profit'];
+export const subsetGroups = ['legal', 'protect', 'survive', 'both', 'failProfit', 'passProfit', 'profit'];
 const metrics = ['failure', 'success', 'failureFee', 'successFee'];
 
 // Store a path metric as (a*i + b*i² + c*j + d*i*j) / (den*i).
@@ -175,6 +176,27 @@ export function includeBand(report, row, i, lo, hi, sign) {
     update(report.extrema[k], 'max', slope < 0n ? left : right, den, i, slope < 0n ? lo : hi, sign);
   });
 }
+// Union of disjoint ratio bins. Fractions and their actual candidate witnesses
+// travel together, so total extrema remain traceable to a member of this group.
+export function mergeReport(total, part) {
+  if (!part.count) return;
+  total.count += part.count;
+  total.long += part.long;
+  for (const side of ['pf', 'hl']) {
+    total[side + 'Min'] = Math.min(total[side + 'Min'], part[side + 'Min']);
+    total[side + 'Max'] = Math.max(total[side + 'Max'], part[side + 'Max']);
+  }
+  function merge(target, source, key) {
+    const x = source[key];
+    if (x) update(target, key, x.n, x.d, x.point.i, x.point.j, x.point.sign);
+  }
+  merge(total.buffer, part.buffer, 'min');
+  merge(total.margin, part.margin, 'max');
+  part.extrema.forEach((pair, i) => {
+    merge(total.extrema[i], pair, 'min');
+    merge(total.extrema[i], pair, 'max');
+  });
+}
 export function finishReport(raw, ctx, p) {
   if (!raw.count) return null;
   const fields = {};
@@ -202,6 +224,7 @@ export function finishReport(raw, ctx, p) {
   fields.minBufferRate = fields.minBuffer == null ? null : out(dec(fields.minBuffer).div(ctx.market.hl.mark));
   witnesses.maxMargin = raw.margin.max?.point ?? null;
   witnesses.minBuffer = raw.buffer.min?.point ?? null;
+  fields.successHype = fields.success.map((v) => out(dec(v).minus(ctx.book.external)));
   const ratio = (amount, base) => (dec(base).gt(0) ? out(max(0, amount).div(base)) : null);
   fields.gapRate = fields.failure
     .slice()

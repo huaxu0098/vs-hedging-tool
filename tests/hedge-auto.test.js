@@ -8,6 +8,7 @@ import {
   ratioSlice,
   adjacentScale
 } from '../src/hedge/ratio-scan.js';
+import { MarketRevaluation } from '../src/hedge/scan-refresh.js';
 import { sumPostings, presentLedger, reconcilePostings } from '../src/hedge/settlement-ledger.js';
 import { calculateCurrent, rules, splitReserves } from '../src/hedge/current.js';
 import { solveAuto, compareAuto, compareConservative } from '../src/hedge/auto.js';
@@ -738,7 +739,7 @@ test('OPT02 搜索范围记录双边方向、步长和数量上限，预算中�
   const partial = calculateCurrent(inputs, f.a, f.m, {}, t, { searchBudget: 1 });
   assert.equal(partial.search.complete, false);
   assert.ok(!partial.maximum?.complete);
-  assert.equal(full.trace.model, 'AUTO-0.21');
+  assert.equal(full.trace.model, 'AUTO-0.21.1');
 });
 test('OPT03 PF 虚拟保证金、目标 Hype 初始、其他占用及调仓后真实可用分别核验', () => {
   const f = fixture();
@@ -1230,7 +1231,7 @@ test('RANGE03 / AUTOSEL08 小网格逐点穷举对照整段扫描，方向、现
     if (variant === 'funded') Object.assign(r, { stage: 'funded', fundedTarget: '1100', fundedFloor: '900' });
     const s = scanFixture(r, f).ratioScan;
     assert.ok(s.complete);
-    const verifiedRows = [];
+    const legalRows = [];
     const counts = {
       risk: 0,
       protect: 0,
@@ -1252,7 +1253,7 @@ test('RANGE03 / AUTOSEL08 小网格逐点穷举对照整段扫描，方向、现
             assert.match(err.message, /INVALID_PRICE_ENDPOINT|数值必须大于零/);
             continue;
           }
-          if (row.physical) verifiedRows.push(row);
+          if (ratioSlice(s, sign, i, 'legal').some(([lo, hi]) => lo <= j && j <= hi)) legalRows.push(row);
           const flags = {
             risk: row.physical,
             protect: row.physical && row.covers,
@@ -1274,80 +1275,125 @@ test('RANGE03 / AUTOSEL08 小网格逐点穷举对照整段扫描，方向、现
           }
         }
     for (const [key, n] of Object.entries(counts)) assert.equal(s.sets[key].count, n);
-    for (const [key, set] of Object.entries({
-      protect: s.sets.protect,
-      survive: s.sets.survive,
-      both: s.sets.both,
-      profit: s.sets.profit,
-      ...Object.fromEntries(s.buckets.map((b, n) => ['bin' + n, b]))
-    })) {
-      const lower = key.startsWith('bin') ? s.buckets[Number(key.slice(3)) - 1]?.throughLots : null;
-      const rows = verifiedRows.filter((row) =>
-        key.startsWith('bin')
-          ? (!lower || row.j * lower.i > lower.j * row.i) &&
-            (!set.throughLots || row.j * set.throughLots.i <= set.throughLots.j * row.i)
-          : row[{ protect: 'covers', survive: 'survives', both: 'both', profit: 'profitable' }[key]]
-      );
-      const range = set.range;
-      if (!rows.length) {
-        assert.equal(range, null);
-        continue;
-      }
-      assert.equal(range.count, rows.length);
-      const fees = (row, path) => {
-        const ledgers = row.paths[path];
-        const leg = s.ctx.market.hl;
-        return dec(ledgers.hl.entryFee)
-          .plus(ledgers.hl.exitFee)
-          .plus(ledgers.pf.entryFee)
-          .plus(ledgers.pf.exitFee)
-          .plus(
-            dec(row.stress?.priceShock ?? '0')
-              .times(dec(row.hl).abs())
-              .times(leg.multiplier)
-              .times(leg.fx)
-              .times(leg.rate)
-          );
-      };
-      const values = {
-        failure: (r) => r.fail,
-        success: (r) => r.successPersonal,
-        pfQty: (r) => dec(r.pf).abs(),
-        hlQty: (r) => dec(r.hl).abs(),
-        pfValue: (r) => r.pfValue,
-        hlValue: (r) => r.hypeValue,
-        failureFee: (r) => fees(r, 'fail'),
-        successFee: (r) => fees(r, 'pass'),
-        gapRate: (r) => r.gapRate,
-        consumption: (r) => r.consumption,
-        maxMargin: (r) => r.initial,
-        minBuffer: (r) => r.buffer
-      };
-      for (const [metric, get] of Object.entries(values)) {
-        const vals = rows
-          .map(get)
-          .filter((v) => v != null)
-          .map(dec)
-          .sort((a, b) => a.cmp(b));
-        const checks =
-          metric === 'maxMargin'
-            ? [[range.maxMargin, vals.at(-1)]]
-            : metric === 'minBuffer'
-              ? [[range.minBuffer, vals[0]]]
-              : [
-                  [range[metric][0], vals[0]],
-                  [range[metric][1], vals.at(-1)]
-                ];
-        for (const [got, want] of checks)
-          if (want == null) assert.equal(got, null);
-          else
-            assert.ok(
-              got != null && want.minus(got).abs().lt('1e-11'),
-              [variant, key, metric, got, want].join('/')
+    const flags = {
+      legal: () => true,
+      risk: (r) => r.physical,
+      protect: (r) => r.physical && r.covers,
+      survive: (r) => r.physical && r.survives,
+      both: (r) => r.both,
+      failProfit: (r) => r.failProfitable,
+      passProfit: (r) => r.passProfitable,
+      profit: (r) => r.profitable
+    };
+    for (const [key, qualifies] of Object.entries(flags)) {
+      const members = legalRows.filter(qualifies);
+      assert.equal(members.length, s.sets[key].count, variant + '/' + key);
+      for (const [index, bin] of [...s.buckets, null].entries()) {
+        const lower = bin && s.buckets[index - 1]?.throughLots,
+          upper = bin?.throughLots;
+        const rows = members.filter(
+          (r) => (!lower || r.j * lower.i > lower.j * r.i) && (!upper || r.j * upper.i <= upper.j * r.i)
+        );
+        const range = bin ? bin.ranges[key] : s.sets[key].range;
+        if (bin) assert.equal(bin[key], rows.length);
+        if (!rows.length) {
+          assert.equal(range, null);
+          continue;
+        }
+        assert.equal(range.count, rows.length);
+        const fees = (row, path) => {
+          const ledgers = row.paths[path];
+          const leg = s.ctx.market.hl;
+          return dec(ledgers.hl.entryFee)
+            .plus(ledgers.hl.exitFee)
+            .plus(ledgers.pf.entryFee)
+            .plus(ledgers.pf.exitFee)
+            .plus(
+              dec(row.stress?.priceShock ?? '0')
+                .times(dec(row.hl).abs())
+                .times(leg.multiplier)
+                .times(leg.fx)
+                .times(leg.rate)
             );
+        };
+        const values = {
+          failure: (r) => r.fail,
+          success: (r) => r.successPersonal,
+          successHype: (r) => r.success,
+          pfQty: (r) => dec(r.pf).abs(),
+          hlQty: (r) => dec(r.hl).abs(),
+          pfValue: (r) => r.pfValue,
+          hlValue: (r) => r.hypeValue,
+          failureFee: (r) => fees(r, 'fail'),
+          successFee: (r) => fees(r, 'pass'),
+          gapRate: (r) => r.gapRate,
+          consumption: (r) => r.consumption,
+          maxMargin: (r) => r.initial,
+          minBuffer: (r) => r.buffer
+        };
+        for (const [metric, get] of Object.entries(values)) {
+          for (const [end, witness] of Object.entries(
+            Array.isArray(range.witnesses[metric])
+              ? range.witnesses[metric]
+              : range.witnesses[metric]
+                ? [range.witnesses[metric]]
+                : []
+          )) {
+            const member = rows.find(
+              (r) => r.i === witness.i && r.j === witness.j && r.sign === witness.sign
+            );
+            assert.ok(member, [variant, key, index, metric, 'witness outside subset'].join('/'));
+            const extreme = Array.isArray(range[metric]) ? range[metric][end] : range[metric];
+            assert.ok(dec(extreme).minus(get(member)).abs().lt('1e-11'));
+          }
+          const vals = rows
+            .map(get)
+            .filter((v) => v != null)
+            .map(dec)
+            .sort((a, b) => a.cmp(b));
+          const checks =
+            metric === 'maxMargin'
+              ? [[range.maxMargin, vals.at(-1)]]
+              : metric === 'minBuffer'
+                ? [[range.minBuffer, vals[0]]]
+                : [
+                    [range[metric][0], vals[0]],
+                    [range[metric][1], vals.at(-1)]
+                  ];
+          for (const [got, want] of checks)
+            if (want == null) assert.equal(got, null);
+            else
+              assert.ok(
+                got != null && want.minus(got).abs().lt('1e-11'),
+                [variant, key, metric, got, want].join('/')
+              );
+        }
       }
     }
   }
+});
+test('实时行情增量重估与冷启动同一组仓位、资金、风险和剪枝证明', () => {
+  const f = fixture(),
+    cache = new MarketRevaluation();
+  const compute = (cached, rule = inputs) =>
+    calculateCurrent(rule, f.a, f.m, {}, t, {
+      scanRatios: true,
+      marketCache: cached
+    });
+  const first = compute(cache);
+  const same = compute(cache);
+  assert.ok(cache.hits.ranges > 0 && cache.hits['ranking-size'] > 0);
+  assert.deepEqual(same.ratioScan.buckets, first.ratioScan.buckets);
+  f.m.pf = { ...f.m.pf, mark: '101', levels: [[['100.95', '10']], [['101.05', '9']]] };
+  const next = compute(cache),
+    cold = compute(undefined);
+  assert.ok(cache.hits['lots-hl'] > 0);
+  assert.deepEqual(next.ratioScan.representative, cold.ratioScan.representative);
+  assert.deepEqual(next.ratioScan.buckets, cold.ratioScan.buckets);
+  assert.deepEqual(next.search.proof, cold.search.proof);
+  assert.notDeepEqual(first.ratioScan.buckets, next.ratioScan.buckets);
+  const rule = { ...inputs, B: '180', R_success: '40' };
+  assert.deepEqual(compute(cache, rule).ratioScan.buckets, compute(undefined, rule).ratioScan.buckets);
 });
 test('RANGE04 本金保护可行，考核成功全平时无净盈利比例', () => {
   const s = scanFixture({}).ratioScan;

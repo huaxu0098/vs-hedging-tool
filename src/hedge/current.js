@@ -451,7 +451,7 @@ function attachRepresentative(result, r) {
   const segment = scan.buckets.findIndex(
     ({ throughLots: end }) => !end || BigInt(point.j) * BigInt(end.i) <= BigInt(end.j) * BigInt(point.i)
   );
-  const segmentRange = scan.buckets[segment]?.range;
+  const segmentRange = scan.buckets[segment]?.ranges[group];
   if (!segmentRange) throw Error('自动代表方案缺少完整分段记录');
   for (const range of [scan.sets[group].range, segmentRange].filter(Boolean)) {
     for (const [key, amount] of [
@@ -1029,21 +1029,23 @@ function computeCurrent(r, a, data, fxData, now, options) {
     market.pf.tiers?.length
   ) {
     const ctx = scanContext(book, market, params, checks);
-    const scan = (result.ratioScan = buildRatioScan(ctx));
+    const scan = (result.ratioScan = buildRatioScan(ctx, { cache: options.marketCache }));
     const feasible = scan.sets.both;
     checks.seeds = [feasible.largest, feasible.min, feasible.max].filter(Boolean).map((point) => ({
       vsTargetQuantity: out(dec(market.pf.step).times(point.i).times(point.sign)),
       hlTargetQuantity: out(dec(market.hl.step).times(point.j).times(-point.sign))
     }));
   }
+  if (options.seedTargets?.length) checks.seeds = [...(checks.seeds ?? []), ...options.seedTargets];
   if (pending) {
     result.autoStatus = 'AUTO_PAYOUT_PENDING';
     return result;
   }
+  const solverChecks = options.marketCache ? { ...checks, marketCache: options.marketCache } : checks;
   const solverBook = { ...book, B: out(dec(book.B).plus(nonnegative(r.recoveryBuffer || '0'))) };
   let solved =
     r.mode === 'auto'
-      ? solveAuto(solverBook, market, params, checks)
+      ? solveAuto(solverBook, market, params, solverChecks)
       : solve(solverBook, market, params, checks);
   if (r.mode === 'auto' && solved.selected) {
     const size = solved;
@@ -1051,7 +1053,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
       solverBook,
       market,
       { ...params, objective: 'cash' },
-      { ...checks, seeds: size.candidates, searchBudget: options.cashSearchBudget ?? 1400 }
+      { ...solverChecks, seeds: size.candidates, searchBudget: options.cashSearchBudget ?? 1400 }
     );
     const creditKnown = hl === '0' || market.hl.currentMarginCredit != null;
     result.domain = size.domain;
@@ -1076,7 +1078,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
       );
       solved = preference.eq(100)
         ? cash
-        : solveAuto(solverBook, market, params, { ...checks, seeds: [cash.selected] });
+        : solveAuto(solverBook, market, params, { ...solverChecks, seeds: [cash.selected] });
     }
     result.preference = {
       percent: out(preference),

@@ -60,3 +60,21 @@ export function refreshDelay(previous, market, elapsed, previousBasis, nextBasis
     Math.abs(Number(nextBasis) - Number(previousBasis)) >= 0.00001;
   return Math.max(0, (material || basisMoved ? 400 : 1800) - elapsed);
 }
+
+// Keep one exact value per stage and side in this worker. Reusing a venue's
+// grid requires identical economics; clocks are checked before this point.
+export class MarketRevaluation {
+  slots = new Map();
+  hits = {};
+  reuse(slot, inputs, compute) {
+    const key = JSON.stringify(inputs);
+    const old = this.slots.get(slot);
+    if (old?.key === key) {
+      this.hits[slot] = (this.hits[slot] ?? 0) + 1;
+      return old.value;
+    }
+    const value = compute();
+    this.slots.set(slot, { key, value });
+    return value;
+  }
+}
