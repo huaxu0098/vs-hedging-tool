@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import { scanKeys, refreshDelay } from '../src/hedge/scan-refresh.js';
 import { dec, normalizeExposure } from '../src/hedge/math.js';
 import { rules, calculateCurrent } from '../src/hedge/current.js';
-import { currencyMapping, comparePriceBooks, conversionBook } from '../src/hedge/quote-currencies.js';
+import { currencyMapping, conversionBook } from '../src/hedge/quote-currencies.js';
 import { vestContract, hypeContract } from '../src/hedge/contract-currencies.js';
 import { usdQuote, unitContract } from '../fixtures/hedge-currency-contracts.js';
+import { inspectRatio } from '../src/hedge/ratio-scan.js';
+import { executionDetail } from '../src/hedge/solver.js';
 import { recoveryCushion } from '../src/hedge/range-report.js';
 
 const at = '2026-11-19T12:00:00.000Z',
@@ -71,7 +73,7 @@ test('FX01 同为 BTC-USDC 直接比较；外部美元现货失效不更改 USDC
     a = mapping(m, {});
   assert.equal(a.ok, true);
   assert.deepEqual([a.hypeToVest.mid, a.hypeToVest.bid, a.hypeToVest.ask], ['1', '1', '1']);
-  assert.equal(comparePriceBooks(m.pf, m.hl, a).raw, '1');
+  assert.equal(run(m, {}).priceComparison, undefined);
   assert.ok(a.spots.USDC.error);
   assert.equal(mapping(m).hypeToVest.mid, '1');
 });
@@ -80,9 +82,7 @@ test('FX02 Vest USD 使用 USD_per_USDC；不依赖 USDT 数据', () => {
     a = mapping(m, { USDC: quotes.USDC });
   assert.equal(a.hypeToVest.name, 'USD_per_USDC');
   assert.equal(a.hypeToVest.mid, '0.97');
-  const price = comparePriceBooks(m.pf, m.hl, a);
-  assert.equal(price.normalized, '97.97');
-  assert.equal(price.raw, null);
+
 });
 test('FX03 Vest USDT 使用两份美元盘口的有向交叉盘', () => {
   const a = mapping(market('USDT'), { ...quotes, USDT: usdQuote('USDT', '0.91', '0.93', at) });
@@ -131,7 +131,7 @@ test('FX07 同一时刻仅改变 FX 会重建市场、比例网格、成交费�
   const x = run(m, { USDC: usdQuote('USDC', '1', '1', at) }),
     y = run(m, { USDC: usdQuote('USDC', '0.8', '0.8', at) });
   assert.notEqual(y.trace.marketId, x.trace.marketId);
-  assert.notEqual(x.priceComparison.diff, y.priceComparison.diff);
+  assert.notEqual(x.currencies.hypeToVest.mid, y.currencies.hypeToVest.mid);
   for (const key of ['vsNotional', 'actualRatio', 'requiredInitialMargin'])
     assert.notEqual(x.candidate[key], y.candidate[key], key);
   assert.notDeepEqual(x.candidate.lines, y.candidate.lines);
@@ -140,12 +140,47 @@ test('FX07 同一时刻仅改变 FX 会重建市场、比例网格、成交费�
     assert.notEqual(x.ratioScan.representative.row[key], y.ratioScan.representative.row[key], key);
   assert.notDeepEqual(x.ratioScan.sets.both, y.ratioScan.sets.both);
 });
-test('FX08 双边成交价差按 Hype bid × FX bid − Vest ask 及 Hype ask × FX ask − Vest bid', () => {
-  const m = market('USD'),
-    p = comparePriceBooks(m.pf, m.hl, mapping(m));
-  assert.equal(p.sellHypeBuyVest, '-5');
-  assert.equal(p.buyHypeSellVest, '0.96');
-  assert.notEqual(p.diff, p.sellHypeBuyVest);
+test('BOOK01 两种对冲方向按数量吃盘口，终点保留原生深度和各自费用基数', () => {
+  const m = market('USDC');
+  m.hl.contract = hypeContract({ name: 'BTC' }, '', 0);
+  m.pf.levels = [[['99', '0.4'], ['97', '12']], [['102', '0.4'], ['104', '12']]];
+  m.hl.levels = [[['100', '0.2'], ['98', '12']], [['105', '0.2'], ['107', '12']]];
+  const scan = run(m, {}).ratioScan;
+  for (const sign of [1, -1]) {
+    const row = inspectRatio(scan.ctx, { sign, i: 20, j: 10 });
+    for (const venue of ['pf','hl']) {
+      const buy = venue === 'pf' ? sign === 1 : sign === -1;
+      const [bidVWAP, askVWAP, qty] = venue === 'pf' ? ['97.4','103.6','2'] : ['98.4','106.6','1'];
+      for (const path of ['fail','pass']) {
+        const l = row.paths[path][venue];
+        const shift = dec(l.exitMark).minus(l.mark);
+        assert.equal(l.entryPrice, buy ? askVWAP : bidVWAP);
+        assert.equal(l.exitPrice, shift.plus(buy ? bidVWAP : askVWAP).toString());
+        assert.ok(dec(l.entrySlippage).gt(0) && dec(l.exitSlippage).gt(0));
+        for (const side of ['entry','exit']) assert.equal(l[side+'Fee'], dec(l[side+'Price']).times(qty).times(l.rate).toString());
+        const net = dec(l.exitPrice).minus(l.entryPrice).times(l.target).plus(l.start).minus(l.entryFee).minus(l.exitFee).minus(l.friction);
+        assert.ok(net.minus(l.settled).abs().lt('1e-18'));
+      }
+    }
+  }
+  assert.throws(() => executionDetail(scan.ctx.market.hl, '13'), /INSUFFICIENT_DEPTH/);
+});
+test('BOOK02 同 Mark 与 BBO 下减少顶档数量，逐仓重算而保留线性资金理论界限', () => {
+  const m = market('USDC');
+  m.hl.contract = hypeContract({ name: 'BTC' }, '', 0);
+  m.hl.levels[1].push(['113', '12']);
+  const full = run(m);
+  m.hl.levels[1][0][1] = '0.1';
+  const thin = run(m);
+  assert.deepEqual([full.funding.lower, full.funding.upper], [thin.funding.lower, thin.funding.upper]);
+  const target = { sign: -1, i: 20, j: 10 };
+  const before = inspectRatio(full.ratioScan.ctx, target), after = inspectRatio(thin.ratioScan.ctx, target);
+  assert.equal(before.h, after.h);
+  assert.equal(before.paths.fail.hl.entryPrice, '102');
+  assert.equal(after.paths.fail.hl.entryPrice, '111.9');
+  assert.ok(dec(after.fail).lt(before.fail) && dec(after.success).lt(before.success));
+  assert.notEqual(after.paths.fail.hl.entryFee, before.paths.fail.hl.entryFee);
+  assert.notDeepEqual(full.ratioScan.sets.both, thin.ratioScan.sets.both);
 });
 test('FX09 元数据、不同乘数和 quanto：合约名称、保证金币均不能单独证明报价币', () => {
   const v = vestContract({ asset: 'crypto', symbol: 'BTC-PERP', base: 'BTC', quote: 'USDC' });
@@ -178,14 +213,19 @@ test('FX09 元数据、不同乘数和 quanto：合约名称、保证金币均�
   m.hl.contract.quantityUnit = 'unidentified';
   assert.equal(run(m).candidate, undefined);
 });
-test('FX10 截图 62839 − 62870.70 = −31.70；明确 USD_per_USDC=1.000841 时只允许乘法', () => {
+test('FX10 同币种与跨币种均保留原生盘口；过期参考 FX 不影响 quanto 网格和结算', () => {
   const m = market('USDC');
-  m.hl.mark = '62839.00';
-  m.pf.mark = '62870.70';
-  const rates = { USDC: usdQuote('USDC', '1.000841', '1.000841', at) };
-  assert.equal(comparePriceBooks(m.pf, m.hl, mapping(m, rates)).diff, '-31.7');
-  m.spec.contract = unitContract('BTC-PERP', 'USD');
-  assert.equal(comparePriceBooks(m.pf, m.hl, mapping(m, rates)).diff, '21.147599');
+  m.hl.contract = hypeContract({ name: 'BTC' }, '', 0);
+  const x = run(m), old = { ...quotes, USDT: { ...quotes.USDT, asOf: '2001-01-01T00:00:00Z' } };
+  for (const fx of [{}, old]) {
+    const y = run(m, fx);
+    assert.equal(y.priceComparison, undefined);
+    assert.equal(y.currencies.hypeToVest, undefined);
+    assert.match(y.currencies.referenceError, /FX_STALE|FX_UNVERIFIED/);
+    assert.deepEqual(y.ratioScan.representative, x.ratioScan.representative);
+    assert.deepEqual(y.ratioScan.sets, x.ratioScan.sets);
+    assert.deepEqual(scanKeys({}, {}, m, fx, 'plan'), scanKeys({}, {}, m, quotes, 'plan'));
+  }
   assert.equal(recoveryCushion('500.0001', '500').thin, true);
 });
 
@@ -194,7 +234,7 @@ test('PRODUCT01/04、HL05—HL08：标准 BTC perp 的两端账本、分段现�
   m.hl.contract = hypeContract({ name: 'BTC' }, '', 0);
   const x = run(m),
     y = run(m, { ...quotes, USDC: usdQuote('USDC', '0.8', '0.82', at) });
-  assert.notEqual(x.priceComparison.diff, y.priceComparison.diff);
+  assert.notEqual(x.currencies.hypeToVest.mid, y.currencies.hypeToVest.mid);
   assert.notDeepEqual(x.currencies.spots, y.currencies.spots);
   const candidate = x.ratioScan.representative.row;
   for (const side of ['pf', 'hl']) {
@@ -234,7 +274,8 @@ test('UI12 同内容不同源时间仅更新观测；盘口数量或规则变化
   assert.notEqual(key(next, fx, { B: '501' }).context, key(m).context);
   assert.equal(refreshDelay(m, next, 100), 1700);
   assert.equal(refreshDelay(m, next, 1800), 0);
-  assert.equal(refreshDelay(m, next, 100, '0', '0.00002'), 300);
+  next.hl.levels[1][0][0] = '103';
+  assert.equal(refreshDelay(m, next, 100), 300);
   next.hl.mark = '120';
   assert.equal(refreshDelay(m, next, 100), 300);
 });

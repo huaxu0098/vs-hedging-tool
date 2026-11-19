@@ -1700,7 +1700,7 @@ test('DYN04 仅变更参考 FX：quanto 单点、原生路径、实际比例、�
   const a = scanFixture({}, f);
   f.rates = { ...f.rates, USDT: usdQuote('USDT', '0.98', '0.98', at) };
   const b = scanFixture({}, f);
-  assert.notEqual(a.priceComparison.diff, b.priceComparison.diff);
+  assert.notEqual(a.currencies.hypeToVest.mid, b.currencies.hypeToVest.mid);
   assert.ok(b.currencies.warnings.length);
   assert.deepEqual(a.ratioScan.representative.row.paths, b.ratioScan.representative.row.paths);
   assert.deepEqual(a.ratioScan.analysis.neighbors, b.ratioScan.analysis.neighbors);

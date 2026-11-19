@@ -27,7 +27,7 @@ const install = `(() => {
           funding:result.funding, representative:scan.representative?.row.h,
           boundary:scan.analysis.boundary, neighbors:rows,
           counts:scan.buckets.map(b=>b.both), total:scan.sets.both.count,
-          comparison:result.priceComparison,
+          referenceFX:result.currencies.hypeToVest?.mid,
           ranges:Object.fromEntries(['protect','survive','both','profit'].map(k=>[k,[scan.sets[k].min?.h,scan.sets[k].max?.h]]))
         });
         if(window.published.size>12)window.published.delete(window.published.keys().next().value);
@@ -133,19 +133,17 @@ async function read(label, condition = 'true') {
 try {
   await send('Page.addScriptToEvaluateOnNewDocument', { source: install });
   await send('Page.navigate', { url: origin });
-  const baseline = await read('预设资金与真实主网');
-  assert.ok(
-    await run(
-      "!document.querySelector('#desk-details').open && !document.querySelector('#ratio-analysis').hidden"
-    )
-  );
+  await chrome.wait("document.querySelector('#scan-desk')?.dataset.resultId && !document.querySelector('#desk-details').open");
+  assert.ok(await run("document.querySelector('#audit-details').contains(document.querySelector('#ratio-analysis'))"));
+  await click('#scan-config');
+  await click('#audit-details > summary');
+  const baseline = await read('预设资金与真实主网', 'f.referenceFX != null');
   assert.ok(baseline.visible.theory.includes('91.00 U') && baseline.visible.theory.includes('309.00 U'));
   const refresh = await read(
     '后一行情帧',
-    'f.id!==' + JSON.stringify(baseline.id) + " && el('ratio-change').textContent.includes('理论界限未变')"
+    'f.id!==' + JSON.stringify(baseline.id) + " && el('ratio-change').textContent.includes('理论比例保持不变')"
   );
   assert.equal(refresh.funding.lower, baseline.funding.lower);
-  await click('#scan-config');
   await click('#account-details > summary');
   await set('#B', '490', 'input');
   const capital = await read('保护本金 500 → 490', "f.funding.B==='490' && f.funding.C_H==='409'");
@@ -178,7 +176,7 @@ try {
   );
   for (const k of ['bid', 'ask']) frozen.rates.USDT[k] = dec(String(frozen.rates.USDT[k])).times('0.99').toString();
   const fxOnly = recalc();
-  assert.notEqual(fxOnly.priceComparison.diff, budgetOnly.priceComparison.diff);
+  assert.notEqual(fxOnly.currencies.hypeToVest.mid, budgetOnly.currencies.hypeToVest.mid);
   assert.deepEqual(fxOnly.ratioScan.representative.row.paths, budgetOnly.ratioScan.representative.row.paths);
   assert.deepEqual(fxOnly.ratioScan.analysis.neighbors, budgetOnly.ratioScan.analysis.neighbors);
   reports.push({
@@ -187,7 +185,7 @@ try {
     B: budgetOnly.funding.B,
     theory: budgetOnly.ratioScan.analysis.theory,
     h: budgetOnly.ratioScan.representative.row.h,
-    reference: [budgetOnly.priceComparison.diff, fxOnly.priceComparison.diff],
+    reference: [budgetOnly.currencies.hypeToVest.mid, fxOnly.currencies.hypeToVest.mid],
     identicalNativeLedgers: true
   });
   assert.deepEqual(chrome.faults, []);

@@ -447,7 +447,8 @@ function currentFrame(a, m, t) {
     if (running || completed || failure || wantedKey) cancelAuto();
     return paused();
   }
-  const {context, key} = scanKeys(r, a, m, rates, [scope, $('quote-source').value, m.source]);
+  const {context, key} = scanKeys(r, a, m, rates, [scope, $('quote-source').value, m.source,
+    base.externalValue, Number(r.external) > 0 ? base.externalRate : null]);
   if (running && running.context !== context) cancelAuto();
   wantedKey = key;
   if (completed?.key === key) {
@@ -469,8 +470,7 @@ function currentFrame(a, m, t) {
   if (failure?.context === context && performance.now() < failure.retryAt) return waiting('failed', failure.message);
   if (!running) {
     const delay = lastGood?.context === context && !failure ?
-      refreshDelay(lastGood.result.calculationMarket, m, performance.now()-lastStart,
-        lastGood.result.priceComparison?.fraction, base.priceComparison?.fraction) : 0;
+      refreshDelay(lastGood.result.calculationMarket, m, performance.now()-lastStart) : 0;
     clearTimeout(wakeTimer);
     if (delay > 0) {
       wakeTimer = setTimeout(render, delay + 1);
@@ -1938,7 +1938,7 @@ function render() {
         : '') +
       (quoteError ? ' ｜ ' + quoteError : '')
   );
-  const currencies = result.currencies;
+  const currencies = result.observed?.currencies ?? result.currencies;
   const fxRows = [];
   for (const [k, name] of [['pf', 'Vest'], ['hl', 'Hyperliquid']]) {
     const c = currencies?.[k];
@@ -1958,18 +1958,11 @@ function render() {
   for (const [asset, q] of Object.entries(currencies?.spots ?? {}))
     fxRows.push('USD_per_' + asset + ' · ' + (q.error || ('买 ' + q.bid + ' / 卖 ' + q.ask +
       ' · ' + q.source + ' ' + q.asOf + ' · 本帧有效，年龄 ' +
-      Math.max(0, (Date.parse(result.trace?.at) || Date.now()) - Date.parse(q.asOf)) + ' ms · 偏离 1 USD 为 ' + fmt(q.deviationBps, 2) + ' bp')));
-  const spot = currencies?.hypeToVest, px = result.priceComparison;
-  if (px && spot) {
-    fxRows.push('原始 Mark · ' + (px.raw == null ? '不同报价币，不能直接相减' : px.raw + ' ' + spot.to) +
-      '。统一 Mark · ' + m.hl.mark + ' × ' + fmt(spot.mid, 9) + ' ' + spot.name + ' − ' + m.pf.mark + ' = ' +
-      fmt(px.diff, 5) + ' ' + spot.to);
-    fxRows.push('顶档成交价差（Hype − VS）· PF 多 / Hype 空开仓、反向平仓 ' + fmt(px.sellHypeBuyVest, 5) +
-      '；PF 空 / Hype 多开仓、反向平仓 ' + fmt(px.buyHypeSellVest, 5) + ' ' + spot.to +
-      ' · 换汇买 / 卖 ' + fmt(spot.bid, 8) + ' / ' + fmt(spot.ask, 8) + ' ' + spot.name);
-    fxRows.push('条件路径（两边原生报价平行移动，基差压力另计）· Vest 每变动 1 ' + spot.to + '，Hype 报价变动 ' +
-      fmt(currencies.nativeMovePerVestPoint, 9) + ' ' + spot.from + '。双边按各自盘口成交，U 账本单位为 USDC。');
-  }
+      Math.max(0, Date.now() - Date.parse(q.asOf)) + ' ms · 偏离 1 USD 为 ' + fmt(q.deviationBps, 2) + ' bp')));
+  const spot = currencies?.hypeToVest;
+  if (spot) fxRows.push('独立汇率参考 · ' + spot.name + ' ' + fmt(spot.mid, 9));
+  if (currencies?.referenceError) fxRows.push('独立汇率参考暂停 · ' + currencies.referenceError);
+  if (currencies?.warnings?.length) fxRows.push(...currencies.warnings);
   if (result.ratioScan) {
     const { market } = result.ratioScan.ctx;
     fxRows.push('共同路径每上移 1 个原生价格点，每 1 个多头下单单位的盈亏敏感度 · Vest ' +
@@ -1985,7 +1978,7 @@ function render() {
   }
   const row = result.ratioScan?.representative?.row;
   if (dollarMark?.mid && row && !row.failStop && !row.passStop)
-    fxRows.push('若本帧 USDC/USD 保持至平仓，失败端个人资金折合 ' +
+    fxRows.push('若当前 USDC/USD 保持至平仓，失败端个人资金折合 ' +
       fmt(dec(row.fail).times(dollarMark.mid), 4) + ' USD，通过端折合 ' +
       fmt(dec(row.successPersonal).times(dollarMark.mid), 4) + ' USD。两端 U 账本保留 USDC 口径。');
   if (currencies?.error) fxRows.push(currencies.error);

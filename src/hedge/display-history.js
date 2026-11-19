@@ -44,6 +44,9 @@ export function displayHistory(storage) {
               side,
               {
                 mark: q.mark,
+                bid: q.levels?.[0]?.[0]?.[0],
+                ask: q.levels?.[1]?.[0]?.[0],
+                bookAt: q.bookAt ?? q.asOf,
                 asOf: q.asOf,
                 markAt: q.markAt,
                 base: c.baseAsset,

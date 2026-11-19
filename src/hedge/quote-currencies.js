@@ -34,6 +34,23 @@ export function conversionBook(from, to, rates, now, ttl) {
   };
 }
 
+// Spot observations required by cash, settlement or a non-quanto price path.
+// A USD-denominated conversion uses the USDC/USD book as its denominator.
+export function requiredSpotAssets(pf, hl, rules) {
+  const assets = new Set();
+  const convert = (from, to) => {
+    if (!from || !to || from === to) return;
+    for (const asset of [from, to]) if (asset !== 'USD') assets.add(asset);
+  };
+  for (const c of [pf, hl]) {
+    convert(c?.settleAsset, 'USDC');
+    if (c?.settlement === 'linear') convert(c.quoteAsset, 'USDC');
+  }
+  if (hl?.settlement === 'linear') convert(pf?.quoteAsset, hl.quoteAsset);
+  if (Number(rules.external) > 0) convert(rules.externalCurrency, 'USDC');
+  return assets;
+}
+
 function verifiedLeg(side, c, data, rates, now, ttl) {
   const venue = side === 'pf' ? 'VS' : 'Hype';
   if (c?.metadataConflict) throw Error('CONTRACT_METADATA_UNVERIFIED · ' + venue + ' 官方规格字段相互冲突');
@@ -94,10 +111,14 @@ export function currencyMapping(data, rates, now, ttl, alertBps = '50') {
       }
     }
     const rate = (from, to) => conversionBook(from, to, rates, now, ttl);
-    result.hypeToVest = rate(hl.quoteAsset, pf.quoteAsset);
+    // This observation is independent of settlement and executable prices.
+    try {
+      result.hypeToVest = rate(hl.quoteAsset, pf.quoteAsset);
+    } catch (error) {
+      result.referenceError = error.message;
+    }
     // The BTC stress path moves both native prices by the same number of points.
-    // The contract pays its native point PnL in USDC. Spot FX prices the reference
-    // spread only; it cannot rescale this price path or the resulting cash flows.
+    // The contract pays its native point PnL in USDC. The optional spot observation cannot rescale this path or its cash flows.
     result.nativeMovePerVestPoint =
       hl.settlement === 'quanto-1:1' ? '1' : rate(pf.quoteAsset, hl.quoteAsset).mid;
     result.ok = true;
@@ -110,20 +131,4 @@ export function currencyMapping(data, rates, now, ttl, alertBps = '50') {
         : 'FX_UNVERIFIED · 币种路径、汇率或合约数值无效';
   }
   return result;
-}
-
-export function comparePriceBooks(pf, hl, map) {
-  const q = map.hypeToVest,
-    norm = dec(String(hl.mark)).times(q.mid);
-  const diff = norm.minus(pf.mark);
-  // PF long / Hype short enters at PF ask and Hype bid. The opposite
-  // sides close it. Both spreads use the Hype minus Vest sign convention.
-  return {
-    raw: q.from === q.to ? out(dec(String(hl.mark)).minus(pf.mark)) : null,
-    normalized: out(norm),
-    diff: out(diff),
-    fraction: out(diff.div(pf.mark)),
-    sellHypeBuyVest: out(dec(hl.levels[0][0][0]).times(q.bid).minus(pf.levels[1][0][0])),
-    buyHypeSellVest: out(dec(hl.levels[1][0][0]).times(q.ask).minus(pf.levels[0][0][0]))
-  };
 }

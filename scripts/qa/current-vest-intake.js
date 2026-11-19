@@ -14,7 +14,7 @@ const read = () =>
  return {id:e('scan-desk').dataset.resultId,status:t('scan-status'),pf:t('scan-pf-price'),hl:t('scan-hl-price'),
  neighbors:[...e('ratio-neighbors').rows].map(r=>r.innerText), boundary:t('ratio-boundary'),
  rows:e('scan-buckets').rows.length,cash:[t('scan-fail-cash'),t('scan-pass-cash')],
- ranges:['protect','survive','both','profit'].map(k=>t('scan-'+k)), units:[t('scan-pf-unit'),t('scan-hl-unit'),t('scan-hl-settle')]}})()`);
+ ranges:['protect','survive','both','profit'].map(k=>t('scan-'+k)), units:[t('scan-pf-unit'),t('scan-hl-unit')]}})()`);
 const metaFault = async (value) =>
   run('sessionStorage.setItem("qa-vest-fault",' + JSON.stringify(value) + ')');
 const reports = {};
@@ -44,7 +44,7 @@ try {
   await send('Page.navigate', { url });
   await wait(ready, 55000);
   reports.live = await read();
-  assert.deepEqual(reports.live.units, ['USDC/BTC', 'USDT/BTC', 'USDC 抵押/结算']);
+  assert.deepEqual(reports.live.units, ['USDC/BTC', 'USDT/BTC']);
   assert.ok(
     await run(
       "document.querySelectorAll('main > details').length===1 && !document.querySelector('#desk-details').open && [...document.querySelectorAll('.desk-group')].every(x=>!x.open)"
@@ -62,7 +62,7 @@ try {
   await run('window.holdFx=false; window.releaseFx()');
   await metaFault('missing');
   await wait(
-    paused + " && document.querySelector('#scan-basis').textContent==='QUOTE_CURRENCY_UNVERIFIED'",
+    paused + " && document.querySelector('#scan-status').textContent.includes('QUOTE_CURRENCY_UNVERIFIED')",
     30000
   );
   reports.missing = await read();
@@ -78,10 +78,10 @@ try {
   assert.ok(reports.missing.neighbors.length > 0);
   assert.deepEqual(reports.reloaded.neighbors, reports.missing.neighbors);
   assert.equal(reports.reloaded.boundary, reports.missing.boundary);
-  assert.ok(await run("document.querySelector('#scan-hl-quote').textContent.includes('历史 Mark')"));
+  assert.ok(await run("document.querySelector('#scan-hl-quote').textContent.includes('历史盘口')"));
   await metaFault('missing');
   await wait(
-    "document.querySelector('#scan-basis').textContent==='QUOTE_CURRENCY_UNVERIFIED' && !document.querySelector('#scan-hl-quote').textContent.includes('历史 Mark')",
+    "document.querySelector('#scan-status').textContent.includes('QUOTE_CURRENCY_UNVERIFIED') && !document.querySelector('#scan-hl-quote').textContent.includes('历史盘口')",
     30000
   );
   await click('#scan-config');
@@ -127,7 +127,7 @@ try {
   await run('localStorage.clear()');
   await send('Page.reload', { ignoreCache: true });
   await wait(
-    paused + " && document.querySelector('#scan-basis').textContent==='QUOTE_CURRENCY_UNVERIFIED'",
+    paused + " && document.querySelector('#scan-status').textContent.includes('QUOTE_CURRENCY_UNVERIFIED')",
     30000
   );
   reports.firstUse = await read();

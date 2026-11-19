@@ -5,6 +5,7 @@ import { ledgerLabels, presentLedger } from './settlement-ledger.js';
 const $ = (id) => document.getElementById(id);
 const write = (id, text) => {
   const el = $(id);
+  text = String(text);
   if (el.textContent === text) return;
   if (el.childNodes.length === 1 && el.firstChild.nodeType === Node.TEXT_NODE) el.firstChild.data = text;
   else el.textContent = text;
@@ -75,8 +76,9 @@ function auditText() {
           fmt(l.mark, 5) +
           ' → ' +
           fmt(l.exitMark, 5) +
-          '，平仓均价 ' +
-          fmt(l.exitPrice, 5),
+          '，调仓 ' + (dec(l.adjustment).isZero() ? '无需成交' : (dec(l.adjustment).gt(0) ? '买入 Ask ' : '卖出 Bid ') + l.entryPrice) +
+          '，条件平仓 ' + (dec(l.target).isZero() ? '空仓' : (dec(l.target).gt(0) ? '卖出 Bid ' : '买入 Ask ') + l.exitPrice) +
+          '（各自原生报价，按当前深度平移至终点估算）',
         Object.entries(ledgerLabels)
           .map(([k, label]) => label + ' ' + view.entries[k])
           .join(' ｜ '),
@@ -446,7 +448,9 @@ function renderAnalysis(scan) {
   let message = '';
   if (change) {
     if (change.changes.length) message += '较上一帧，' + change.changes.join('、') + '有变动。';
-    message += change.theoryChanged ? '资金理论界限已变。' : '资金理论界限未变。';
+    if (change.theoryChanged) message += '资金理论界限已变。';
+    else if (change.changes.includes('每单位盈亏敏感度')) message += '理论界限未变，每单位敏感度已重新换算。';
+    else message += '资金边界和线性盈亏敏感度未改变，理论比例保持不变。';
     if (rep && change.previousH != null) {
       if (change.hChanged) {
         message +=
@@ -539,23 +543,7 @@ function draw(result) {
           pair(qty, (v) => v) + ' ' + (unit === 'contract' ? '张' : unit)
         );
       }
-      tr.insertCell().textContent =
-        group === 'legal' ? '路径结余未验证' : pair(metrics.failure, settlementAmount);
-      tr.insertCell().textContent =
-        group === 'legal' ? '路径结余未验证' : pair(metrics.successHype, settlementAmount);
-      const risk = tr.insertCell();
-      risk.append(
-        '缺口 ' + pair(metrics.gapRate, v => pct(v, 2)),
-        document.createElement('br'),
-        '消耗 ' + pair(metrics.consumption, v => pct(v, 2))
-      );
-      risk.title =
-        '初始保证金占用 ' +
-        pct(metrics.maxMarginRate, 2) +
-        ' · 成功消耗 ' +
-        pair(metrics.consumption, pct) +
-        ' · 最小强平距离 / 标记价 ' +
-        pct(metrics.minBufferRate);
+
     }
     if (bin.legal)
       excluded.push(
@@ -620,49 +608,28 @@ export function renderScan(result, m, r, plan, status) {
   ]) {
     const q = m[key];
     const old = !q?.mark && result.retained?.prices?.[key];
-    const c = observed.currencies?.[key] ?? (old && {baseAsset:old.base, quoteAsset:old.quote, settleAsset:old.settle});
+    const c = observed.currencies?.[key] ?? (old && {baseAsset:old.base, quoteAsset:old.quote});
     write('scan-' + key + '-product', (key === 'pf' ? 'Vest ' : 'Hyperliquid ') + (m.asset ?? '') + ' Perp');
     write(
       'scan-' + key + '-unit',
       c?.quoteAsset && c?.baseAsset ? c.quoteAsset + '/' + c.baseAsset : '报价币待核实'
     );
-    write('scan-' + key + '-price', q?.mark == null ? (old ? fmt(old.mark) : '—') : fmt(q.mark));
-    write(
-      'scan-' + key + '-settle',
-      c?.settleAsset ? c.settleAsset + (key === 'hl' ? ' 抵押/结算' : ' 结算') : ''
-    );
-    write(
-      'scan-' + key + '-quote',
-      q?.levels
-        ? '买 ' + fmt(q.levels[0]?.[0]?.[0]) + ' / 卖 ' + fmt(q.levels[1]?.[0]?.[0]) + ' · ' + time(q.asOf) +
-          (m.errors?.[key] ? ' · ' + m.errors[key] : observed.timing?.clocks?.[key]?.ok === false ? ' · 报价过期或盘口无效' : '')
-        : old ? '历史 Mark · ' + new Date(old.markAt ?? old.asOf).toLocaleString('zh-CN') + ' · ' + (m.errors?.[key] || '等待新报价') : m.errors?.[key] || title + ' 正在连接盘口'
-    );
+    const prefix = 'scan-' + key + '-';
+    write(prefix + 'price', q?.mark ?? old?.mark ?? '—');
+    const markSource = '标记时间 ' + time(q?.markAt ?? old?.markAt ?? q?.asOf ?? old?.asOf);
+    if ($(prefix + 'price').title !== markSource) $(prefix + 'price').title = markSource;
+    write(prefix + 'bid', q?.levels?.[0]?.[0]?.[0] ?? old?.bid ?? '—');
+    write(prefix + 'ask', q?.levels?.[1]?.[0]?.[0] ?? old?.ask ?? '—');
+    write(prefix + 'quote', q?.levels
+      ? [m.source === '手工确认盘口' && m.source, '盘口 ' + time(q.bookAt ?? q.asOf),
+        m.errors?.[key] || (observed.timing?.clocks?.[key]?.ok === false && '报价过期或盘口无效')]
+          .filter(Boolean).join(' · ')
+      : old ? '历史盘口 · ' + time(old.bookAt ?? old.asOf) + ' · ' + (m.errors?.[key] || '等待新报价')
+      : m.errors?.[key] || title + ' 正在连接盘口');
   }
-  const observation = result.observed ?? result;
-  const map = observation.currencies,
-    comp = observation.priceComparison;
-  write(
-    'scan-basis',
-    comp
-      ? fmt(comp.diff, 3) + ' ' + map.pf.quoteAsset + ' / ' + pct(comp.fraction)
-      : networkError ? '行情中断，价差暂停' : waitingForMarket ? '正在连接行情' : (map?.error?.split(' · ')[0] ?? '价差暂不可算')
-  );
   const displayed = result.ratioScan ? result : result.retained;
   const tr = displayed?.trace;
-  const quoteTime = m.hl?.markAt ?? m.hl?.asOf;
   write('scan-source', plan ? '预设资金规划 · 条件结果' : '当前账户快照');
-  write(
-    'scan-clock',
-    [
-      m.source === '手工确认盘口' && m.source,
-      comp && (comp.raw != null ? '同币种' : map.hypeToVest.name + ' × ' + fmt(map.hypeToVest.mid, 8)),
-      ...(map?.warnings ?? []),
-      quoteTime && time(quoteTime)
-    ]
-      .filter(Boolean)
-      .join(' · ')
-  );
   const f = result.funding;
   write(
     'scan-capital',
@@ -707,8 +674,8 @@ export function renderScan(result, m, r, plan, status) {
   const stamp = tr ? '结果时间 ' + new Date(tr.at).toLocaleDateString('zh-CN') + ' ' + time(tr.at) : '';
   const desk = $('scan-desk');
   const outdated = !!tr && state !== 'ready';
-  desk.dataset.state = state;
-  desk.dataset.resultId = id;
+  if (desk.dataset.state !== state) desk.dataset.state = state;
+  if (desk.dataset.resultId !== id) desk.dataset.resultId = id;
 
   const progress =
     state === 'updating'
@@ -722,7 +689,7 @@ export function renderScan(result, m, r, plan, status) {
             .filter(Boolean)
             .join(' · ')
         : waitingForMarket ? '正在连接 Vest 与 Hyperliquid 公开行情'
-        : '暂停仓位建议 · ' + (networkError || specError || result.issues?.[0] || status) +
+        : '暂停仓位建议 · ' + (networkError || observed.currencies?.error || specError || result.issues?.[0] || status) +
           (unverifiedVest ? '。可在高级详情核对 Vest 合约规格。' : '');
   write('scan-status', [progress, outdated && (state === 'updating' ? '上次完成' : '上次完成 · 历史结果，当前未验证'), stamp].filter(Boolean).join(' ｜ '));
   write(
@@ -759,10 +726,7 @@ export function setupScan() {
       ? [
           '对冲比例 h',
           'PF 仓位 / 数量',
-          'Hype 仓位 / 数量',
-          '失败回收',
-          '成功剩余',
-          '失败缺口 / 成功消耗范围'
+          'Hype 仓位 / 数量'
         ]
       : columns) {
       const cell = document.createElement('th');

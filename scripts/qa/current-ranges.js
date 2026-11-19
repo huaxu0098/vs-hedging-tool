@@ -20,7 +20,7 @@ async function ready(condition = 'true') {
 }
 async function record(label) {
   const x = await run(
-    `(()=>{const t=id=>document.getElementById(id).textContent;return Object.fromEntries(['scan-status','scan-clock','scan-pf-quote','scan-hl-quote','scan-capital','scan-protect','scan-survive','scan-both','scan-both-count','scan-funded','scan-deadline','scan-profit','scan-profit-count','scan-intersection','scan-representative','scan-position','scan-cash','scan-fail-cash','scan-pass-cash','scan-pass-net','scan-risk','scan-buckets','scan-rows','trace-id'].map(k=>[k,t(k)]));})()`
+    `(()=>{const t=id=>document.getElementById(id).textContent;return Object.fromEntries(['scan-status','scan-pf-quote','scan-hl-quote','scan-capital','scan-protect','scan-survive','scan-both','scan-both-count','scan-funded','scan-deadline','scan-profit','scan-profit-count','scan-intersection','scan-representative','scan-position','scan-cash','scan-fail-cash','scan-pass-cash','scan-pass-net','scan-risk','scan-buckets','scan-rows','trace-id'].map(k=>[k,t(k)]));})()`
   );
   evidence.push({ label, ...x });
   console.log(
@@ -192,7 +192,7 @@ try {
   await run(`(()=>{const el=id=>document.getElementById(id), box=el('trace-inputs').parentElement;
     box.open=true;box.ontoggle();el('manual-quote').value=JSON.stringify(JSON.parse(el('trace-inputs').textContent).market);
     el('confirm-quote').click()})()`);
-  await ready("document.querySelector('#scan-clock').textContent.includes('手工确认盘口')");
+  await ready("document.querySelector('#scan-pf-quote').textContent.includes('手工确认盘口')");
   // Induce a worker timeout only after successful mainnet scans. Source data and other cases stay live.
   await run(`(()=>{const original=Worker.prototype.postMessage;window.resumeRangeWorker=()=>Worker.prototype.postMessage=original;
  Worker.prototype.postMessage=function(){};

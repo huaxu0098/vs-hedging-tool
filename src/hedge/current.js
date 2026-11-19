@@ -16,7 +16,7 @@ import { auditCross } from './cross-check.js';
 import { adjustmentTarget, comparePlans } from './optimization.js';
 import { settlementBridge, sumPostings } from './settlement-ledger.js';
 import { solveAuto } from './auto.js';
-import { currencyMapping, comparePriceBooks, conversionBook } from './quote-currencies.js';
+import { currencyMapping, conversionBook, requiredSpotAssets } from './quote-currencies.js';
 import { calculationTrace } from './trace.js';
 import {
   solve,
@@ -228,8 +228,9 @@ function buildMarket(data, r, a, currencies) {
       minNotional: out(nonnegative(String((isPF ? spec : hl).minNotional ?? (isPF ? '0' : '10'))).times(currencies.legs[key].settleToLedger.mid)),
       mark: out(positive(String(q.mark))),
       open: isPF ? pf.open : true,
-      bids: q.levels[0],
-      asks: q.levels[1],
+      // An accepted grid retains the exact native liquidity used for its fills.
+      bids: q.levels[0].map(([price, size]) => [price, size]),
+      asks: q.levels[1].map(([price, size]) => [price, size]),
       rate: out(nonnegative(String(rate))),
       pool: 'current',
       leverage: lev,
@@ -391,8 +392,13 @@ export function splitReserves(saved = {}) {
 export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(), options = {}) {
   r = splitReserves(r);
   const result = computeCurrent(r, a, data, fxData, now, options);
-  if (result.autoStatus === 'AUTO_FEASIBLE' && result.currencies?.warnings.length)
-    result.autoStatus = 'AUTO_PARTIAL';
+  if (result.autoStatus === 'AUTO_FEASIBLE' && result.currencies?.warnings.length) {
+    const required = requiredSpotAssets(result.currencies.pf, result.currencies.hl, r);
+    if ([...required].some((asset) => result.currencies.spots[asset]?.alert)) {
+      result.autoStatus = 'AUTO_PARTIAL';
+      result.notices.push('账本所需的外币估值触及脱锚阈值');
+    }
+  }
   if (result.ratioScan) {
     attachRepresentative(result, r);
     result.ratioScan.analysis = analyzeRatios(result, r);
@@ -516,7 +522,6 @@ function computeCurrent(r, a, data, fxData, now, options) {
   const quoteOK = (k) => clocks[k].ok && !data.errors?.[k];
   const usable = (k, field) => !a[k].error && (planning || fresh(fieldTime(a[k], field), now, ttl));
   const currencies = result.currencies = currencyMapping(data, fxData, now, ages, r.depegAlertBps ?? rules.depegAlertBps);
-  result.notices.push(...currencies.warnings);
   result.inputGaps = [];
   const quotes = ['pf', 'hl']
     .flatMap((k) => [clocks[k].bookAt, clocks[k].markAt])
@@ -566,9 +571,6 @@ function computeCurrent(r, a, data, fxData, now, options) {
   };
   if (result.timing.quoteSkew > result.timing.quoteLimit)
     issues.push('双边盘口或标记时间差超过阈值，行情熔断');
-  if (currencies.ok && quoteOK('pf') && quoteOK('hl') && !data.errors?.spec &&
-      result.timing.quoteSkew <= result.timing.quoteLimit)
-    result.priceComparison = comparePriceBooks(data.pf, data.hl, currencies);
   if (result.timing.accountSkew > result.timing.accountLimit) issues.push('账户快照时间差超过阈值，账户熔断');
   if ((a.pf.sourceKind === 'plan') !== (a.hl.sourceKind === 'plan')) {
     issues.push('账户来源混用，禁止跨模式计算');

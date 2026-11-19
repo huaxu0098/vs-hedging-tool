@@ -44,7 +44,7 @@ const install = `(() => {
       test.elapsedMs=performance.now()-test.started;
       if(document.querySelector('main')!==main || desk!==root || e('scan-results')!==region) test.remounts=(test.remounts||0)+1;
       if (!desk) {test.blanks++;requestAnimationFrame(frame);return}
-      const quote=e('scan-pf-quote').textContent+e('scan-hl-quote').textContent;
+      const quote=['pf','hl'].flatMap(k=>['bid','ask'].map(side=>e('scan-'+k+'-'+side).textContent)).join('|');
       if(quote!==previousQuote){test.quoteChanges=(test.quoteChanges||0)+1;previousQuote=quote}
       test.paints++;
       if(desk.dataset.state==='updating') test.pendingPaints++;
@@ -73,7 +73,6 @@ const install = `(() => {
   requestAnimationFrame(frame);
 })()`;
 const cash = (v) => dec(v).toFixed(4) + ' U';
-const pct = (v) => dec(v).times(100).toFixed(2) + '%';
 try {
   await send('Page.addScriptToEvaluateOnNewDocument', { source: install });
   await send('Emulation.setDeviceMetricsOverride', {
@@ -87,6 +86,9 @@ try {
     'window.scanTest?.commits.length>=4 && window.scanTest.pendingPaints>2 && window.scanTest.elapsedMs>=60000',
     125000
   );
+  assert.ok(await run(`!document.getElementById('desk-details').open && !document.getElementById('scan-basis') &&
+    !/USDC_per_USDT|参考价差|相邻仓位/.test(document.body.innerText) &&
+    ['pf','hl'].every(k=>['bid','ask','price'].every(s=>Number(document.getElementById('scan-'+k+'-'+s).textContent)>0))`));
   const frames = await run('window.scanTest.commits');
   for (const f of frames) {
     assert.ok(f.status.includes('结果时间'));
@@ -103,15 +105,11 @@ try {
         for (const v of values) assert.ok(cells[j].includes(dec(v).toFixed(2) + ' U'), cells[j]);
       }
       assert.ok(cells[0].includes(bin.count.toLocaleString('en-US')));
-      if (bin.group !== 'legal') {
-        assert.equal(cells[3], bin.fail.map(cash).join(' – '));
-        assert.equal(cells[4], bin.pass.map(cash).join(' – '));
-      }
+      assert.equal(cells.length, 3);
       if (bin.group === 'both') {
         assert.ok(bin.fail.every((v) => dec(v).gte(f.protect)));
         assert.ok(bin.pass.every((v) => dec(v).gte(f.reserve)));
       }
-      assert.ok(cells[5].includes(pct(bin.consume)));
     }
     assert.ok(f.height <= 900, '主要计算区域超出桌面首屏 ' + f.height);
   }
