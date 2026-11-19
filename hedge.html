@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-app="vs-hl-live-workbench">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>实时对冲计算 · VS × Hype</title>
+    <title>VS × Hyperliquid 实时双平台动态对冲计算系统</title>
     <link rel="stylesheet" href="/hedge.css" />
     <script type="importmap">
       { "imports": { "decimal.js": "/vendor/decimal.mjs" } }
@@ -12,7 +12,7 @@
   </head>
   <body>
     <header>
-      <div class="brand">VS <em>×</em> Hype</div>
+      <div class="brand">VS <em>×</em> Hyperliquid</div>
       <nav>
         <a href="#current">当前计算</a><a href="#connections">数据连接</a><a href="#rules">规则设置</a>
       </nav>
@@ -20,7 +20,7 @@
     </header>
     <main id="current" class="live-desk">
       <div class="heading">
-        <h1>实时对冲计算</h1>
+        <h1>实时双平台动态对冲计算</h1>
         <div class="selectors">
           <label
             >当前合约<select id="asset">
@@ -33,12 +33,32 @@
           >
           <label
             >计算方式<select id="mode">
-              <option value="keepPF">保持现有 PF 仓位</option>
+              <option value="keepPF">固定 VS 现仓，计算 Hype</option>
+              <option value="keepHL">固定 Hype 现仓，计算 VS</option>
               <option value="joint">联合搜索两边仓位</option>
             </select></label
           >
         </div>
       </div>
+      <section class="desk-summary" aria-label="当前仓位调整摘要">
+        <article>
+          <h2>VS 目标仓位</h2>
+          <strong id="pf-summary">等待账户</strong><span id="pf-change"></span>
+        </article>
+        <article>
+          <h2>Hype 目标仓位</h2>
+          <strong id="hl-summary">等待账户</strong><span id="hl-change"></span>
+        </article>
+        <article>
+          <h2>VS 失败后个人资金</h2>
+          <strong id="fail-summary">—</strong><span id="fail-change"></span>
+        </article>
+        <article>
+          <h2 id="pass-heading">VS 通过后个人资金</h2>
+          <strong id="pass-summary">—</strong><span id="pass-change"></span>
+        </article>
+        <p id="summary-status" role="status"></p>
+      </section>
       <section class="card" id="snapshot">
         <h2>当前账户与持仓</h2>
         <div class="accounts">
@@ -55,7 +75,12 @@
                 inputmode="decimal"
                 placeholder="未知留空，空仓填 0"
             /></label>
+            <label
+              >可用保证金（U）<input id="pf-free" inputmode="decimal" placeholder="按当前账户填写"
+            /></label>
+            <p id="pf-capacity"></p>
             <p id="pf-meta"></p>
+            <p id="pf-quote"></p>
           </div>
           <div>
             <h3>Hype</h3>
@@ -70,7 +95,12 @@
                 inputmode="decimal"
                 placeholder="未知留空，空仓填 0"
             /></label>
+            <label
+              >可用保证金（U）<input id="hl-free" inputmode="decimal" placeholder="按当前账户填写"
+            /></label>
+            <p id="hl-capacity"></p>
             <p id="hl-meta"></p>
+            <p id="hl-quote"></p>
           </div>
           <div>
             <h3>计算条件</h3>
@@ -79,12 +109,14 @@
                 <option value="challenge">考核 · 固定失败线</option>
                 <option value="funded">出金 · 首次分成</option>
               </select></label
-            ><label>失败端要保住的资金 B（U）<input id="B" inputmode="decimal" /></label
+            ><label>保护本金 B（含已付报名费，U）<input id="B" inputmode="decimal" /></label
             ><label>成功时 Hype 至少留存 R（U）<input id="R" inputmode="decimal" /></label>
           </div>
         </div>
         <div id="joint-fields" hidden>
-          <label>联合搜索 PF 名义额（U，逗号分隔）<input id="sizes" placeholder="填入要比较的仓位" /></label>
+          <label
+            >联合搜索 PF 名义额（U，逗号分隔）<input id="sizes" placeholder="留空按当前可用仓位自动搜索"
+          /></label>
         </div>
       </section>
       <section class="card" aria-labelledby="result-heading">
@@ -92,9 +124,15 @@
         <p id="calc-status" role="status">等待当前快照</p>
         <div class="metrics">
           <div>当前实际 h<strong id="current-h">—</strong></div>
-          <div>资金约束比例范围<strong id="range">—</strong></div>
-          <div>候选目标 h<strong id="target-h">—</strong></div>
+          <div>理论区间 · 现金约束<strong id="range">—</strong></div>
+          <div>目标对冲比例<strong id="target-h">—</strong></div>
         </div>
+        <p id="verified-range"></p>
+        <details id="ratio-points" hidden>
+          <summary>查看已验证的比例点</summary>
+          <p id="points"></p>
+        </details>
+        <p id="basis"></p>
         <p id="bounds-detail"></p>
         <div class="table-wrap">
           <table>
@@ -116,9 +154,30 @@
         <p id="times"></p>
       </section>
       <section class="card">
-        <h2>按当前规则推演的现金</h2>
+        <h2>VS 触线时的个人资金</h2>
         <dl id="cash-results"></dl>
         <p id="rule-events"></p>
+      </section>
+      <section class="card" id="risk">
+        <h2>强平距离与成交成本</h2>
+        <p id="risk-status"></p>
+        <p id="cost-sources"></p>
+        <dl id="risk-values"></dl>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>平台</th>
+                <th>本次调仓费</th>
+                <th>五档滑点</th>
+                <th>失败线平仓费 / 滑点</th>
+                <th>成功线平仓费 / 滑点</th>
+              </tr>
+            </thead>
+            <tbody id="costs"></tbody>
+          </table>
+        </div>
+        <small>调仓费只按增减量计算。滑点按成交均价相对买一或卖一计算，各项已计入对应的现金结果。</small>
       </section>
       <section class="card" id="connections">
         <h2>实时行情与快照来源</h2>
@@ -157,9 +216,23 @@
           </div>
           <pre id="preview"></pre>
         </details>
+        <details id="vs-bridge">
+          <summary>从 VS 页面只读推送当前快照</summary>
+          <label
+            >VS 页面地址<input id="bridge-origin" type="url" value="https://next.vestmarkets.com"
+          /></label>
+          <div class="buttons">
+            <button id="bridge-pair">配对当前合约</button
+            ><button id="bridge-copy" disabled>复制采集脚本</button
+            ><button id="bridge-revoke">撤销配对</button>
+          </div>
+          <p id="bridge-state">配对后，在 VS 页面选中账户读数并运行采集脚本。确认快照后自动重算。</p>
+          <textarea id="bridge-script" rows="2" readonly hidden aria-label="本机只读采集脚本"></textarea>
+        </details>
         <details>
           <summary>挂单、保证金与快照标记价</summary>
           <div class="form" id="leg-settings"></div>
+          <p id="field-sources"></p>
         </details>
         <details>
           <summary>临时使用手工真实盘口</summary>
@@ -182,11 +255,13 @@
       <section class="card" id="rules">
         <h2>账户规则与测算口径</h2>
         <p>以下为用户规则，可按当前账户修改。所有资金按 USDC 等值（U）核算。</p>
+        <p id="profile-source"></p>
         <div class="form" id="rule-fields"></div>
         <p>
           现金范围按当前权益计算。条件仓位按双边盘口、差额成交费及数量步长核算，假设到达边界期间标的同步变动；未来基差、滑点变化和资金费待核实。
         </p>
       </section>
+      <footer><a href="/dev/replay">开发测试 · 行情回放</a></footer>
     </main>
   </body>
 </html>

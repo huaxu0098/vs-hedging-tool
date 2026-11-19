@@ -88,3 +88,80 @@ test('两边同向时 h 为敏感度绝对比，明确标记同向敞口', () =>
   assert.equal(x.currentH, '0.0625');
   assert.equal(x.sameDirection, true);
 });
+
+function verifiedMarket() {
+  const m = structuredClone(market);
+  m.hl.marginTiers = [{ lowerBound: '0', maxLeverage: '40' }];
+  return m;
+}
+function verifiedAccounts() {
+  const a = structuredClone(accounts);
+  Object.assign(a.pf, { marginMode: 'cross', otherHold: '0', free: '9700' });
+  Object.assign(a.hl, { marginMode: 'cross', otherHold: '0', free: '375', leverage: '10' });
+  return a;
+}
+test('固定已成交 Hype 数量，两种方向均可反解 VS，固定侧调仓费为零', () => {
+  for (const dir of [1, -1]) {
+    const a = verifiedAccounts();
+    a.hl.qty = String(-dir * 0.01225);
+    a.pf.qty = String(dir * 0.09);
+    const x = calc({ ...r, mode: 'keepHL' }, a, verifiedMarket());
+    assert.equal(x.candidate?.code, 'FEASIBLE', x.issues.join(' '));
+    assert.equal(x.candidate.hlTargetQuantity, a.hl.qty);
+    assert.equal(x.candidate.hlDeltaQuantity, '0');
+    assert.equal(x.costs.hl.entry.fee, '0');
+    assert.ok(dec(x.candidate.vsDeltaQuantity).abs().gt(0));
+    assert.ok(dec(x.verified.min).lte(x.candidate.actualRatio));
+    assert.ok(dec(x.verified.max).gte(x.candidate.actualRatio));
+  }
+});
+test('联合搜索默认从两边空仓求解，当前资金、已有仓位和盘口决定比例', () => {
+  const a = verifiedAccounts(),
+    m = verifiedMarket();
+  a.pf.qty = a.hl.qty = '0';
+  const x = calc({ ...r, mode: 'joint' }, a, m);
+  assert.equal(x.candidate?.code, 'FEASIBLE', x.issues.join(' '));
+  assert.ok(dec(x.candidate.vsTargetQuantity).times(x.candidate.hlTargetQuantity).lt(0));
+});
+test('历史成本口径、盘口冲击、价格缓冲与单独过期的标记价', () => {
+  const a = verifiedAccounts(),
+    m = verifiedMarket();
+  m.hl.levels = [
+    [
+      ['62999', '0.001'],
+      ['62980', '2']
+    ],
+    [
+      ['63001', '0.001'],
+      ['63030', '2']
+    ]
+  ];
+  const x = calc(r, a, m);
+  assert.equal(x.candidate?.code, 'FEASIBLE', x.issues.join(' '));
+  assert.ok(dec(x.costs.hl.entry.impact).gt(0));
+  assert.ok(dec(x.candidate.priceBuffer).gt(0));
+  assert.equal(x.costs.pf.entry.fee, '0');
+  const same = calc({ ...r, registration: '80' }, a, m);
+  assert.equal(x.candidate.failureCash, same.candidate.failureCash);
+  const cost = calc({ ...r, outsideCosts: '12' }, a, m);
+  assert.ok(dec(cost.range.min).gt(x.range.min));
+  const no = calc({ ...r, minBuffer: '1000000' }, a, m);
+  assert.equal(no.candidate, undefined);
+  m.hl.markAt = new Date(t - 10000).toISOString();
+  assert.match(calc(r, a, m).issues.join(' '), /Hype 行情缺失或过期/);
+});
+
+test('无可调组合仍展示现仓真实数量的条件现金，已知提前强平的终点留空', () => {
+  const a = verifiedAccounts();
+  a.hl.qty = '-0.01225';
+  const m = verifiedMarket();
+  const no = calc({ ...r, outsideCosts: '500' }, a, m);
+  assert.equal(no.candidate, undefined);
+  assert.ok(dec(no.heldCash.failureCash).gt(a.hl.equity));
+  a.hl.liquidation = '69000';
+  const blocked = calc({ ...r, mode: 'keepHL' }, a, m);
+  assert.equal(blocked.candidate, undefined);
+  assert.ok(blocked.heldCash.failureCash);
+  assert.equal(blocked.heldCash.pressureCashAfter, undefined);
+  assert.match(blocked.notices.join(' '), /成功线之前触及强平/);
+});

@@ -1,5 +1,6 @@
 import { dec, out, nonnegative, positive } from './math.js';
 import { rules, calculateCurrent, fresh } from './current.js';
+import { captureScript } from '../vs-parser.js';
 import { manualVs } from './adapters.js';
 import { accountSnapshot } from './current-account.js';
 
@@ -15,10 +16,25 @@ try {
 const state = saved?.version === 1 ? saved : { version: 1, asset: 'BTC', rules: {}, assets: {}, shared: {} };
 const r = (state.rules = { ...rules, ...state.rules });
 const save = () => localStorage.setItem(key, JSON.stringify(state));
-const fmt = (x, n = 2) => (x == null || x === '' ? '—' : dec(String(x)).toFixed(n));
+const fmt = (x, n = 2) => {
+  if (x == null || x === '') return '—';
+  try {
+    return dec(String(x)).toFixed(n);
+  } catch {
+    return '待填写';
+  }
+};
 const money = (x) => (x == null ? '—' : fmt(x) + ' U');
-const pct = (x) => (x == null ? '—' : dec(x).times(100).toFixed(3) + '%');
+const pct = (x) => {
+  if (x == null || x === '') return '—';
+  try {
+    return dec(x).times(100).toFixed(3) + '%';
+  } catch {
+    return '待填写';
+  }
+};
 const signed = (x) => (x == null ? '未验证' : (dec(x).gt(0) ? '+' : '') + out(dec(x)));
+const signedMoney = (x) => (x == null ? '—' : (dec(x).gt(0) ? '+' : '') + money(x));
 const clock = (t) =>
   t && Number.isFinite(Date.parse(t)) ? new Date(t).toLocaleString('zh-CN', { hour12: false }) : '未确认';
 const put = (id, str) => {
@@ -27,6 +43,9 @@ const put = (id, str) => {
 const asset = () => state.asset;
 const local = () => (state.assets[asset()] ??= { pf: {}, hl: {} });
 const ruleFields = {
+  registration: '本金中已支付的报名费（U）',
+  outsideCosts: '本金之外另需收回的历史成本（U）',
+  minBuffer: '成功线到 Hype 强平线的最低价格距离',
   challengeFloor: '考核固定失败线（U）',
   challengeTarget: '考核通过净值（U）',
   fundedFloor: '出金户固定失败线（U）',
@@ -71,7 +90,7 @@ for (const side of ['pf', 'hl'])
     ...legFields,
     ...(side === 'hl' ? { leverage: '当前杠杆倍数' } : {})
   }))
-    input('leg-settings', side + '-' + k, (side === 'pf' ? 'VS ' : 'Hype ') + label);
+    if (k !== 'free') input('leg-settings', side + '-' + k, (side === 'pf' ? 'VS ' : 'Hype ') + label);
 for (const side of ['pf', 'hl']) {
   const label = document.createElement('label'),
     select = document.createElement('select');
@@ -125,13 +144,19 @@ function account(side) {
   const leg = local()[side],
     shared = state.shared[side];
   const eq = shared?.asset === asset() ? leg.equity : (shared?.equity ?? leg.equity);
+  const risk = {};
+  for (const k of ['free', 'otherHold', 'orders', 'leverage', 'marginMode']) {
+    const meta = leg.origins?.[k];
+    if (meta && !fresh(meta.at, Date.now(), Number(r.accountSecs) * 1000)) risk[k] = null;
+  }
   const timestamps = [shared?.at ?? leg.equityAt, leg.qtyAt].filter(Boolean).sort();
   return {
     ...leg,
+    ...risk,
     equity: eq,
     anchor: shared?.asset === asset() ? leg.anchor : null,
     at: timestamps[0],
-    source: '手工确认',
+    source: leg.origins?.qty?.source ?? leg.origins?.equity?.source ?? '手工确认',
     otherPositions:
       leg.otherPositions ||
       Object.entries(state.assets).some(
@@ -172,18 +197,24 @@ function inputs() {
     }
   }
 }
-function updateLeg(side, fields, stamp = now()) {
+function updateLeg(side, fields, stamp = now(), source = '手工确认') {
   const leg = local()[side];
+  leg.origins ??= {};
+  for (const k of Object.keys(fields)) leg.origins[k] = { at: stamp, source };
   if ('equity' in fields) {
     state.shared[side] = { asset: asset(), equity: fields.equity, at: stamp };
     leg.equityAt = stamp;
     leg.anchor =
       fields.anchor ??
-      (fresh(market()[side]?.asOf, Date.now(), Number(r.quoteSecs) * 1000)
+      (fresh(market()[side]?.asOf, Date.parse(stamp), Number(r.quoteSecs) * 1000)
         ? String(market()[side].mark)
         : null);
   }
-  if ('qty' in fields) leg.qtyAt = stamp;
+  if ('qty' in fields) {
+    if (!('equity' in fields) && fields.qty !== leg.qty && leg.qtyAt && leg.equityAt && leg.qtyAt !== stamp)
+      leg.anchor = null;
+    leg.qtyAt = stamp;
+  }
   Object.assign(leg, fields);
 }
 function cellRow(values) {
@@ -194,6 +225,85 @@ function cellRow(values) {
     row.append(td);
   }
   return row;
+}
+function renderPairs(id, pairs) {
+  const dl = [];
+  for (const [k, v] of pairs) {
+    const dt = document.createElement('dt'),
+      dd = document.createElement('dd');
+    dt.textContent = k;
+    dd.textContent = v;
+    dl.push(dt, dd);
+  }
+  if ($(id).textContent !== dl.map((el) => el.textContent).join('')) $(id).replaceChildren(...dl);
+}
+function renderRisk(result, accounts, market) {
+  const c = result.candidate;
+  put(
+    'risk-status',
+    c
+      ? result.riskMissing.length
+        ? '仍需确认：' + result.riskMissing.join('、')
+        : '已按全仓维持保证金档位验算失败和成功路径。'
+      : '等待可测算的候选仓位。'
+  );
+  const sources = [];
+  if (market.spec)
+    sources.push('VS 保证金规格 · Vest exchangeInfo' + (market.specAt ? ' ' + clock(market.specAt) : ''));
+  if (market.hl?.markAt) sources.push('Hype 档位 · 主网 meta ' + clock(market.hl.markAt));
+  sources.push('VS 单边费率 ' + pct(r.pfFee || null) + '（本机设置）');
+  sources.push(
+    'Hype 单边费率 ' +
+      pct(accounts.hl.fee ?? (r.hlFee || null)) +
+      (accounts.hl.fee != null ? '（公开账户 API）' : '（本机设置）')
+  );
+  put('cost-sources', sources.join(' ｜ '));
+  const paths =
+    c && market.pf
+      ? [c.lines.fail, c.lines.pass].map((x) => fmt(out(dec(String(market.pf.mark)).plus(x))))
+      : ['—', '—'];
+  const margin = (key) => money(c?.constraints.find((x) => x.code === key + '_INITIAL_MARGIN')?.required);
+  renderPairs('risk-values', [
+    ['VS 失败价 / 成功价', paths.join(' / ')],
+    ['Hype 在 VS 成功线的压力标记价', fmt(c?.pressureMark)],
+    [
+      'Hype 目标仓强平标记价',
+      c?.liqMark
+        ? fmt(c.liqMark) + ' · ' + c.liqSource
+        : c && c.buffer != null && !dec(c.hlTargetQuantity).isZero()
+          ? '模型内无正价格强平点'
+          : '未验证'
+    ],
+    [
+      '当前仓平台参考强平价',
+      accounts.hl.liquidation ? fmt(accounts.hl.liquidation) + ' · API 当前持仓' : '未提供'
+    ],
+    [
+      '成功线到强平线的距离',
+      c?.priceBuffer != null
+        ? fmt(c.priceBuffer) + ' 价格单位 · ' + pct(out(dec(c.priceBuffer).div(c.pressureMark)))
+        : '—'
+    ],
+    ['路径最低 Hype 维持保证金余量', money(c?.buffer)],
+    ['目标初始保证金（含其他占用）', 'VS ' + margin('pf') + ' / Hype ' + margin('hl')]
+  ]);
+  const rows = ['pf', 'hl'].map((k) => {
+    const t = result.costs?.[k],
+      pair = (side) => (t ? money(t[side].fee) + ' / ' + money(t[side].impact) : '—');
+    return cellRow([
+      k === 'pf' ? 'VS' : 'Hype',
+      money(t?.entry.fee),
+      money(t?.entry.impact),
+      pair('fail'),
+      pair('pass')
+    ]);
+  });
+  if ($('costs').textContent !== rows.map((el) => el.textContent).join(''))
+    $('costs').replaceChildren(...rows);
+}
+function freshnessLabel(at, seconds) {
+  if (!at) return '未确认';
+  return fresh(at, Date.now(), Number(seconds) * 1000) ? '有效' : '过期';
 }
 function render() {
   const m = market(),
@@ -212,12 +322,82 @@ function render() {
     : result.issues[0] || result.notices.at(-1) || '等待当前快照';
   put('calc-status', status);
   put(
+    'summary-status',
+    c
+      ? (c.code === 'FEASIBLE' ? '当前规则已验算' : '条件测算 · 保证金待验证') +
+          ' · 两种现金结果均假设先触及对应 VS 边界'
+      : status + (result.heldCash ? ' · 现金按现仓保持不动计算' : '')
+  );
+  for (const [key, qty, delta, amount] of [
+    ['pf', c?.vsTargetQuantity, c?.vsDeltaQuantity, c?.vsNotional],
+    ['hl', c?.hlTargetQuantity, c?.hlDeltaQuantity, c?.hlNotional]
+  ]) {
+    const q = qty == null ? null : dec(qty);
+    const adj = result.adjust?.[key];
+    let hint = '待核对挂单';
+    if (adj?.remaining != null)
+      hint = dec(adj.remaining).isZero()
+        ? dec(delta).isZero()
+          ? '保持现仓'
+          : '挂单已覆盖差额'
+        : action(adj.projected ?? result.qty[key], adj.remaining);
+    put(key + '-summary', q == null ? '—' : (q.isZero() ? '空仓 ' : q.gt(0) ? '多 ' : '空 ') + money(amount));
+    put(key + '-change', q == null ? '' : q.abs().toString() + ' ' + asset() + ' · ' + hint);
+  }
+  const projection = c ?? result.heldCash;
+  put('fail-summary', money(projection?.failureCash));
+  put('pass-summary', money(projection?.pressureCashAfter));
+  put('pass-heading', r.stage === 'funded' ? '首笔分成到账后个人资金' : 'VS 通过后个人资金');
+  for (const [id, diff] of [
+    ['fail', result.failVsPrincipal],
+    ['pass', result.passVsPrincipal]
+  ])
+    put(id + '-change', diff == null ? '' : '相对保护本金及额外成本 ' + signedMoney(diff));
+  put(
     'current-h',
-    result.currentH == null ? '—' : pct(result.currentH) + (result.sameDirection ? ' · 同向敞口' : '')
+    result.currentH == null
+      ? result.qty.pf === '0'
+        ? result.qty.hl === '0'
+          ? '双边空仓'
+          : 'VS 空仓 · 比例无定义'
+        : '—'
+      : pct(result.currentH) + (result.sameDirection ? ' · 同向敞口' : '')
   );
   put('range', b?.min == null ? '—' : dec(b.max).lt(b.min) ? '无交集' : pct(b.min) + ' – ' + pct(b.max));
-  const budgetOnly = !c && b?.selected && !result.notices.some((n) => /已到期|待到账|待平台/.test(n));
-  put('target-h', c ? pct(c.actualRatio) : budgetOnly ? pct(b.min) + ' · 资金参考' : '—');
+  const budgetOnly =
+    !c && !result.heldCash && b?.selected && !result.notices.some((n) => /已到期|待到账|待平台/.test(n));
+  put('target-h', c ? pct(c.actualRatio) + (c.code === 'FEASIBLE' ? ' · 推荐' : ' · 待验证') : '—');
+  const verified = result.verified;
+  put(
+    'verified-range',
+    verified
+      ? '本次搜索已验证的离散比例 ' +
+          pct(verified.min) +
+          ' 至 ' +
+          pct(verified.max) +
+          '，共 ' +
+          verified.count +
+          ' 个可行比例'
+      : '本次搜索已验证的可行比例：' + (c ? '保证金参数待补' : '暂无')
+  );
+  $('ratio-points').hidden = !verified;
+  put('points', (result.points ?? []).map((x) => dec(x).times(100).toFixed(5) + '%').join('、'));
+  put(
+    'basis',
+    c
+      ? '按标的每变动一单位的双边盈亏换算比例。在覆盖失败端保护金、成功端留存和已知保证金约束的候选中，优先成功端剩余现金最高，再选 Hype 名义额较小者。'
+      : ''
+  );
+  put(
+    'profile-source',
+    '来源：' +
+      (r.editedAt ? '本机规则，最近编辑 ' + clock(r.editedAt) : '初始规则，待按平台确认') +
+      '。保护本金中含报名费 ' +
+      money(r.registration) +
+      '，本金外需收回 ' +
+      money(r.outsideCosts) +
+      '。当前权益按账户快照计入。'
+  );
   put(
     'bounds-detail',
     b?.min != null
@@ -251,11 +431,14 @@ function render() {
         name,
         amt(q) + (result.currentNotional[s] != null ? ' · ' + money(result.currentNotional[s]) : ''),
         target == null
-          ? r.mode === 'keepPF' && s === 'pf' && q != null
+          ? ((r.mode === 'keepPF' && s === 'pf') || (r.mode === 'keepHL' && s === 'hl')) && q != null
             ? '保持 ' + amt(q)
             : '—'
           : amt(target) + ' · ' + money(notional),
-        action(q, delta),
+        action(q, delta) +
+          (delta != null && !dec(delta).isZero()
+            ? ' · ' + money(out(dec(delta).abs().times(String(m[s].mark))))
+            : ''),
         adj
           ? adj.remaining == null
             ? '待核对挂单'
@@ -280,12 +463,29 @@ function render() {
         orderSummary +
         (adj?.projected != null ? '；若全部成交 ' + signed(adj.projected) + u + ' · ' + adj.text : '')
     );
+    const rawAccount = a[s].unsupported
+      ? '该资金池待核实 · API 原始权益 ' + money(a[s].rawEquity) + '。'
+      : '';
+    put(
+      s + '-capacity',
+      rawAccount +
+        (a[s].directionalFree
+          ? 'API 可用保证金 · 买入 ' +
+            money(a[s].directionalFree[0]) +
+            ' / 卖出 ' +
+            money(a[s].directionalFree[1])
+          : '')
+    );
+    $(s + '-free').hidden = !!a[s].directionalFree;
+    $(s + '-free').parentElement.hidden = !!a[s].directionalFree;
     const origin = a[s].source || '手工确认';
     put(
       s + '-meta',
       origin +
         ' · ' +
         clock(a[s].at) +
+        ' · ' +
+        freshnessLabel(a[s].at, r.accountSecs) +
         (result.cash[s] != null
           ? ' · ' + (a[s].anchor ? '按标记价估算 ' : '权益快照 ') + money(result.cash[s])
           : '')
@@ -315,25 +515,20 @@ function render() {
       ' · '
     )
   );
-  const budget = budgetOnly ? b.atMinimum : null;
+  const budget =
+    !stale && budgetOnly && !result.issues.some((x) => /无解|没有满足|没有可行/.test(x)) ? b.atMinimum : null;
   const lines = [
-    ['失败端个人现金', money(c?.failureCash ?? budget?.fail)],
-    ['成功端分成到账前', money(c?.cashBeforePayout ?? budget?.before)],
-    ['若分成到账后', money(c?.pressureCashAfter ?? budget?.after)],
+    ['失败端个人现金', money(projection?.failureCash ?? budget?.fail)],
+    ['成功端分成到账前', money(projection?.cashBeforePayout ?? budget?.before)],
+    ['若分成到账后', money(projection?.pressureCashAfter ?? budget?.after)],
+    ['失败端相对保护本金及额外成本', money(result.failVsPrincipal)],
+    ['成功端相对保护本金及额外成本', money(result.passVsPrincipal)],
     ['从当前起的现金变化', money(result.forward)],
     ['整轮条件净收益', r.ref ? money(result.round) : '缺少本轮起点'],
     ['当前可分金额（未到账）', r.stage === 'funded' ? money(result.claim) : '考核期不可分']
   ];
-  const dl = [];
-  for (const [k, v] of lines) {
-    const dt = document.createElement('dt'),
-      dd = document.createElement('dd');
-    dt.textContent = k;
-    dd.textContent = v;
-    dl.push(dt, dd);
-  }
-  if ($('cash-results').textContent !== dl.map((el) => el.textContent).join(''))
-    $('cash-results').replaceChildren(...dl);
+  renderPairs('cash-results', lines);
+  renderRisk(result, a, m);
   put(
     'rule-events',
     [...(budget ? ['仅按资金参考比例估算，具体成交成本待验算'] : []), ...result.notices].join(' · ')
@@ -358,6 +553,49 @@ function render() {
         : '等待报价')
     );
   });
+  for (const [i, k] of ['pf', 'hl'].entries()) {
+    const q = m[k],
+      manual = $('quote-source').value === 'manual';
+    put(
+      k + '-quote',
+      qs[i] +
+        (q
+          ? ' · ' +
+            (manual ? '手工盘口' : k === 'pf' ? 'Vest WebSocket' : q.bookSource) +
+            ' · ' +
+            freshnessLabel(q.asOf, r.quoteSecs) +
+            (q.markAt
+              ? ' · 标记价 REST 请求 ' + clock(q.markAt) + ' ' + freshnessLabel(q.markAt, r.quoteSecs)
+              : '')
+          : '')
+    );
+  }
+  put(
+    'field-sources',
+    ['pf', 'hl']
+      .map((k) => {
+        if (k === 'hl' && useAPI()) return 'Hype 主网账户查询 ' + clock(a.hl.at);
+        return (
+          (k === 'pf' ? 'VS' : 'Hype') +
+          ' ' +
+          Object.entries(local()[k].origins ?? {})
+            .map(
+              ([field, meta]) =>
+                (legFields[field] ??
+                  { qty: '持仓', equity: '权益', leverage: '杠杆', marginMode: '保证金模式' }[field] ??
+                  field) +
+                ' ' +
+                meta.source +
+                ' ' +
+                clock(meta.at) +
+                ' ' +
+                freshnessLabel(meta.at, r.accountSecs)
+            )
+            .join('、')
+        );
+      })
+      .join(' ｜ ')
+  );
   put(
     'quotes',
     ($('quote-source').value === 'api' ? '公开行情' : '手工盘口') +
@@ -497,6 +735,23 @@ function manualImport(side, v, stamp) {
     throw Error('快照时间无效');
   return { side, fields: f, stamp: v.at ?? stamp };
 }
+function parseVS(raw, stamp) {
+  const v = manualVs(raw, 'USDC', stamp),
+    listed = v.positions?.filter((p) => p.symbol === asset() + '-PERP' || p.symbol === asset());
+  if (v.symbol && ![asset(), asset() + '-PERP'].includes(v.symbol)) throw Error('VS 快照与当前合约不同');
+  if (listed?.length > 1) throw Error('同品种多笔分仓，请核对后输入带符号净数量');
+  const f = {
+    equity: v.fields.equity,
+    free: v.fields.free,
+    anchor: v.fields.mark,
+    at: v.accountAt ?? v.occurredAt ?? stamp
+  };
+  if (listed) {
+    f.qty = listed[0]?.qty ?? '0';
+    f.otherPositions = listed.length !== v.positions.length;
+  }
+  return { edit: manualImport('pf', f, stamp), stage: v.stage };
+}
 $('parse').onclick = () => {
   invalidatePreview();
   try {
@@ -510,61 +765,146 @@ $('parse').onclick = () => {
       for (const k of ['pf', 'hl']) if (j[k]) edits.push(manualImport(k, j[k], stamp));
       stage = j.stage;
     } else {
-      const v = manualVs(raw, 'USDC', stamp),
-        listed = v.positions?.filter((p) => p.symbol === asset() + '-PERP' || p.symbol === asset());
-      if (v.symbol && ![asset(), asset() + '-PERP'].includes(v.symbol)) throw Error('VS 快照与当前合约不同');
-      if (listed?.length > 1) throw Error('同品种多笔分仓，请核对后输入带符号净数量');
-      const f = {
-        equity: v.fields.equity,
-        free: v.fields.free,
-        anchor: v.fields.mark,
-        at: v.accountAt ?? v.occurredAt ?? stamp
-      };
-      if (listed) {
-        f.qty = listed[0]?.qty ?? '0';
-        f.otherPositions = listed.length !== v.positions.length;
-      }
-      edits.push(manualImport('pf', f, stamp));
-      stage = v.stage;
+      const parsed = parseVS(raw, stamp);
+      edits.push(parsed.edit);
+      stage = parsed.stage;
     }
     if (!edits.length || (stage && !['challenge', 'funded'].includes(stage)))
       throw Error('当前快照或阶段无效');
     if (edits.some((e) => e.side === 'hl') && useAPI()) throw Error('请切换到手工 Hype 来源后确认');
-    pending = { edits, stage };
+    pending = {
+      edits,
+      stage,
+      source: $('paste-kind').value === 'vs' ? 'VS 粘贴确认' : '手工确认 · 快照导入'
+    };
     put('preview', JSON.stringify(pending, null, 2));
     $('confirm').disabled = false;
   } catch (e) {
     put('preview', e.message);
   }
 };
-$('confirm').onclick = () => {
-  if (!pending) return;
-  for (const e of pending.edits) {
+function applySnapshot(snapshot) {
+  for (const e of snapshot.edits) {
     const old = local()[e.side];
-    if (
-      ('qty' in e.fields && old.qtyAt && Date.parse(e.stamp) < Date.parse(old.qtyAt)) ||
-      ('equity' in e.fields &&
-        state.shared[e.side]?.at &&
-        Date.parse(e.stamp) < Date.parse(state.shared[e.side].at))
-    ) {
-      invalidatePreview();
-      put('preview', '识别结果早于当前快照，请核对平台时间后重新粘贴。');
-      return;
-    }
+    const stamps = Object.keys(e.fields).map((k) => old.origins?.[k]?.at);
+    if ('qty' in e.fields) stamps.push(old.qtyAt);
+    if ('equity' in e.fields) stamps.push(state.shared[e.side]?.at);
+    if (stamps.some((t) => t && Date.parse(e.stamp) < Date.parse(t)))
+      throw Error('识别结果早于当前快照，请核对平台时间。');
   }
-  for (const e of pending.edits) updateLeg(e.side, e.fields, e.stamp);
-  if (pending.stage) r.stage = pending.stage;
-  invalidatePreview();
-  put('preview', '已确认当前快照');
+  for (const e of snapshot.edits) updateLeg(e.side, e.fields, e.stamp, snapshot.source);
+  if (snapshot.stage) {
+    r.stage = snapshot.stage;
+    r.editedAt = now();
+  }
   save();
   inputs();
   render();
+}
+$('confirm').onclick = () => {
+  if (!pending) return;
+  try {
+    applySnapshot(pending);
+    invalidatePreview();
+    put('preview', '已确认当前快照');
+  } catch (e) {
+    put('preview', e.message);
+  }
 };
+
+let bridge = null;
+async function bridgeRequest(action, body) {
+  const response = await fetch(
+    '/api/bridge/' + action,
+    body === undefined
+      ? { cache: 'no-store' }
+      : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+  );
+  const value = await response.json();
+  if (!response.ok) throw Error(value.error ?? '本机桥接失败');
+  return value;
+}
+function clearBridge() {
+  bridge = null;
+  $('bridge-script').value = '';
+  $('bridge-script').hidden = true;
+  $('bridge-copy').disabled = true;
+}
+$('bridge-pair').onclick = async () => {
+  try {
+    const assetId = asset(),
+      origin = new URL($('bridge-origin').value).origin;
+    const paired = await bridgeRequest('pair', { origin, assetId });
+    if (assetId !== asset()) return;
+    bridge = { ...paired, sequence: 0 };
+    $('bridge-script').value = captureScript({ ...paired, baseURL: location.origin });
+    $('bridge-script').hidden = false;
+    $('bridge-copy').disabled = false;
+    put(
+      'bridge-state',
+      '已配对 ' +
+        assetId +
+        ' · ' +
+        origin +
+        '，有效至 ' +
+        clock(new Date(paired.expires).toISOString()) +
+        '。在来源页确认 USDC 等值快照后自动更新。'
+    );
+  } catch (e) {
+    put('bridge-state', e.message);
+  }
+};
+$('bridge-copy').onclick = async () => {
+  try {
+    await navigator.clipboard.writeText($('bridge-script').value);
+    put('bridge-state', '已复制，请在配对的 VS 页面核对并发送快照。');
+  } catch {
+    $('bridge-script').select();
+    put('bridge-state', '已选中采集脚本，可直接复制。');
+  }
+};
+$('bridge-revoke').onclick = async () => {
+  try {
+    await bridgeRequest('revoke', {});
+    clearBridge();
+    put('bridge-state', '配对已撤销');
+  } catch (e) {
+    put('bridge-state', e.message);
+  }
+};
+async function pollBridge() {
+  const pair = bridge;
+  if (!pair) return;
+  if (Date.now() >= pair.expires) {
+    clearBridge();
+    put('bridge-state', '配对已到期');
+    return;
+  }
+  try {
+    const msg = await bridgeRequest('latest');
+    if (
+      !msg ||
+      pair !== bridge ||
+      pair.assetId !== asset() ||
+      msg.assetId !== asset() ||
+      msg.sequence <= pair.sequence
+    )
+      return;
+    pair.sequence = msg.sequence;
+    const parsed = parseVS(JSON.stringify(msg.snapshot), msg.snapshot.asOf);
+    applySnapshot({ edits: [parsed.edit], stage: parsed.stage, source: 'VS 本机桥接 · ' + pair.origin });
+    put('bridge-state', '已接收当前账户快照 · ' + clock(msg.receivedAt));
+  } catch (e) {
+    put('bridge-state', e.message);
+  }
+}
+setInterval(pollBridge, 1500);
 $('paste').oninput = invalidatePreview;
 $('paste-kind').onchange = invalidatePreview;
 for (const k of ['mode', 'stage', 'B', 'R', 'sizes', ...Object.keys(ruleFields)]) {
   $(k).addEventListener('input', () => {
     r[k] = $(k).value.trim();
+    r.editedAt = now();
     if (k === 'fx') r.fxAt = now();
     $('joint-fields').hidden = r.mode !== 'joint';
     save();
@@ -598,6 +938,11 @@ for (const s of ['pf', 'hl'])
     });
   }
 $('asset').onchange = () => {
+  if (bridge) {
+    clearBridge();
+    bridgeRequest('revoke', {}).catch(() => {});
+    put('bridge-state', '合约已切换，请重新配对。');
+  }
   state.asset = $('asset').value;
   feed = {};
   api = null;
@@ -644,7 +989,14 @@ $('confirm-quote').onclick = () => {
         dec(checked[0][0][0]).gt(checked[1][0][0])
       )
         throw Error('盘口无效');
-      both[k] = { ...spec, mark: out(positive(String(q.mark))), asOf: q.asOf, levels: checked };
+      both[k] = {
+        ...spec,
+        markAt: null,
+        bookSource: '手工盘口',
+        mark: out(positive(String(q.mark))),
+        asOf: q.asOf,
+        levels: checked
+      };
     }
     manualPrices = both;
     $('quote-source').value = 'manual';
@@ -664,7 +1016,11 @@ setInterval(() => {
     m = market();
   const next = [
     ...['pf', 'hl'].map((k) => fresh(m[k]?.asOf, t, Number(r.quoteSecs) * 1000)),
+    !m.hl?.markAt || fresh(m.hl.markAt, t, Number(r.quoteSecs) * 1000),
     ...['pf', 'hl'].map((k) => fresh(account(k).at, t, Number(r.accountSecs) * 1000)),
+    ...['pf', 'hl'].flatMap((k) =>
+      Object.values(local()[k].origins ?? {}).map((meta) => fresh(meta.at, t, Number(r.accountSecs) * 1000))
+    ),
     !!r.deadline && Date.parse(r.deadline) <= t,
     fresh(r.fxAt, t, Number(r.accountSecs) * 1000),
     ...['USDC', 'USDT'].map((k) => fresh(rates[k]?.asOf, t, 60000))

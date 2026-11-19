@@ -81,7 +81,7 @@ function compactSnapshot(input) {
     !exact(input, allowedLeg) ||
     !exact(input.account ?? {}, allowedAccount) ||
     !['source', 'capture'].includes(input.timeSource) ||
-    ![undefined, 'boolean'].includes(typeof input.open) ||
+    (input.open !== undefined && typeof input.open !== 'boolean') ||
     !Number.isFinite(Date.parse(input.asOf))
   )
     throw Error('快照字段或时间无效。');

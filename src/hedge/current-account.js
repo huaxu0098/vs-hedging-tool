@@ -17,6 +17,7 @@ export async function accountSnapshot(user, asset, query) {
   const result = (i) => (data[i].status === 'fulfilled' ? data[i].value : undefined);
   const receivedAt = new Date().toISOString();
   const account = readAccount(result(0), { user, dex: '', token: 'USDC', receivedAt });
+  if (!account.occurredAt) throw Error('Hype 账户快照缺少来源时间');
   const pos = account.positions.find((p) => p.symbol === asset);
   const orders = result(1);
   const mapped = Array.isArray(orders)
@@ -54,7 +55,18 @@ export async function accountSnapshot(user, asset, query) {
     unsupported,
     marginMode,
     otherPositions: account.positions.some((p) => p.symbol !== asset && !dec(p.qty).isZero()),
-    otherHold: !account.positions.length && Array.isArray(orders) && !orders.length ? '0' : null,
+    otherHold:
+      !unsupported &&
+      account.positions.every((p) => p.symbol === asset || dec(p.qty).isZero()) &&
+      Array.isArray(orders) &&
+      !orders.length
+        ? '0'
+        : null,
+    liquidation: pos?.liquidation ?? null,
+    directionalFree:
+      validCap && Array.isArray(cap.availableToTrade) && cap.availableToTrade.length === 2
+        ? cap.availableToTrade.map((x) => out(nonnegative(x)))
+        : null,
     leverage: validCap ? String(cap.leverage?.value ?? '') : null,
     capacity: validCap ? cap.maxTradeSzs : null,
     fee: result(4)?.userCrossRate ? out(nonnegative(result(4).userCrossRate)) : null,

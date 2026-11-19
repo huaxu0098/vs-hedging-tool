@@ -4,7 +4,7 @@ cd -- "${0:A:h}"
 
 # Reuse the live calculator and its confirmed local snapshots.
 url='http://127.0.0.1:4181'
-if /usr/bin/curl --silent --fail --max-time 2 "$url/" | /usr/bin/grep -Fq '<title>实时对冲计算 · VS × Hype</title>'; then
+if /usr/bin/curl --silent --fail --max-time 2 "$url/" | /usr/bin/grep -Fq 'data-app="vs-hl-live-workbench"'; then
   exec /usr/bin/open "$url/"
 fi
 

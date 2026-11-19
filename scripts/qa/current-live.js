@@ -122,11 +122,22 @@ try {
     assert.equal(res.status, 200);
     return res.json();
   };
-  const fills = await req({ type: 'userFills', user });
-  const fill = fills.find(
-    (f) => f.coin === 'BTC' && f.startPosition != null && Number(f.sz) > 0 && Number(f.sz) < 1
-  );
-  assert.ok(fill, '公开 HLP 子金库最近返回的 BTC 成交');
+  // Other assets can fill the public vault's entire recent page. Retrieve an observed
+  // BTC receipt from mainnet by event time if that happens. Quantities always come from the API.
+  const eligible = (f) =>
+    f.coin === 'BTC' &&
+    f.startPosition != null &&
+    Number(f.sz) > 0 &&
+    Number(f.sz) < 1 &&
+    Math.abs(Number(f.startPosition)) < 1;
+  let fill = (await req({ type: 'userFills', user })).find(eligible);
+  if (!fill) {
+    const observed = Date.parse('2026-11-19T10:01:01.423Z');
+    fill = (
+      await req({ type: 'userFillsByTime', user, startTime: observed - 1, endTime: observed + 1 })
+    ).find(eligible);
+  }
+  assert.ok(fill, '主网返回的公开 HLP 子金库 BTC 成交');
   const before = fill.startPosition,
     after = (Number(before) + (fill.side === 'B' ? 1 : -1) * Number(fill.sz)).toFixed(5);
   await position('0.08', before);
@@ -180,6 +191,58 @@ try {
     await val('hl-qty'),
     (await text('#order-detail')).slice(0, 150)
   );
+  await b.set('#hl-source', 'manual');
+  await set('mode', 'keepPF');
+  await position('0.08', '-0.005');
+  for (const [id, value] of Object.entries({
+    'pf-free': '9700',
+    'hl-free': '375',
+    'pf-otherHold': '0',
+    'hl-otherHold': '0',
+    'pf-marginMode': 'cross',
+    'hl-marginMode': 'cross',
+    'hl-leverage': '10',
+    R: '100'
+  }))
+    await set(id, value);
+  const recommended = "document.querySelector('#target-h').textContent.includes('推荐')";
+  await wait(recommended, 30000);
+  await wait("document.querySelector('#hl-quote').textContent.includes('WebSocket')", 30000);
+  assert.match(await text('#verified-range'), /个可行比例/);
+  assert.match(await text('#risk-values'), /全仓档位测算/);
+  const numeric = "document.querySelector('#legs').rows[0].cells[2].textContent";
+  const numericalRisk = "document.querySelector('#risk-values').textContent";
+  const beforeRisk = await run(numericalRisk);
+  const initial = await run(numeric);
+  await wait(numeric + '!==' + JSON.stringify(initial) + ' && ' + recommended, 45000);
+  await wait(numericalRisk + '!==' + JSON.stringify(beforeRisk) + ' && ' + recommended, 45000);
+  console.log('行情自动重算', initial, await run(numeric), await text('#hl-quote'));
+  console.log(
+    '固定 VS 验算',
+    await text('#current-h'),
+    await text('#target-h'),
+    await row(),
+    await text('#cash-results'),
+    await text('#verified-range'),
+    await text('#risk-values'),
+    await text('#costs')
+  );
+  if (process.env.DESK_SCREENSHOT) {
+    const { writeFile } = await import('node:fs/promises');
+    await run('window.scrollTo(0,0)');
+    const image = await send('Page.captureScreenshot', { format: 'png' });
+    await writeFile(process.env.DESK_SCREENSHOT, Buffer.from(image.data, 'base64'));
+  }
+  await set('hl-qty', '-0.01225');
+  await set('mode', 'keepHL');
+  await wait(recommended, 20000);
+  assert.equal((await row())[3], '保持 0');
+  assert.equal(await run("document.querySelector('#costs').rows[1].cells[1].textContent"), '0.00 U');
+  console.log('固定 Hype 验算', await text('#target-h'), await text('#legs'));
+  await set('sizes', '');
+  await set('mode', 'joint');
+  await wait(recommended, 20000);
+  console.log('自动联合搜索', await text('#legs'), await text('#verified-range'));
   await send('Emulation.setDeviceMetricsOverride', {
     width: 390,
     height: 844,
@@ -187,10 +250,54 @@ try {
     mobile: true
   });
   assert.ok(await run('document.documentElement.scrollWidth<=innerWidth+1'), 'mobile overflow');
+  // Independent local service keeps the user's active VS pairing untouched.
+  await send('Page.navigate', { url: b.url + '/' });
+  await wait("document.querySelector('#bridge-pair')");
+  await click('#bridge-pair');
+  await wait("document.querySelector('#bridge-script').value.length > 0");
+  const script = await val('bridge-script');
+  const config = JSON.parse(script.match(/const c=(\{.*?\});if\(location/)[1]);
+  const received = await fetch(b.url + '/api/vs-snapshot', {
+    method: 'POST',
+    headers: {
+      Origin: config.origin,
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer ' + config.token
+    },
+    body: JSON.stringify({
+      assetId: config.assetId,
+      snapshot: {
+        symbol: 'BTC-PERP',
+        timeSource: 'capture',
+        asOf: new Date().toISOString(),
+        account: {
+          equity: 10010,
+          free: 9800,
+          positions: [{ symbol: 'BTC-PERP', qty: 0.08, entry: 63000, upnl: 10 }]
+        }
+      }
+    })
+  });
+  assert.equal(received.status, 202, await received.text());
+  await wait("document.getElementById('pf-equity').value === '10010'");
+  assert.equal(await val('pf-free'), '9800');
+  assert.match(await text('#pf-meta'), /桥接/);
+  await click('#bridge-revoke');
+  await wait("document.getElementById('bridge-state').textContent.includes('已撤销')");
+  console.log('本机桥接', received.status, await text('#pf-meta'));
+  await send('Page.navigate', { url: desk + '/dev/replay' });
+  await wait("document.getElementById('event')?.textContent.includes('START')");
+  await click('#step');
+  await wait("document.getElementById('event').textContent.includes('步骤 1')");
+  console.log('独立回放页', await text('#event'));
   assert.deepEqual(b.faults, []);
   console.log('已完成', Object.keys(results).length, '项，真实 Chrome 异常 0');
 } catch (e) {
-  console.error(await text('#reason'), await text('#quotes'), await text('#preview'));
+  console.error(
+    await run(
+      "['reason','quotes','preview','risk-status','bridge-state','event'].map(k => document.getElementById(k)?.textContent).filter(Boolean).join(' | ') "
+    )
+  );
   throw e;
 } finally {
   await b.close();

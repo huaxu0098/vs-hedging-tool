@@ -1,5 +1,5 @@
 import { subscribeVestMarket } from '../src/vest-market.js';
-import { collectHype, MAINNET } from '../src/hedge/adapters.js';
+import { collectHype, subscribeHype, MAINNET } from '../src/hedge/adapters.js';
 import { readVestSpecs } from './vest-contract.js';
 
 const streams = new Map();
@@ -10,6 +10,17 @@ export async function currentMarket(asset) {
   if (!s) {
     s = { asset, errors: {}, requested: 0 };
     streams.set(asset, s);
+    s.stopHype = subscribeHype(
+      { symbol: asset },
+      (channel, book) => {
+        if (channel === 'l2Book' && (!s.wsBook || book.occurredAt >= s.wsBook.occurredAt)) s.wsBook = book;
+      },
+      (status) => {
+        s.wsConnected = status === 'connected';
+        if (!s.wsConnected) s.wsBook = null;
+      },
+      () => {}
+    );
     s.stop = subscribeVestMarket(
       asset + '-PERP',
       (q) => {
@@ -25,6 +36,7 @@ export async function currentMarket(asset) {
   clearTimeout(s.timer);
   s.timer = setTimeout(() => {
     s.stop();
+    s.stopHype();
     streams.delete(asset);
   }, 90000);
   if (!s.pending && Date.now() - s.requested >= 1000) {
@@ -57,12 +69,18 @@ export async function currentMarket(asset) {
             s.hl = {
               symbol: d.symbol,
               mark: d.mark,
+              markAt: new Date(s.requested).toISOString(),
+              bookSource: 'Hyperliquid REST · l2Book',
               asOf: d.quote.occurredAt,
               levels: d.quote.levels,
               receivedAt: d.receivedAt,
               sizeDecimals: d.sizeDecimals,
               maxLeverage: d.maxLeverage,
-              marginTiers: d.marginTables?.find(([id]) => id === d.marginTableId)?.[1]?.marginTiers,
+              marginTiers:
+                d.marginTables?.find(([id]) => id === d.marginTableId)?.[1]?.marginTiers ??
+                (Number.isInteger(d.marginTableId) && d.marginTableId > 0 && d.marginTableId < 50
+                  ? [{ lowerBound: '0', maxLeverage: d.marginTableId }]
+                  : null),
               collateralToken: d.collateralToken
             };
           }
@@ -74,5 +92,23 @@ export async function currentMarket(asset) {
       });
   }
   if (s.pending) await s.pending;
-  return { asset, pf: s.quote, spec: s.spec, hl: s.hl, errors: s.errors };
+  let hl = s.hl;
+  if (
+    hl &&
+    s.wsConnected &&
+    s.wsBook &&
+    Date.now() - Date.parse(s.wsBook.occurredAt) < 2500 &&
+    (!s.published || s.wsBook.occurredAt >= s.published.asOf)
+  ) {
+    hl = {
+      ...hl,
+      levels: s.wsBook.levels,
+      asOf: s.wsBook.occurredAt,
+      bookSource: 'Hyperliquid WebSocket · l2Book'
+    };
+  }
+  if (hl && s.published && hl.asOf < s.published.asOf)
+    hl = { ...hl, asOf: s.published.asOf, levels: s.published.levels, bookSource: s.published.bookSource };
+  if (hl) s.published = hl;
+  return { asset, pf: s.quote, spec: s.spec, specAt: s.spec?.obtainedAt, hl, errors: s.errors };
 }

@@ -345,7 +345,7 @@ export function manualVs(text, currency, receivedAt) {
     const lex = json?.account?.[k] ?? json?.quote?.[k] ?? json?.[k];
     recognized[k] = typeof lex === 'string' ? out(dec(lex.replaceAll(',', ''))) : norm(x);
   }
-  check(Object.keys(recognized).length, 'NO_RECOGNIZED_FIELDS');
+  check(Object.keys(recognized).length || Array.isArray(parsed.account?.positions), 'NO_RECOGNIZED_FIELDS');
   return {
     source: 'manual',
     symbol: json?.symbol ?? null,

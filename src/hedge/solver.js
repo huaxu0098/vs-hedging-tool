@@ -84,6 +84,19 @@ function exec(l, delta, shift = '0') {
     notional = price.times(n.abs()).times(value(l));
   return { price: out(price), fee: notional.times(ratio(l.rate)), notional };
 }
+// The displayed costs are components of the settlement calculation, already included in cash.
+export function executionDetail(l, delta, shift = '0') {
+  const fill = exec(l, delta, shift);
+  const n = dec(delta);
+  if (n.isZero()) return { fee: '0', impact: '0', price: null };
+  const best = sourcePrice({ ...l, mark: (n.gt(0) ? l.asks : l.bids)[0][0] }, shift);
+  return {
+    fee: out(fill.fee),
+    price: fill.price,
+    impact: out(dec(fill.price).minus(best).abs().times(n.abs()).times(value(l)))
+  };
+}
+
 export function projectSettlementEquity(
   book,
   market,
@@ -310,14 +323,29 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
     if (!l.open) throw Error('MARKET_CLOSED');
     if (!n.abs().mod(positive(l.step)).eq(0) || !delta.abs().mod(l.step).eq(0)) throw Error('INVALID_STEP');
     if (!delta.eq(0)) {
-      if (Array.isArray(l.capacity)) {
-        constraints.push(constraint(venue + '_AVAILABLE', l.capacity[delta.gt(0) ? 0 : 1], out(delta.abs()), l.unit));
+      if (l.leverage && n.abs().gt(qty(pos(s, m, venue)).abs())) {
+        const nominal = n.abs().times(value(l)).times(l.mark);
+        const tier = l.tiers?.findLast((t) => nominal.gte(t.from));
+        if (tier?.maxLeverage)
+          constraints.push(constraint(venue + '_TIER_LEVERAGE', tier.maxLeverage, l.leverage, '倍'));
       }
-      if (l.free != null && l.leverage) {
-        const marginChange = n.abs().minus(qty(pos(s, m, venue)).abs())
-          .times(value(l)).times(l.mark).div(positive(l.leverage));
+      if (options.currentSnapshot && l.free == null && !l.directionalFree && !Array.isArray(l.capacity))
+        constraints.push(constraint(venue + '_AVAILABLE', null, '0', 'U', 'missing'));
+      if (Array.isArray(l.capacity)) {
+        constraints.push(
+          constraint(venue + '_AVAILABLE', l.capacity[delta.gt(0) ? 0 : 1], out(delta.abs()), l.unit)
+        );
+      }
+      const available = l.directionalFree?.[delta.gt(0) ? 0 : 1] ?? l.free;
+      if (available != null && l.leverage) {
+        const marginChange = n
+          .abs()
+          .minus(qty(pos(s, m, venue)).abs())
+          .times(value(l))
+          .times(l.mark)
+          .div(positive(l.leverage));
         const needed = max(0, marginChange.plus(exec(l, out(delta)).fee));
-        constraints.push(constraint(venue + '_AVAILABLE', l.free, out(needed), 'U'));
+        constraints.push(constraint(venue + '_AVAILABLE', available, out(needed), 'U'));
       }
       constraints.push(
         constraint(venue + '_MIN_QTY', out(delta.abs()), l.minQty, l.unit),
@@ -357,7 +385,8 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
     constraint('FAILURE_RECOVERY', out(protect), p.B, 'U'),
     constraint('CASH_BEFORE_PAYOUT', out(passHL.minus(extra)), p.R, 'U')
   );
-  if (p.stage === 'funded' && round !== null) constraints.push(constraint('ROUND_GAIN', out(round), p.g, 'U'));
+  if (p.stage === 'funded' && round !== null)
+    constraints.push(constraint('ROUND_GAIN', out(round), p.g, 'U'));
   for (const [venue, q] of [
     ['pf', pfQty],
     ['hl', hlQty]
@@ -365,6 +394,44 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
     constraints.push(...validateMargin(s, m, venue, q, ['0', lines.pass, lines.fail], options.catalog));
   const stress = options.stress ? pathStress(s, m, hlQty, lines, options.stress, options.catalog) : [];
   constraints.push(...stress);
+  const modelLiq = liquidationMark(s, m, hlQty, options.catalog);
+  const pressureMark = sourcePrice(m.hl, lines.pass);
+  const currentRef = h.eq(qty(pos(s, m, 'hl'))) && !h.eq(0) ? m.hl.currentLiquidation : null;
+  const useReference =
+    currentRef != null && (modelLiq == null || dec(currentRef).minus(modelLiq).times(h).gte(0));
+  const liq = useReference ? currentRef : modelLiq;
+  if (currentRef != null) {
+    const distance = min(
+      ...['0', lines.pass, lines.fail].map((shift) =>
+        sourcePrice(m.hl, shift)
+          .minus(currentRef)
+          .times(h.gt(0) ? 1 : -1)
+      )
+    );
+    const refCheck = constraint(
+      'hl_REFERENCE_LIQ',
+      out(distance),
+      options.minPriceBuffer ?? '0',
+      '价格单位',
+      'platform'
+    );
+    if (distance.lte(0)) refCheck.status = 'fail';
+    constraints.push(refCheck);
+  }
+  const priceBuffer = liq === null ? null : out(pressureMark.minus(liq).times(h.gt(0) ? 1 : -1));
+  if (options.minPriceBuffer && nonnegative(options.minPriceBuffer).gt(0) && !h.eq(0)) {
+    // Validate the entire extra adverse price move, including a possible tier change.
+    const adverse = pressureMark.minus(dec(options.minPriceBuffer).times(h.gt(0) ? 1 : -1));
+    if (adverse.gt(0)) {
+      const shift = out(adverse.minus(m.hl.mark).div(m.hl.factor));
+      constraints.push({
+        ...validateMargin(s, m, 'hl', hlQty, ['0', lines.pass, shift], options.catalog).at(-1),
+        code: 'hl_PRICE_BUFFER'
+      });
+    } else if (h.gt(0)) {
+      constraints.push(constraint('hl_PRICE_BUFFER', priceBuffer, options.minPriceBuffer, '价格单位'));
+    }
+  }
   const checks = constraints.map((c) => c.status),
     code = checks.includes('unknown')
       ? 'MARGIN_UNVERIFIED'
@@ -374,7 +441,10 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
   return {
     code,
     stress,
-    liqMark: code === 'MARGIN_UNVERIFIED' ? null : liquidationMark(s, m, hlQty, options.catalog),
+    liqMark: liq,
+    liqSource: useReference ? '当前仓平台参考' : '全仓档位测算',
+    pressureMark: out(pressureMark),
+    priceBuffer,
     targetEquity: p.target,
     expectedUserPayout: payout,
     vsTargetQuantity: pfQty,
@@ -422,6 +492,130 @@ export function profileInputs(s, params, m) {
 function gridPoints(raw, step) {
   const x = dec(raw).abs().div(positive(step));
   return [out(x.floor().times(step)), out(x.ceil().times(step))];
+}
+// Price shifts at the cash constraints give inverse PF size boundaries when the Hype leg is fixed.
+function currentPFSizes(s, m, p, mode, theory, options) {
+  const l = m.pf,
+    unit = value(l).times(l.mark),
+    step = positive(l.step);
+  const old = qty(pos(s, m, 'pf')),
+    h = qty(pos(s, m, 'hl'));
+  const anchors = new Set();
+  const add = (q) => {
+    if (q.gt(0)) anchors.add(out(q.times(unit)));
+  };
+  add(old.abs());
+  const fixed = mode === 'keepHL';
+  const shifts = [];
+  if (!h.eq(0)) {
+    const base = projectSettlementEquity(s, m, 'hl', out(h), '0', 'net_settlement', options.catalog);
+    const slope = h.minus(h.abs().times(m.hl.rate)).times(value(m.hl)).times(m.hl.factor);
+    const failure = dec(p.B).minus(s.external).plus(p.k);
+    const success = dec(p.R).plus(p.k);
+    const bounds = [
+      [failure, p.floor],
+      [success, p.target]
+    ];
+    if (p.stage === 'funded' && s.ref != null)
+      bounds.push([
+        dec(s.ref)
+          .plus(p.g)
+          .plus(p.k)
+          .plus(s.roundIn)
+          .minus(s.roundOut)
+          .minus(s.external)
+          .minus(p.inTransit)
+          .minus(profitSplit(p.target, p.baseline, p.share).user),
+        p.target
+      ]);
+    for (const [cash, equity] of bounds) shifts.push([cash.minus(base).div(slope), equity]);
+    if (fixed) {
+      const liq = liquidationMark(s, m, out(h), options.catalog);
+      if (liq) {
+        const safeMark = dec(liq).plus(dec(options.minPriceBuffer ?? '0').times(h.gt(0) ? 1 : -1));
+        shifts.push([safeMark.minus(m.hl.mark).div(m.hl.factor), p.target]);
+      }
+    }
+    for (const hBound of [theory.min, theory.max]) {
+      if (hBound && dec(hBound).gt(0))
+        add(
+          dec(normalizeExposure(out(h), m.hl))
+            .abs()
+            .div(hBound)
+            .div(normalizeExposure('1', l))
+        );
+    }
+  }
+  for (const direction of fixed && !h.eq(0) ? [h.gt(0) ? -1 : 1] : [1, -1]) {
+    const buy = direction > 0 ? l.asks : l.bids,
+      sell = direction > 0 ? l.bids : l.asks;
+    const oldSigned = old.times(direction),
+      knots = [new D(0), oldSigned];
+    let entryDepth = new D(0),
+      exitDepth = new D(0);
+    for (const [, n] of buy) {
+      entryDepth = entryDepth.plus(n);
+      knots.push(oldSigned.plus(entryDepth));
+    }
+    for (const [, n] of sell) {
+      exitDepth = exitDepth.plus(n);
+      knots.push(exitDepth, oldSigned.minus(exitDepth));
+    }
+    const lo = max(step, oldSigned.minus(exitDepth));
+    let hi = min(exitDepth, oldSigned.plus(entryDepth));
+    if (l.leverage)
+      hi = min(
+        hi,
+        max(0, dec(p.E).minus(l.hold ?? 0))
+          .times(l.leverage)
+          .div(unit)
+      );
+    if (hi.lt(lo)) continue;
+    add(lo);
+    add(hi);
+    if (!fixed) {
+      // Cover executable prices from the smallest positive-boundary trade to observed depth.
+      const start = min(hi, max(lo, dec(p.target).minus(p.floor).abs().div(unit)));
+      add(start);
+      for (let i = 1; i < 5; i++) add(start.times(hi.div(start).pow(dec(String(i)).div(5))));
+      continue;
+    }
+    const points = [...new Set([lo, hi, ...knots].filter((q) => q.gte(lo) && q.lte(hi)).map(out))]
+      .map(dec)
+      .sort((a, b) => a.cmp(b));
+    for (const x of points) add(x);
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1],
+        b = points[i];
+      for (const [shift, line] of shifts) {
+        if (sourcePrice(l, out(shift)).lte(0)) continue;
+        const gap = (q) =>
+          projectSettlementEquity(
+            s,
+            m,
+            'pf',
+            out(q.times(direction)),
+            out(shift),
+            'net_settlement',
+            options.catalog
+          ).minus(line);
+        try {
+          const ga = gap(a),
+            gb = gap(b);
+          if (ga.times(gb).lte(0) && !ga.eq(gb)) {
+            const root = a.minus(ga.times(b.minus(a)).div(gb.minus(ga)));
+            add(root);
+            add(root.minus(step));
+            add(root.plus(step));
+          }
+        } catch (e) {
+          if (!['INVALID_PRICE_ENDPOINT', 'INSUFFICIENT_DEPTH', '数值必须大于零'].includes(e.message))
+            throw e;
+        }
+      }
+    }
+  }
+  return [...anchors];
 }
 export function solve(s, m, params, options = {}) {
   const p = profileInputs(s, params, m),
@@ -494,13 +688,27 @@ export function solve(s, m, params, options = {}) {
       ? [s.challengeTarget]
       : [...new Set(params.targets?.length ? params.targets : [p.target])];
   result.targets = targets;
-  const pfSizes =
-    params.mode === 'keepPF' ? [out(dec(oldQty).abs().times(value(m.pf)).times(m.pf.mark))] : params.mode === 'fixedPF' ? [params.pfSize] : params.sizes?.length ? params.sizes : [params.pfSize];
-  let allEnumerated = true,
+  const fixedHL = params.mode === 'keepHL';
+  const oldH = qty(pos(s, m, 'hl'));
+  const automatic = fixedHL || (options.currentSnapshot && params.mode === 'joint' && !params.sizes?.length);
+  const pfSizes = automatic
+    ? currentPFSizes(s, m, p, params.mode, theory, options)
+    : params.mode === 'keepPF'
+      ? [out(dec(oldQty).abs().times(value(m.pf)).times(m.pf.mark))]
+      : params.mode === 'fixedPF'
+        ? [params.pfSize]
+        : params.sizes?.length
+          ? params.sizes
+          : [params.pfSize];
+  let allEnumerated = !automatic,
     terminalReasons = [];
   for (const target of targets)
     for (const size of pfSizes)
-      for (const dir of params.mode === 'keepPF' ? [dec(oldQty).lt(0) ? -1 : 1] : params.directions ?? [1, -1]) {
+      for (const dir of params.mode === 'keepPF'
+        ? [dec(oldQty).lt(0) ? -1 : 1]
+        : fixedHL && !oldH.eq(0)
+          ? [oldH.gt(0) ? -1 : 1]
+          : (params.directions ?? [1, -1])) {
         if (![1, -1].includes(dir)) throw Error('INVALID_DIRECTION');
         const pp = { ...p, target },
           range = solveBudgetBounds({ ...budgetInput, target });
@@ -509,7 +717,10 @@ export function solve(s, m, params, options = {}) {
           continue;
         }
         if (nonnegative(size).eq(0)) continue;
-        const pfGrid = params.mode === 'keepPF' ? [out(dec(oldQty).abs())] : gridPoints(out(dec(size).div(value(m.pf).times(m.pf.mark))), m.pf.step);
+        const pfGrid =
+          params.mode === 'keepPF'
+            ? [out(dec(oldQty).abs())]
+            : gridPoints(out(dec(size).div(value(m.pf).times(m.pf.mark))), m.pf.step);
         for (const raw of new Set(pfGrid)) {
           if (dec(raw).isZero()) continue;
           const v = out(dec(raw).times(dir)),
@@ -530,7 +741,8 @@ export function solve(s, m, params, options = {}) {
             : null;
           const cap = maxQty?.div(m.hl.step).floor();
           const step = positive(m.hl.step);
-          if (params.mode === 'fixedHL')
+          if (fixedHL) hs.add(out(oldH.abs()));
+          else if (params.mode === 'fixedHL')
             gridPoints(out(nonnegative(params.hlSize).div(value(m.hl).times(m.hl.mark))), m.hl.step).forEach(
               (x) => hs.add(x)
             );
@@ -590,19 +802,28 @@ export function solve(s, m, params, options = {}) {
                 .sort((a, b) => a.cmp(b));
               for (let i = 1; i < ordered.length; i++)
                 for (const [shift, requirement] of [
-                  [lines.fail, dec(p.B).minus(s.external).plus(options.currentSnapshot ? p.k : 0)],
-                  [lines.pass, dec(p.R).plus(options.currentSnapshot ? p.k : 0)],
-                  ...(s.ref == null || pp.stage !== 'funded' ? [] : [[
-                    lines.pass,
-                    dec(s.ref)
-                      .plus(options.currentSnapshot ? p.k : 0)
-                      .plus(p.g)
-                      .minus(pp.stage === 'funded' ? profitSplit(target, p.baseline, p.share).user : 0)
+                  [
+                    lines.fail,
+                    dec(p.B)
                       .minus(s.external)
-                      .minus(p.inTransit)
-                      .plus(s.roundIn)
-                      .minus(s.roundOut)
-                  ]])
+                      .plus(options.currentSnapshot ? p.k : 0)
+                  ],
+                  [lines.pass, dec(p.R).plus(options.currentSnapshot ? p.k : 0)],
+                  ...(s.ref == null || pp.stage !== 'funded'
+                    ? []
+                    : [
+                        [
+                          lines.pass,
+                          dec(s.ref)
+                            .plus(options.currentSnapshot ? p.k : 0)
+                            .plus(p.g)
+                            .minus(pp.stage === 'funded' ? profitSplit(target, p.baseline, p.share).user : 0)
+                            .minus(s.external)
+                            .minus(p.inTransit)
+                            .plus(s.roundIn)
+                            .minus(s.roundOut)
+                        ]
+                      ])
                 ]) {
                   const [a, b] = ordered.slice(i - 1, i + 1);
                   const va = projectSettlementEquity(
@@ -635,12 +856,17 @@ export function solve(s, m, params, options = {}) {
                   if (dec(q).plus(step.times(off)).gte(0)) hs.add(out(dec(q).plus(step.times(off))));
           }
           for (const q of hs) {
-            if (maxQty && dec(q).gt(maxQty) && params.mode !== 'fixedHL') continue;
+            if (maxQty && dec(q).gt(maxQty) && params.mode !== 'fixedHL' && !fixedHL) continue;
             try {
               const r = evaluateCandidate(s, m, pp, v, out(dec(q).times(-dir)), options);
               r.theoreticalRatio = exact.min ?? range.min;
-              if (r.code === 'FEASIBLE' || (options.currentSnapshot && r.code === 'MARGIN_UNVERIFIED' &&
-                  r.constraints.every(c => c.status !== 'fail'))) candidates.push(r);
+              if (
+                r.code === 'FEASIBLE' ||
+                (options.currentSnapshot &&
+                  r.code === 'MARGIN_UNVERIFIED' &&
+                  r.constraints.every((c) => c.status !== 'fail'))
+              )
+                candidates.push(r);
               else rejected.push(r);
             } catch (e) {
               rejected.push({
@@ -664,15 +890,31 @@ export function solve(s, m, params, options = {}) {
   function amountMargin(r) {
     return r.initialMargin.reduce((a, b) => a.plus(b), new D(0));
   }
-  candidates.sort((a, b) => Number(b.code === 'FEASIBLE') - Number(a.code === 'FEASIBLE') || score(b).cmp(score(a)) || dec(a.hlNotional).cmp(b.hlNotional));
+  candidates.sort(
+    (a, b) =>
+      Number(b.code === 'FEASIBLE') - Number(a.code === 'FEASIBLE') ||
+      score(b).cmp(score(a)) ||
+      dec(a.hlNotional).cmp(b.hlNotional)
+  );
   result.searchComplete = allEnumerated;
   result.feasibleIntervals = [...new Set(candidates.map((r) => r.actualRatio))].map((h) => ({
     min: h,
     max: h
   }));
-  if (candidates.length) return { ...result, status: candidates[0].code === 'FEASIBLE' ? 'feasible' : 'conditional',
-    code: candidates[0].code, selected: candidates[0] };
-  if (rejected.some((r) => r.code === 'MARGIN_UNVERIFIED' && (!options.currentSnapshot || r.constraints?.every(c => c.status !== 'fail'))))
+  if (candidates.length)
+    return {
+      ...result,
+      status: candidates[0].code === 'FEASIBLE' ? 'feasible' : 'conditional',
+      code: candidates[0].code,
+      selected: candidates[0]
+    };
+  if (
+    rejected.some(
+      (r) =>
+        r.code === 'MARGIN_UNVERIFIED' &&
+        (!options.currentSnapshot || r.constraints?.every((c) => c.status !== 'fail'))
+    )
+  )
     return { ...result, code: 'MARGIN_UNVERIFIED', unresolved: ['保证金参数或资金池未验证'] };
   if (pfSizes.every((x) => dec(x).eq(0))) return { ...result, status: 'hold', code: 'HOLD' };
   return {

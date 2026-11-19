@@ -2,6 +2,7 @@ const infoURL = 'https://api-gateway.hz.vestmarkets.com/v3/exchangeInfo';
 let inflight;
 let symbols;
 let expires = 0;
+let obtainedAt;
 
 // Only public contract identities are retained; clients cannot select an upstream URL.
 export async function readVestSpecs(symbol) {
@@ -18,6 +19,7 @@ export async function readVestSpecs(symbol) {
           if (typeof item.symbol === 'string' && typeof item.quote === 'string' && item.quote.length > 0)
             parsed.set(item.symbol, item);
         }
+        obtainedAt = new Date().toISOString();
         symbols = parsed;
         expires = Date.now() + 60000;
       })().finally(() => {
@@ -25,7 +27,8 @@ export async function readVestSpecs(symbol) {
       });
     await inflight;
   }
-  return symbols.get(symbol) ?? null;
+  const spec = symbols.get(symbol);
+  return spec ? { ...spec, obtainedAt } : null;
 }
 
 export async function readVestContract(symbol) {

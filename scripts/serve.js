@@ -46,10 +46,11 @@ const server = createServer(async (request, response) => {
     }
     return;
   }
-  if (hedge && !['/api/hype-info', '/api/usd-rates'].includes(url.pathname)) {
+  if (hedge && !['/api/hype-info', '/api/usd-rates', '/api/bridge/pair', '/api/bridge/revoke', '/api/bridge/latest', '/api/vs-snapshot'].includes(url.pathname)) {
     const path = url.pathname;
     const files = {
       '/': internal ? 'fixtures/internal-hedge.html' : 'hedge.html',
+      '/dev/replay': 'fixtures/hedge-replay.html',
       '/hedge.css': 'hedge.css',
       '/vendor/decimal.mjs': 'node_modules/decimal.js/decimal.mjs'
     };
