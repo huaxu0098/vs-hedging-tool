@@ -75,6 +75,10 @@ export async function accountSnapshot(user, asset, query) {
     currentMarginCredit: !unsupported && marginMode === 'cross' && pos ? pos.margin : null,
     capacity: validCap ? cap.maxTradeSzs : null,
     fee: result(4)?.userCrossRate ? out(nonnegative(result(4).userCrossRate)) : null,
+    crossMaintenance:
+      result(0).crossMaintenanceMarginUsed == null
+        ? null
+        : out(nonnegative(String(result(0).crossMaintenanceMarginUsed))),
     used: account.used,
     withdrawable: account.withdrawable
   };

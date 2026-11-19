@@ -78,7 +78,7 @@ const ruleFields = {
   externalFx: '每单位外币的已确认 USDC 估值（选填）',
   registration: '本金中已支付的报名费（U）',
   outsideCosts: '本金之外另需收回的历史成本（U）',
-  minMaintenanceSurplus: 'Hype 压力后最低维持保证金余量（U）',
+  minMaintenanceSurplus: 'Hype 路径最低维持保证金余量（U）',
   minBuffer: '成功线到 Hype 强平线的最低价格距离',
   challengeFloor: '考核固定失败线（U）',
   challengeTarget: '考核通过净值（U）',
@@ -99,6 +99,9 @@ const ruleFields = {
   deadline: '考核实际截止时间（本地）',
   quoteSecs: '盘口有效期（秒）',
   accountSecs: '账户确认有效期（秒）',
+  quoteSkewMs: '行情最大时间差（毫秒）',
+  accountSkewSecs: '账户快照最大时间差（秒）',
+  rebalanceSteps: '最小调仓变动（两边各自数量步长，0 为关闭）',
   fx: '手工 USDC/USDT 汇率（选填）'
 };
 const legFields = {
@@ -213,7 +216,15 @@ function inputs() {
   for (const k of Object.keys(planFields)) $(k).value = r[k] ?? '';
   $('planFundedCash').parentElement.hidden = r.stage !== 'funded';
   $('asset').value = asset();
-  for (const k of ['mode', 'stage', 'B', 'R', 'externalCurrency', ...Object.keys(ruleFields)])
+  for (const k of [
+    'mode',
+    'stage',
+    'B',
+    'R',
+    'riskPreference',
+    'externalCurrency',
+    ...Object.keys(ruleFields)
+  ])
     $(k).value = r[k] ?? '';
 
   for (const side of ['pf', 'hl']) {
@@ -231,6 +242,8 @@ function inputs() {
 }
 function updateLeg(side, fields, stamp = now(), source = '手工确认') {
   const leg = local()[side];
+  if (('qty' in fields && fields.qty !== '0') || fields.otherPositions) leg.allFlatAt = null;
+  if ('orders' in fields && fields.orders?.length !== 0) leg.noOrdersAt = null;
   leg.origins ??= {};
   for (const k of Object.keys(fields)) leg.origins[k] = { at: stamp, source };
   if (
@@ -282,8 +295,23 @@ function renderRisk(result, accounts, market) {
     c
       ? result.riskMissing.length
         ? '仍需确认：' + result.riskMissing.join('、')
-        : '已按全仓维持保证金档位验算失败和成功路径。'
+        : (result.audit?.status ?? '条件估算') + ' · 已按全仓维持保证金档位计算两条基础路径。'
       : '等待可测算的候选仓位。'
+  );
+  const audit = result.audit;
+  put(
+    'cross-audit',
+    audit
+      ? [
+          audit.status,
+          '独立权益与维持保证金交点核对 ' +
+            (audit.mathMatches == null ? '无法验证' : audit.mathMatches ? '一致' : '不一致'),
+          '目标仓模型 ' + fmt(audit.model) + ' / 独立数值解 ' + fmt(audit.independent),
+          '现仓模型 ' + fmt(audit.currentModel) + ' / 平台现仓参考 ' + fmt(audit.reference),
+          '现仓维持要求 模型 ' + money(audit.currentMaintenance) + ' / 平台 ' + money(audit.apiMaintenance),
+          ...audit.gaps
+        ].join(' · ')
+      : '清算条件估算待核实 · 需要全仓权益、所有持仓、费率及维持档位'
   );
   const sources = [];
   if (market.spec)
@@ -303,11 +331,11 @@ function renderRisk(result, accounts, market) {
   const margin = (key) => money(c?.constraints.find((x) => x.code === key + '_INITIAL_MARGIN')?.required);
   renderPairs('risk-values', [
     ['VS 失败价 / 成功价', paths.join(' / ')],
-    ['Hype 在 VS 成功线的压力标记价', fmt(c?.pressureMark)],
+    ['Hype 在 VS 成功线的映射标记价', fmt(c?.pressureMark)],
     [
       'Hype 目标仓强平标记价',
       c?.liqMark
-        ? fmt(c.liqMark) + ' · ' + c.liqSource
+        ? fmt(c.liqMark) + ' · ' + c.liqSource + ' · ' + (result.audit?.status ?? '条件估算')
         : c && dec(c.hlTargetQuantity).isZero()
           ? 'Hype 空仓，无强平价'
           : c && c.buffer != null
@@ -326,15 +354,24 @@ function renderRisk(result, accounts, market) {
     ],
     ['Hype 目标仓初始保证金', money(c?.requiredInitialMargin)],
     ['Hype 目标仓当前维持保证金', money(c?.maintenanceMargin)],
-    ['压力情景标记价 / 强平价', fmt(c?.stressPressureMark) + ' / ' + fmt(c?.stressLiqMark)],
-    ['额外跳价与延迟后的清算缓冲', fmt(c?.stressPriceBuffer)],
-    ['最小余量处的权益 / 维持保证金', money(c?.stressedEquity) + ' / ' + money(c?.stressedMaintenance)],
+    ...(result.stress?.positive.length
+      ? [
+          ['已配置压力情景标记价 / 强平价', fmt(c?.stressPressureMark) + ' / ' + fmt(c?.stressLiqMark)],
+          ['已配置压力下的清算缓冲', fmt(c?.stressPriceBuffer)]
+        ]
+      : []),
+    [
+      '最小余量处的权益 / 维持保证金',
+      money(c?.stressedEquity ?? c?.baseEquity) + ' / ' + money(c?.stressedMaintenance ?? c?.baseMaintenance)
+    ],
     ['路径最低 Hype 维持保证金余量', money(c?.stressedSurplus ?? c?.buffer)],
     [
       '有效杠杆（目标名义额 ÷ Hype 权益）',
       c?.effectiveLeverage != null ? fmt(c.effectiveLeverage, 3) + '×' : '—'
     ],
-    ['目标初始保证金（含其他占用）', 'VS ' + margin('pf') + ' / Hype ' + margin('hl')]
+    ['PF 模拟初始保证金（含其他占用）', margin('pf')],
+    ['Hype 其他保证金占用', money(c?.otherInitialMargin)],
+    ['Hype 调仓后的可用抵押品（含已留存金额）', money(c?.availableAfter)]
   ]);
   const rows = ['pf', 'hl'].map((k) => {
     const t = result.costs?.[k],
@@ -418,16 +455,19 @@ function currentFrame(a, m, t) {
       worker = null;
       finish({ ...base, autoStatus: 'AUTO_PARTIAL', issues: ['后台计算失败'] });
     };
-    worker.postMessage({ version: revision, r, a, m, rates, t });
+    const priorTarget = completed?.context === context ? completed.result.advice?.pair : null;
+    worker.postMessage({ version: revision, r, a, m, rates, t, priorTarget });
   }
   // A new tick queues the latest frame without starving an in-flight search.
   // Account edits, safety gates and rule changes invalidate old answers immediately.
-  if (
-    completed?.context === context &&
-    completed.stamps.every((v) => fresh(v, t, Number(r.quoteSecs) * 1000))
-  )
+  if (completed?.key === key && completed.stamps.every((v) => fresh(v, t, Number(r.quoteSecs) * 1000)))
     return { ...completed.result, refreshPending: completed.key !== key };
-  return { ...base, autoStatus: 'AUTO_PARTIAL', issues: ['正在检查双边合法仓位与候选杠杆'] };
+  return {
+    ...base,
+    autoStatus: 'AUTO_PARTIAL',
+    refreshPending: true,
+    issues: ['当前快照正在重算，仓位调整建议已暂停']
+  };
 }
 const autoLabels = {
   AUTO_FEASIBLE: '有可行仓位',
@@ -437,6 +477,173 @@ const autoLabels = {
   AUTO_DEADLINE_EXIT_REQUIRED: '考核已到期，待退出',
   AUTO_HOLD: '保持现仓'
 };
+function updateDeadline() {
+  if (r.stage !== 'challenge') return put('deadline-clock', '出金阶段');
+  const end = Date.parse(r.deadline);
+  if (!Number.isFinite(end)) return put('deadline-clock', '实际截止时间未配置');
+  const seconds = Math.max(0, Math.ceil((end - Date.now()) / 1000));
+  const h = Math.floor(seconds / 3600),
+    m = Math.floor((seconds % 3600) / 60),
+    s = seconds % 60;
+  put(
+    'deadline-clock',
+    clock(r.deadline) +
+      (seconds ? ' · 剩余 ' + [h, m, s].map((v) => String(v).padStart(2, '0')).join(':') : ' · 已到期')
+  );
+}
+setInterval(updateDeadline, 1000);
+const frameCards = document.querySelectorAll(
+  '.desk-summary article, .desk-ratios, .dual-plans > div, [aria-labelledby="result-heading"], #risk, #cash-results'
+);
+for (const el of frameCards) {
+  const stamp = document.createElement('small');
+  stamp.className = 'frame-key';
+  (el.id === 'cash-results' ? el.parentElement : el).append(stamp);
+}
+function renderConditions(result, a, m, plan) {
+  put(
+    'funding-banner',
+    plan
+      ? '预设资金规划 · 账户权益、空仓与抵押品按规划条件计算'
+      : '当前账户快照 · 权益与可用抵押品按平台读取或手工确认'
+  );
+  $('funding-banner').classList.toggle('account', !plan);
+  put('margin-detail-title', plan ? 'Hype 规划初始保证金' : 'Hype 真实账户 · 目标初始保证金');
+  const actualStress = !!result.stress?.positive.length;
+  const scenario = actualStress ? '已配置压力情景' : '基础情景（未计额外压力）';
+  put('lev-equity-heading', scenario + '权益');
+  put('candidate-surplus-heading', scenario + '最低维持余量');
+  put('candidate-cash-heading', scenario + '最差个人现金');
+  const t = result.timing;
+  const age = (n) => (n == null ? '未知' : (n / 1000).toFixed(1) + ' 秒');
+  put(
+    'clock-skew',
+    t
+      ? 'VS 盘口 ' +
+          (m.pf?.asOf ?? '未取得') +
+          '，年龄 ' +
+          age(t.quoteAges.pf) +
+          ' / Hype 盘口 ' +
+          (m.hl?.asOf ?? '未取得') +
+          '，年龄 ' +
+          age(t.quoteAges.hl) +
+          ' · 盘口与标记最大时差 ' +
+          (t.quoteSkew ?? '—') +
+          ' / 允许 ' +
+          t.quoteLimit +
+          ' 毫秒 · ' +
+          (plan
+            ? '预设账户无实时快照'
+            : 'VS 权益 ' +
+              (fieldTime(a.pf, 'equity') ?? '未取得') +
+              '，年龄 ' +
+              age(t.accountAges.pf) +
+              ' / Hype 权益 ' +
+              (fieldTime(a.hl, 'equity') ?? '未取得') +
+              '，年龄 ' +
+              age(t.accountAges.hl) +
+              ' · 账户字段最大时差 ' +
+              age(t.accountSkew) +
+              ' / 允许 ' +
+              age(t.accountLimit))
+      : ''
+  );
+  put(
+    'size-title',
+    result.maximum && !result.maximum.complete ? '已找到的仓位方案 · 最大值待验证' : '最大可行方案'
+  );
+  put(
+    'cash-title',
+    result.conservative && !result.conservative.complete ? '现金优先候选 · 最优性待验证' : '保守推荐方案'
+  );
+  const diff = result.comparison;
+  put(
+    'plan-tradeoff',
+    diff
+      ? '选择现金优先方案，PF 名义仓位减少 ' +
+          money(diff.pfReduction) +
+          '（' +
+          pct(diff.reductionRatio) +
+          '），成功端 Hype 现金变化 ' +
+          signedMoney(diff.successGain) +
+          '，最差个人现金缓冲变化 ' +
+          signedMoney(diff.worstGain) +
+          '。'
+      : '等待同一快照的两套方案'
+  );
+  put(
+    'preference-info',
+    (r.riskPreference ?? '0') +
+      '% · 当前方案最差个人现金留存下限 ' +
+      money(result.preference?.floor) +
+      '；失败保护、保证金与清算约束继续生效。'
+  );
+  $('riskPreference').disabled = r.mode !== 'auto';
+  const h = result.advice;
+  put(
+    'hysteresis',
+    h
+      ? (h.source === 'existing'
+          ? '变化低于最小调仓阈值，建议保持现仓'
+          : h.source === 'previous'
+            ? '变化低于最小调仓阈值，沿用已复核的上一目标'
+            : '按本帧目标计算差额') +
+          ' · 阈值 ' +
+          h.threshold +
+          ' 个数量步长 · 建议目标 PF ' +
+          signed(h.pair[0]) +
+          ' / Hype ' +
+          signed(h.pair[1]) +
+          ' ' +
+          asset() +
+          ' · 建议档位 ' +
+          (h.leverage ? h.leverage + '×' : '无敞口')
+      : ''
+  );
+  const missing = $('missing-list'),
+    fields = result.missingFields ?? [];
+  const key = JSON.stringify([plan, fields]);
+  if (missing.dataset.key !== key) {
+    missing.dataset.key = key;
+    missing.replaceChildren(
+      ...fields.map(({ id, label }) => {
+        const link = document.createElement('a');
+        let el = $(id);
+        if (plan && (id === 'hl-source' || el?.closest('#snapshot'))) el = $('funding-view');
+        if (!el) el = $('rules');
+        link.href = '#' + el.id;
+        link.textContent = label;
+        link.onclick = (event) => {
+          event.preventDefault();
+          for (let n = el; n; n = n.parentElement) if (n.tagName === 'DETAILS') n.open = true;
+          el.scrollIntoView({ block: 'center' });
+          if (!el.matches('input,select,button')) el.tabIndex = -1;
+          el.focus({ preventScroll: true });
+        };
+        return link;
+      })
+    );
+  }
+  const tr = result.trace;
+  const stamp = tr
+    ? '行情 ' +
+      tr.marketId.slice(0, 6) +
+      ' · 账户 ' +
+      tr.accountsId.slice(0, 6) +
+      ' · 规则 ' +
+      tr.rulesId.slice(0, 6) +
+      ' · ' +
+      tr.model +
+      ' / ' +
+      tr.id.slice(0, 8)
+    : '等待同帧核算';
+  for (const el of document.querySelectorAll('.frame-key'))
+    if (el.textContent !== stamp) {
+      el.textContent = stamp;
+      el.title = tr ? [tr.marketId, tr.accountsId, tr.rulesId, tr.model, tr.id].join(' / ') : stamp;
+    }
+  updateDeadline();
+}
 function render() {
   let m = market();
   const a = { pf: account('pf'), hl: account('hl') };
@@ -457,16 +664,19 @@ function render() {
   }
   const c = result.candidate,
     b = result.range,
-    stale = result.issues.some((x) => /过期|请求失败|断开|未连接/.test(x));
+    stale = result.issues.some((x) => /过期|请求失败|断开|未连接|熔断/.test(x));
   const status = result.autoStatus
     ? (result.flatHold ? '无可行非零仓位，保持空仓' : (result.dataState ?? autoLabels[result.autoStatus])) +
       ' · ' +
       (result.issues[0] ?? result.notices.at(-1) ?? '按当前资金和保证金规则计算')
     : c
       ? '按当前现金规则计算，' +
-        (c.code === 'MARGIN_UNVERIFIED' ? '保证金条件待验证' : '已验算所设保证金条件')
+        (c.code === 'MARGIN_UNVERIFIED' || result.audit?.gaps.length
+          ? '保证金条件估算'
+          : '已验算所设保证金条件')
       : result.issues[0] || result.notices.at(-1) || '等待当前快照';
   const plan = planning();
+  renderConditions(result, a, m, plan);
   const leverage = c?.candidateLeverage;
   const configured =
     useAPI() && !a.hl.error && fresh(a.hl.at, Date.now(), Number(r.accountSecs) * 1000)
@@ -508,7 +718,7 @@ function render() {
             higher.leverage +
             '× 仅释放初始保证金 ' +
             money(out(dec(c.requiredInitialMargin).minus(higher.initial))) +
-            '；两端现金、维持保证金、压力后权益与强平距离均相同。'
+            '；两端现金、维持保证金、情景权益与强平距离均相同。'
       ]
         .filter(Boolean)
         .join(' ')
@@ -528,9 +738,13 @@ function render() {
       x.leverage ? x.leverage + '×' : '空仓',
       money(x.initial),
       money(x.maintenance),
-      money(x.stressedEquity),
+      money(x.stressedEquity ?? x.baseEquity),
       money(x.surplus),
-      !x.leverage ? '空仓' : x.liquidation == null ? '无正价交点' : fmt(x.liquidation),
+      !x.leverage
+        ? '空仓'
+        : (x.liquidation == null ? '无正价交点' : fmt(x.liquidation)) +
+          ' · ' +
+          (result.audit?.status ?? '条件估算'),
       x.status === 'pass'
         ? x.leverage === leverage
           ? '通过所设条件 · 最低可行'
@@ -594,6 +808,8 @@ function render() {
     el.focus();
     el.scrollIntoView({ block: 'center' });
   };
+  for (const button of $('separate-confirm').children)
+    button.disabled = planning() || (useAPI() && button.id.startsWith('confirm-hl-'));
   $('confirm-flat').disabled =
     useAPI() &&
     (!a.hl.at ||
@@ -641,7 +857,9 @@ function render() {
     result.autoStatus
       ? (plan ? '预设规划 · ' : '') + msg
       : c
-        ? (c.code === 'FEASIBLE' ? '当前规则已验算' : '条件测算 · 保证金待验证') +
+        ? (c.code === 'FEASIBLE' && !result.audit?.gaps.length
+            ? '当前规则已验算'
+            : '条件测算 · 保证金待验证') +
           ' · ' +
           coverage +
           ' · 两种现金结果均假设先触及对应 VS 边界'
@@ -660,10 +878,32 @@ function render() {
           ? '保持现仓'
           : '挂单已覆盖差额'
         : action(adj.projected ?? result.qty[key], adj.remaining);
+    if (result.advice?.source === 'existing') hint = '变化低于最小调仓阈值，建议保持';
+    if (result.advice?.source === 'previous') hint = '沿用经本帧复核的调整 · ' + hint;
     put(key + '-summary', q == null ? '—' : (q.isZero() ? '空仓 ' : q.gt(0) ? '多 ' : '空 ') + money(amount));
     put(key + '-change', q == null ? '' : q.abs().toString() + ' ' + asset() + ' · ' + hint);
   }
   const projection = c ?? result.heldCash;
+  const bridge = result.bridge;
+  put(
+    'cash-bridge',
+    bridge
+      ? 'Hype 当前 ' +
+          money(bridge.start) +
+          '，至失败线标记盈亏 ' +
+          signedMoney(bridge.move) +
+          '，调仓及平仓成交价影响 ' +
+          signedMoney(out(dec(bridge.entryFill).plus(bridge.exitFill))) +
+          '，调仓费 ' +
+          money(bridge.entryFee) +
+          '、平仓费 ' +
+          money(bridge.exitFee) +
+          '、额外摩擦 ' +
+          money(bridge.friction) +
+          '，预计结算 ' +
+          money(bridge.settled)
+      : ''
+  );
   put('protect-funds', money(result.protect));
   put(
     'margin-funds',
@@ -709,32 +949,38 @@ function render() {
   const stressNote =
     r.stage === 'funded'
       ? '两日考核压力仅用于考核阶段。'
-      : !r.movePct
-        ? '未验证两日触线可达性。'
-        : !result.pressure
-          ? '等待可计算的当前快照。'
-          : '条件情景：假设两日有利变动 ' +
-            r.movePct +
-            '%。' +
-            [1, -1]
-              .map(
-                (d) =>
-                  (d === 1 ? '做多' : '做空') +
-                  '至少需 ' +
-                  money(result.pressure[d]?.amount) +
-                  '（' +
-                  result.pressure[d]?.source +
-                  '）'
-              )
-              .join('，') +
-            (result.maximum?.amount
-              ? '。' +
-                (result.maximum.complete ? '最大可行 PF ' : '本次已验最大 PF ') +
-                money(result.maximum.amount)
-              : '') +
-            (c
-              ? '。所选 PF ' + money(c.vsNotional) + '，条件净结算权益 ' + money(result.stressedEquity) + '。'
-              : '');
+      : !result.deadline
+        ? '实际截止时间未配置，两日可达性未验证。'
+        : !r.movePct
+          ? '未验证两日触线可达性。'
+          : !result.pressure
+            ? '等待可计算的当前快照。'
+            : '条件情景：假设实际截止前走完所填幅度，不按剩余时间外推波幅。有利变动 ' +
+              r.movePct +
+              '%。' +
+              [1, -1]
+                .map(
+                  (d) =>
+                    (d === 1 ? '做多' : '做空') +
+                    '至少需 ' +
+                    money(result.pressure[d]?.amount) +
+                    '（' +
+                    result.pressure[d]?.source +
+                    '）'
+                )
+                .join('，') +
+              (result.maximum?.amount
+                ? '。' +
+                  (result.maximum.complete ? '当前网格内最大可行 PF ' : '本次已验 PF 候选 ') +
+                  money(result.maximum.amount)
+                : '') +
+              (c
+                ? '。所选 PF ' +
+                  money(c.vsNotional) +
+                  '，条件净结算权益 ' +
+                  money(result.stressedEquity) +
+                  '。'
+                : '');
   put('two-day', stressNote);
   put(
     'external-value',
@@ -763,10 +1009,10 @@ function render() {
       pct(c.actualRatio),
       c.candidateLeverage ? c.candidateLeverage + '×' : '空仓',
       money(c.requiredInitialMargin),
-      money(c.stressedSurplus),
+      money(c.stressedSurplus ?? c.baseSurplus),
       money(c.worstCash),
       fmt(c.priceBuffer),
-      money(c.initialMargin.reduce((sum, x) => sum.plus(x), dec('0')).toString()),
+      money(c.initialMargin[0]),
       '基础约束通过 · 失败端 ' +
         money(c.failureCash) +
         ' / 成功端 Hype ' +
@@ -783,10 +1029,10 @@ function render() {
         pct(bad.candidate?.actualRatio),
         bad.candidate?.candidateLeverage ? bad.candidate.candidateLeverage + '×' : '—',
         money(bad.candidate?.requiredInitialMargin),
-        money(bad.candidate?.stressedSurplus),
+        money(bad.candidate?.stressedSurplus ?? bad.candidate?.baseSurplus),
         money(bad.candidate?.worstCash),
         fmt(bad.candidate?.priceBuffer),
-        '—',
+        money(bad.candidate?.initialMargin?.[0]),
         bad.why +
           (bad.check
             ? '，实算 ' +
@@ -816,8 +1062,10 @@ function render() {
               directional(pick.hlTargetQuantity, pick.hlNotional),
             '对冲比例 ' +
               pct(pick.actualRatio) +
-              ' · 杠杆 ' +
-              (pick.candidateLeverage ? pick.candidateLeverage + '×' : '空仓'),
+              ' · 候选杠杆 ' +
+              (pick.candidateLeverage ? pick.candidateLeverage + '×' : '空仓') +
+              ' · 当前账户设置 ' +
+              (configured ? configured + '×' : '未核实'),
             '失败端个人合计 ' +
               money(pick.failureCash) +
               ' / 成功端到账前 Hype ' +
@@ -826,7 +1074,10 @@ function render() {
               money(pick.worstCash) +
               ' · Hype 初始保证金 ' +
               money(pick.requiredInitialMargin),
-            plan.complete ? '已证实为当前条件下的最优解' : '本次搜索已找到的候选，最优性待验证',
+            plan.complete
+              ? '当前输入、行情快照、已配置约束与已枚举数量网格内最优'
+              : '本次搜索已找到的候选，最优性待验证',
+            plan.audit?.status + (plan.audit?.gaps?.length ? ' · ' + plan.audit.gaps.join('、') : ''),
             id === 'cash-plan' && plan.unverified?.length ? '条件方案 · ' + plan.unverified.at(-1) : ''
           ]
             .filter(Boolean)
@@ -879,7 +1130,7 @@ function render() {
     'best-two',
     [
       maximum?.amount
-        ? (maximum.complete ? '最大可行 PF ' : '已找到最大 PF ') +
+        ? (maximum.complete ? '当前网格内最大可行 PF ' : '已找到的 PF 候选 ') +
           directional(maximum.candidate.vsTargetQuantity, maximum.amount) +
           ' / Hype ' +
           directional(maximum.candidate.hlTargetQuantity, maximum.candidate.hlNotional) +
@@ -944,13 +1195,28 @@ function render() {
   put(
     'auto-search',
     result.search
-      ? (result.search.complete ? '已完成合法网格最优性检查' : '搜索未穷尽，仅展示已验证候选') +
+      ? (result.search.complete
+          ? c
+            ? '当前输入与配置、五档深度、双边合法数量和杠杆网格内最优'
+            : '当前输入与配置的合法网格搜索完成'
+          : '搜索未穷尽，仅展示已验证候选') +
           ' · 精算 ' +
           result.search.evaluations +
           ' 组 · ' +
           result.autoStatus +
           ' · 版本 ' +
-          result.stateVersion
+          result.stateVersion +
+          ' · ' +
+          (result.domain ?? [])
+            .map(
+              (x) =>
+                (x.pfSide > 0 ? 'PF 多/Hype 空' : 'PF 空/Hype 多') +
+                '：PF ' +
+                (x.pf ? x.pf.min + '–' + x.pf.max + '（步长 ' + x.pf.step + '）' : '空集') +
+                ' / Hype ' +
+                (x.hl ? x.hl.min + '–' + x.hl.max + '（步长 ' + x.hl.step + '）' : '空集')
+            )
+            .join(' ｜ ')
       : (result.autoStatus ?? '')
   );
   if (result.flatHold)
@@ -977,14 +1243,19 @@ function render() {
     result.currentH == null
       ? result.qty.pf === '0'
         ? result.qty.hl === '0'
-          ? '双边空仓'
+          ? '不适用 / 双边无现仓'
           : 'VS 空仓 · 比例无定义'
         : '—'
       : pct(result.currentH) + (result.sameDirection ? ' · 同向敞口' : '')
   );
   put('range', b?.min == null ? '—' : dec(b.max).lt(b.min) ? '无交集' : pct(b.min) + ' – ' + pct(b.max));
   const budgetOnly =
-    !c && !result.heldCash && b?.selected && !result.notices.some((n) => /已到期|待到账|待平台/.test(n));
+    !stale &&
+    !result.refreshPending &&
+    !c &&
+    !result.heldCash &&
+    b?.selected &&
+    !result.notices.some((n) => /已到期|待到账|待平台/.test(n));
   put(
     'target-h',
     c
@@ -1020,7 +1291,7 @@ function render() {
   put(
     'basis',
     r.mode === 'auto'
-      ? '先比较可行 PF 名义额，再比较最差情景剩余现金、强平缓冲、较低的保证金占用及较低的杠杆。'
+      ? '在现金留存与风险约束内比较 PF 仓位、最差现金和强平缓冲，同等风险选最低可行杠杆。'
       : '固定所选一侧的已成交仓位，在可行候选中优先成功端剩余现金。'
   );
   put(
@@ -1605,7 +1876,15 @@ async function pollBridge() {
 setInterval(pollBridge, 1500);
 $('paste').oninput = invalidatePreview;
 $('paste-kind').onchange = invalidatePreview;
-for (const k of ['mode', 'stage', 'B', 'R', 'externalCurrency', ...Object.keys(ruleFields)]) {
+for (const k of [
+  'mode',
+  'stage',
+  'B',
+  'R',
+  'riskPreference',
+  'externalCurrency',
+  ...Object.keys(ruleFields)
+]) {
   $(k).addEventListener('input', () => {
     r[k] = $(k).value.trim();
     r.editedAt = now();
@@ -1674,6 +1953,8 @@ $('funding-view').onchange = () => {
   cancelAuto();
   invalidatePreview();
   save();
+  manualPrices = null;
+  $('quote-source').value = 'api';
   inputs();
   render();
   refreshAccount();
@@ -1696,45 +1977,87 @@ $('confirm-balances').onclick = () => {
     put('flat-feedback', '请先填写两边实际权益与可用保证金，再确认。');
   }
 };
-$('confirm-flat').onclick = () => {
-  const stamp = now();
-  const sides = useAPI() ? ['pf'] : ['pf', 'hl'];
+// Each fact is confirmed independently. A full-account declaration may supersede
+// stale records on other symbols, but a fresh conflicting position/order needs review.
+const factNames = { qty: '全账户空仓', orders: '全账户无挂单', marginMode: '使用全仓' };
+function confirmFacts(sides, fields) {
+  if (planning()) return;
+  const stamp = now(),
+    ttl = Number(r.accountSecs) * 1000;
   for (const side of sides) {
+    if (side === 'hl' && useAPI()) return;
     const conflict = Object.values(state.assets).some((pair) => {
       const v = pair[side];
       return (
         v &&
-        (v.otherPositions ||
-          (v.qty && Number(v.qty) !== 0 && fresh(v.qtyAt, Date.now(), Number(r.accountSecs) * 1000)) ||
-          (v.orders?.length && fresh(v.origins?.orders?.at, Date.now(), Number(r.accountSecs) * 1000)))
+        ((fields.includes('qty') &&
+          ((v.otherPositions && fresh(v.origins?.otherPositions?.at ?? v.qtyAt, Date.now(), ttl)) ||
+            (Number(v.qty) && fresh(v.qtyAt, Date.now(), ttl)))) ||
+          (fields.includes('orders') && v.orders?.length && fresh(v.origins?.orders?.at, Date.now(), ttl)))
       );
     });
-    if (conflict) {
-      put('flat-feedback', '现有快照含持仓或挂单。请先在对应品种核对并更新数量。');
-      return;
-    }
+    if (conflict) return put('flat-feedback', '当前快照有持仓或挂单，请先核对对应品种。');
   }
   for (const side of sides) {
-    // Explicit account-wide confirmation also supersedes stale quantities on other assets.
     for (const [symbol, pair] of Object.entries(state.assets)) {
       const v = pair[side];
-      if (symbol !== asset() && v) {
-        Object.assign(v, { qty: '0', qtyAt: stamp, orders: [], anchor: null });
-        v.origins ??= {};
-        for (const k of ['qty', 'orders']) v.origins[k] = { at: stamp, source: '全账户空仓确认' };
+      if (symbol === asset() || !v) continue;
+      v.origins ??= {};
+      for (const field of fields.filter((k) => k !== 'marginMode')) {
+        v[field] = field === 'qty' ? '0' : [];
+        v.origins[field] = { at: stamp, source: '确认' + factNames[field] };
+        if (field === 'qty') {
+          v.qtyAt = stamp;
+          v.anchor = null;
+          v.otherPositions = false;
+        }
       }
     }
-    updateLeg(
-      side,
-      { qty: '0', orders: [], otherHold: '0', marginMode: 'cross', flatConfirmedAt: stamp },
-      stamp,
-      '手工确认全账户空仓'
-    );
+    for (const field of fields) {
+      const value = field === 'qty' ? '0' : field === 'orders' ? [] : 'cross';
+      updateLeg(side, { [field]: value }, stamp, '手工确认' + factNames[field]);
+      if (field === 'qty') {
+        local()[side].allFlatAt = stamp;
+        local()[side].otherPositions = false;
+      }
+      if (field === 'orders') local()[side].noOrdersAt = stamp;
+    }
+    const v = local()[side];
+    if (
+      fresh(v.allFlatAt, Date.now(), ttl) &&
+      fresh(v.noOrdersAt, Date.now(), ttl) &&
+      v.qty === '0' &&
+      v.orders?.length === 0
+    ) {
+      const confirmed = v.allFlatAt < v.noOrdersAt ? v.allFlatAt : v.noOrdersAt;
+      updateLeg(side, { flatConfirmedAt: confirmed, otherHold: '0' }, confirmed, '全账户持仓及挂单均已核对');
+    }
   }
-  put('flat-feedback', '已确认全账户空仓与无挂单 · ' + clock(stamp));
+  put(
+    'flat-feedback',
+    '已确认 ' +
+      sides.map((s) => (s === 'pf' ? 'VS' : 'Hype')).join(' / ') +
+      ' ' +
+      fields.map((k) => factNames[k]).join('、') +
+      ' · ' +
+      clock(stamp)
+  );
   inputs();
   save();
   render();
+}
+for (const side of ['pf', 'hl'])
+  for (const field of Object.keys(factNames)) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = 'confirm-' + side + '-' + field;
+    btn.textContent = (side === 'pf' ? 'VS ' : 'Hype ') + factNames[field];
+    btn.onclick = () => confirmFacts([side], [field]);
+    $('separate-confirm').append(btn);
+  }
+$('confirm-flat').onclick = () => {
+  if (planning() || !window.confirm('确认刚刚核对两边全账户空仓、无挂单，并且均使用全仓模式？')) return;
+  confirmFacts(useAPI() ? ['pf'] : ['pf', 'hl'], Object.keys(factNames));
 };
 window.addEventListener('storage', (event) => {
   if (event.key !== key) return;

@@ -9,6 +9,8 @@ import {
   estimateFill
 } from './math.js';
 import { validLeverageCap } from './leverage.js';
+import { auditCross } from './cross-check.js';
+import { adjustmentTarget, comparePlans, failureBridge } from './optimization.js';
 import { solveAuto } from './auto.js';
 import { calculationTrace } from './trace.js';
 import {
@@ -56,6 +58,10 @@ export const rules = {
   delayBps: '',
   fundingDebit: '',
   quoteSecs: '5',
+  quoteSkewMs: '3000',
+  accountSkewSecs: '120',
+  rebalanceSteps: '2',
+  riskPreference: '0',
   accountSecs: '300'
 };
 
@@ -231,7 +237,7 @@ export function reason(code) {
       FUNDED_FAILED: 'VS 已触及出金户失败线',
       REFERENCE_REACHED: '已到提款参考点，核对可申领金额',
       CHALLENGE_PASS_PENDING_SETTLEMENT: '考核目标已到，待平台确认结算',
-      hl_STRESS_SURPLUS: 'Hype 压力后最低维持保证金余量',
+      hl_STRESS_SURPLUS: 'Hype 路径最低维持保证金余量',
       hl_ORDER_LEVERAGE: '挂单在新档位的资金占用待确认',
       hl_SWITCH_TIER: '变更杠杆前的原仓档位上限',
       hl_SWITCH_MARGIN: '变更杠杆时原仓初始保证金',
@@ -298,6 +304,21 @@ function heldOutcomes(book, market, p, pf, hl) {
     if (key === 'fail') {
       cash.failureCash = out(settled);
       cash.failureHypeCash = out(settled.minus(book.external));
+      cash.bridge = failureBridge(
+        book.hl,
+        {
+          hlTargetQuantity: hl,
+          hlDeltaQuantity: '0',
+          lines: { fail: shift },
+          externalReceived: book.external
+        },
+        market,
+        {
+          entry: executionDetail(market.hl, '0'),
+          fail: executionDetail(market.hl, out(dec(hl).neg()), shift)
+        },
+        p.k
+      );
     } else {
       cash.cashBeforePayout = out(settled.plus(p.inTransit));
       cash.hlBeforePayout = out(settled.minus(book.external));
@@ -311,7 +332,35 @@ function heldOutcomes(book, market, p, pf, hl) {
 
 export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(), options = {}) {
   const result = computeCurrent(r, a, data, fxData, now, options);
-  if (!result.needsSearch) result.trace = calculationTrace(r, a, data, fxData, now, options.cashSearchBudget);
+  result.missingFields = [];
+  const add = (id, label) => {
+    if (!result.missingFields.some((x) => x.label === label)) result.missingFields.push({ id, label });
+  };
+  if (result.autoStatus === 'AUTO_PARTIAL' || result.autoStatus === 'AUTO_DATA_BLOCKED') {
+    for (const gap of result.inputGaps ?? []) add(gap.id, gap.text);
+    for (const [field, label] of Object.entries(stressFields))
+      if (!specified(r[field]) || dec(r[field]).isZero())
+        add(field, label + (!specified(r[field]) ? '未配置' : '采用零压力假设'));
+    if (r.stage === 'challenge' && !result.deadline) add('deadline', '考核实际截止时间未配置');
+    for (const label of [...result.issues, ...(result.unverified ?? [])]) {
+      if (/压力未配置|零压力假设/.test(label) || result.inputGaps?.some((g) => g.text === label)) continue;
+      const id = /杠杆|费率|额度/.test(label)
+        ? 'hl-source'
+        : /清算|全仓|持仓|挂单/.test(label)
+          ? 'snapshot'
+          : /规划/.test(label)
+            ? 'funding-view'
+            : /截止/.test(label)
+              ? 'deadline'
+              : /盘口|行情|报价|汇率|熔断/.test(label)
+                ? 'connections'
+                : /基准/.test(label)
+                  ? 'ref'
+                  : 'result-heading';
+      add(id, label);
+    }
+  }
+  if (!result.needsSearch) result.trace = calculationTrace(r, a, data, fxData, now, options);
   return result;
 }
 
@@ -343,6 +392,60 @@ function computeCurrent(r, a, data, fxData, now, options) {
     !data.errors?.[k];
   const usable = (k, field) => !a[k].error && (planning || fresh(fieldTime(a[k], field), now, ttl));
   result.inputGaps = [];
+  const quotes = ['pf', 'hl']
+    .flatMap((k) => [data[k]?.asOf, data[k]?.markAt])
+    .filter(Boolean)
+    .map(Date.parse);
+  const stamps = planning
+    ? []
+    : ['pf', 'hl']
+        .flatMap((k) =>
+          [
+            'equity',
+            'qty',
+            'free',
+            'orders',
+            'marginMode',
+            'otherHold',
+            'leverage',
+            'liquidation',
+            'fee',
+            'maxQty',
+            'capacity'
+          ]
+            .filter((field) => specified(a[k][field]) || (field === 'free' && a[k].directionalFree))
+            .map((field) => fieldTime(a[k], field))
+        )
+        .filter(Boolean)
+        .map(Date.parse);
+  const span = (times) =>
+    times.length && times.every(Number.isFinite) ? Math.max(...times) - Math.min(...times) : null;
+  result.timing = {
+    quoteSkew: span(quotes),
+    accountSkew: span(stamps),
+    quoteLimit: nonnegative(r.quoteSkewMs ?? rules.quoteSkewMs).toNumber(),
+    accountLimit: nonnegative(r.accountSkewSecs ?? rules.accountSkewSecs)
+      .times(1000)
+      .toNumber(),
+    quoteAges: Object.fromEntries(
+      ['pf', 'hl'].map((k) => [k, data[k]?.asOf ? now - Date.parse(data[k].asOf) : null])
+    ),
+    accountAges: Object.fromEntries(
+      ['pf', 'hl'].map((k) => [
+        k,
+        !planning && fieldTime(a[k], 'equity') ? now - Date.parse(fieldTime(a[k], 'equity')) : null
+      ])
+    )
+  };
+  if (result.timing.quoteSkew > result.timing.quoteLimit)
+    issues.push('双边盘口或标记时间差超过阈值，行情熔断');
+  if (result.timing.accountSkew > result.timing.accountLimit) issues.push('账户快照时间差超过阈值，账户熔断');
+  if ((a.pf.sourceKind === 'plan') !== (a.hl.sourceKind === 'plan'))
+    issues.push('账户来源混用，禁止跨模式计算');
+  result.deadline =
+    !funded && r.deadline && Number.isFinite(Date.parse(r.deadline))
+      ? new Date(r.deadline).toISOString()
+      : null;
   result.stress = stressCoverage(r);
   for (const k of ['pf', 'hl']) {
     const name = k === 'pf' ? 'VS' : 'Hype';
@@ -522,6 +625,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
   if (a.hl.unsupported) issues.push('Hype 资金池模式未验证');
   if (
     market &&
+    !issues.some((v) => /熔断|来源混用/.test(v)) &&
     quoteOK('pf') &&
     quoteOK('hl') &&
     !data.errors?.spec &&
@@ -570,7 +674,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
   if (r.mode === 'auto' && expired) result.autoStatus = 'AUTO_DEADLINE_EXIT_REQUIRED';
   else if (
     r.mode === 'auto' &&
-    !issues.some((x) => /过期|缺失|未录入|请录入|断开|休市|确认时间|连接失败/.test(x)) &&
+    !issues.some((x) => /过期|缺失|未录入|请录入|断开|休市|确认时间|连接失败|熔断|来源混用/.test(x)) &&
     !terminal &&
     !pending
   )
@@ -643,7 +747,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
     g: r.g,
     k: r.k,
     objective: 'size',
-    movePct: specified(r.movePct) ? out(nonnegative(r.movePct)) : null
+    movePct: result.deadline && specified(r.movePct) ? out(nonnegative(r.movePct)) : null
   };
   const checks = {
     currentSnapshot: true,
@@ -653,7 +757,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
     minPriceBuffer: out(nonnegative(r.minBuffer ?? '0')),
     now: new Date(now).toISOString()
   };
-  if ([r.jumpBps, r.delayBps, r.fundingDebit].some((x) => nonnegative(x || '0').gt(0)))
+  if ([r.adverseBps, r.jumpBps, r.delayBps, r.fundingDebit].some((x) => nonnegative(x || '0').gt(0)))
     checks.stress = {
       jumpBps: r.jumpBps || '0',
       basisBps: r.adverseBps || '0',
@@ -729,8 +833,41 @@ function computeCurrent(r, a, data, fxData, now, options) {
       return result;
     }
   }
-  const solved =
+  if (options.searchBudget != null) checks.searchBudget = options.searchBudget;
+  let solved =
     r.mode === 'auto' ? solveAuto(book, market, params, checks) : solve(book, market, params, checks);
+  if (r.mode === 'auto' && solved.selected) {
+    const size = solved;
+    const cash = solveAuto(
+      book,
+      market,
+      { ...params, objective: 'cash' },
+      { ...checks, seeds: size.candidates, searchBudget: options.cashSearchBudget ?? 1400 }
+    );
+    const creditKnown = hl === '0' || market.hl.currentMarginCredit != null;
+    result.domain = size.domain;
+    result.pressure = size.pressure;
+    result.maximum = {
+      amount: size.selected.vsNotional,
+      candidate: size.selected,
+      complete: size.searchComplete && creditKnown
+    };
+    result.conservative = { candidate: cash.selected, complete: cash.searchComplete && creditKnown };
+    result.comparison = comparePlans(size.selected, cash.selected);
+    const preference = nonnegative(r.riskPreference ?? '0');
+    if (preference.gt(100)) throw Error('风险偏好须在 0 至 100 之间');
+    if (preference.gt(0) && cash.selected) {
+      params.cashFloor = out(
+        dec(size.selected.worstCash).plus(preference.div(100).times(result.comparison.worstGain))
+      );
+      solved = preference.eq(100)
+        ? cash
+        : solveAuto(book, market, params, { ...checks, seeds: [cash.selected] });
+    }
+    result.preference = { percent: out(preference), floor: params.cashFloor ?? size.selected.worstCash };
+    for (const plan of [result.maximum, result.conservative])
+      if (plan.candidate) plan.audit = auditCross(market.hl, a.hl, plan.candidate, planning);
+  }
   if (r.mode === 'auto') {
     const creditUnknown = hl !== '0' && market.hl.currentMarginCredit == null;
     if (creditUnknown) {
@@ -757,42 +894,24 @@ function computeCurrent(r, a, data, fxData, now, options) {
       check: c.constraints?.find((x) => x.status === 'fail')
     }));
     result.waiting = solved.hold;
-    result.pressure = solved.pressure;
-    result.maximum = {
-      amount: solved.selected?.vsNotional,
-      complete: solved.searchComplete,
-      candidate: solved.selected
-    };
-
+    result.pressure ??= solved.pressure;
     if (solved.code === 'AUTO_HOLD' && !solved.selected) result.flatHold = true;
     if (solved.selected) {
-      const cashSearch = solveAuto(
-        book,
-        market,
-        { ...params, objective: 'cash' },
-        {
-          ...checks,
-          seeds: solved.candidates,
-          searchBudget: options.cashSearchBudget ?? 1400
-        }
-      );
-      result.conservative = {
-        candidate: cashSearch.selected,
-        complete: cashSearch.searchComplete && !creditUnknown
-      };
       const missing = [];
       if (planning) missing.push('账户资金采用预设规划');
       if (result.leverageStatus !== 'ACCOUNT_MODEL') missing.push('实际杠杆设置或调档后可用额度待核实');
       if (result.stress.missing.length || result.stress.zero.length) missing.push(result.stress.label);
       if (!market.hl.capacity || a.hl.fee == null) missing.push('Hype 账户实际可开额度或费率待核实');
       if (a.pf.otherPositions || a.hl.otherPositions) missing.push('其他持仓的组合风险待核实');
-      if (!planning && !funded && !r.deadline) missing.push('考核截止时间待确认');
+      if (!funded && !result.deadline) missing.push('考核截止时间待确认');
       if (funded && p.C_ref == null) missing.push('整轮收益基准待确认');
-      if (!solved.searchComplete) missing.push('最大仓位搜索尚未证实最优');
+      if (!solved.searchComplete) missing.push('当前偏好的仓位搜索尚未证实最优');
+      result.audit = auditCross(market.hl, a.hl, solved.selected, planning);
+      if (result.audit.gaps.length) missing.push('清算条件估算 · ' + result.audit.gaps.join('、'));
       result.conservative.unverified = [...missing];
       if (
-        cashSearch.selected?.candidateLeverage &&
-        cashSearch.selected.candidateLeverage !== Number(result.configuredLeverage)
+        result.conservative.candidate?.candidateLeverage &&
+        result.conservative.candidate.candidateLeverage !== Number(result.configuredLeverage)
       )
         result.conservative.unverified.push('保守方案所需的账户杠杆或调档后额度待核实');
       result.unverified = missing;
@@ -827,6 +946,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
       const held = heldOutcomes(book, market, p, pf, hl);
       if (held) {
         result.heldCash = held.cash;
+        result.bridge = held.cash.bridge;
         result.notices.push('以下现金按现有已成交仓位、保持不动计算', ...held.notes);
         if (held.cash.failureCash != null)
           result.failVsPrincipal = out(dec(held.cash.failureCash).minus(protection));
@@ -854,6 +974,11 @@ function computeCurrent(r, a, data, fxData, now, options) {
           : '')
     );
     return result;
+  }
+  if (r.mode !== 'auto' && c.initialMargin?.[1] != null && market.hl.hold != null) {
+    c.otherInitialMargin = market.hl.hold;
+    c.requiredInitialMargin = out(dec(c.initialMargin[1]).minus(market.hl.hold));
+    c.availableAfter = c.constraints.find((x) => x.code === 'hl_FREE_RESERVE')?.actual ?? null;
   }
   result.candidate = c;
   if (dec(c.hlTargetQuantity).eq(0)) result.notices.push('Hype 目标为空仓，PF 保留单边敞口');
@@ -887,6 +1012,8 @@ function computeCurrent(r, a, data, fxData, now, options) {
       pass: executionDetail(l, out(dec(targetQty).neg()), c.lines.pass)
     };
   }
+  result.audit ??= auditCross(market.hl, a.hl, c, planning);
+  result.bridge = failureBridge(result.cash.hl, c, market, result.costs.hl, r.k);
   result.failVsPrincipal = out(dec(c.failureCash).minus(protection));
   result.passVsPrincipal = out(dec(c.pressureCashAfter).minus(protection));
   result.adjust = {};
@@ -902,6 +1029,25 @@ function computeCurrent(r, a, data, fxData, now, options) {
   if (a.hl.orders?.length && r.mode === 'keepHL') {
     result.adjust.pf = { ...result.adjust.pf, remaining: null, text: 'Hype 已有挂单，成交后需重算' };
     result.notices.push('Hype 有未成交订单，VS 目标按当前已成交 Hype 测算');
+  }
+  if (r.mode === 'auto') {
+    result.advice = adjustmentTarget(
+      book,
+      market,
+      params,
+      checks,
+      c,
+      options.priorTarget,
+      r.rebalanceSteps ?? '2'
+    );
+    for (const [i, k] of ['pf', 'hl'].entries()) {
+      const delta = out(dec(result.advice.pair[i]).minus(result.qty[k]));
+      result.adjust[k] = remainingOrder(delta, result.qty[k], a[k].orders);
+    }
+    if (result.audit.mathMatches === false) {
+      result.advice = null;
+      result.adjust = {};
+    }
   }
   result.forward = out(dec(c.pressureCashAfter).minus(p.C_hl).minus(external));
   result.round =

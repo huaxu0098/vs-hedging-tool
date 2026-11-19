@@ -479,3 +479,11 @@ label input[type='checkbox'] {
 .dual-plans h3 { margin-top:0; }
 .dual-plans p:last-child { white-space:pre-line; font-variant-numeric:tabular-nums; }
 #trace-inputs { max-height:24em; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+
+.funding-banner {padding:10px 14px;margin:0 0 12px;background:#f5edda;border-left:4px solid #987125;font-weight:600}
+.funding-banner.account {background:#e6f2ee;border-color:#277260}
+#plan-tradeoff {padding:10px 14px;border-left:3px solid #357869;background:#edf5f2;font-variant-numeric:tabular-nums}
+.risk-choice {display:grid;gap:4px;margin-bottom:12px}.risk-choice input {max-width:32rem}
+#missing-list {grid-column:1/-1;padding:0 18px 10px} #missing-list a {color:#d6efe9;margin-right:14px;display:inline-block}
+.frame-key {display:block;font-size:10px;opacity:.76;line-height:1.4;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+#separate-confirm {display:flex;flex-wrap:wrap;gap:6px} #separate-confirm button {font-size:12px}

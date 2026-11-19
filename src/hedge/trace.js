@@ -20,9 +20,13 @@ function fingerprint(json) {
   return [a, b].map((n) => (n >>> 0).toString(16).padStart(8, '0')).join('');
 }
 
-export function calculationTrace(rules, accounts, market, rates, at, cashSearchBudget) {
-  const model = 'AUTO-0.9';
-  const options = cashSearchBudget == null ? {} : { cashSearchBudget };
+export function calculationTrace(rules, accounts, market, rates, at, settings = {}) {
+  const model = 'AUTO-0.10';
+  const options = Object.fromEntries(
+    ['cashSearchBudget', 'priorTarget', 'searchBudget']
+      .filter((k) => settings[k] != null)
+      .map((k) => [k, settings[k]])
+  );
   const inputs = canonical({ model, rules, accounts, market, rates, options });
   return {
     model,

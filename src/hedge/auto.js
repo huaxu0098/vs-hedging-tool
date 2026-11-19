@@ -163,7 +163,7 @@ export function compareAuto(a, b) {
 
   const buffer = (c) =>
     dec(c.stressPriceBuffer ?? c.priceBuffer ?? (dec(c.hlTargetQuantity).gt(0) ? c.pressureMark : '0'));
-  const margin = (c) => c.initialMargin.reduce((n, x) => n.plus(x), new D(0));
+  const margin = (c) => dec(c.initialMargin[1]);
   const turns = (c) => Number(c.vsDeltaQuantity !== '0') + Number(c.hlDeltaQuantity !== '0');
   return (
     buffer(b).cmp(buffer(a)) ||
@@ -269,9 +269,13 @@ export function solveAuto(book, m, params, options = {}) {
     unknown = false;
   const budget = options.searchBudget ?? 3500,
     payout = p.stage === 'funded' ? profitSplit(p.target, p.baseline, p.share).user : '0';
-  const failNeed = dec(p.B).plus(p.k).minus(book.external);
+  const cashFloor = params.cashFloor == null ? null : dec(params.cashFloor);
+  const failNeed = max(p.B, cashFloor ?? p.B)
+    .plus(p.k)
+    .minus(book.external);
   const passNeed = max(
     dec(p.R).plus(p.k),
+    cashFloor == null ? p.R : cashFloor.minus(book.external).minus(payout).plus(p.k),
     p.stage === 'funded' && book.ref != null
       ? dec(book.ref)
           .plus(p.g)
@@ -299,6 +303,7 @@ export function solveAuto(book, m, params, options = {}) {
         return;
       }
       c.worstCash = out(min(c.failureCash, c.pressureCashAfter, ...(c.scenarioCash ?? [])));
+      if (cashFloor && dec(c.worstCash).lt(cashFloor)) return;
       ratios.add(c.actualRatio);
       candidates.push(c);
       candidates.sort(cashFirst ? compareConservative : compareAuto);
@@ -317,10 +322,20 @@ export function solveAuto(book, m, params, options = {}) {
     .times(m.hl.mark)
     .times(options.stress?.delayBps || '0')
     .div(10000);
-  const branches = [];
+  const branches = [],
+    domain = [];
   for (const sign of [1, -1]) {
     const pp = segments(book, m, 'pf', sign, current[0]),
       hh = segments(book, m, 'hl', -sign, current[1]);
+    const edge = (segments) =>
+      segments.length
+        ? {
+            min: out(segments[0].step.times(Math.min(...segments.map((s) => s.a.i)))),
+            max: out(segments[0].step.times(Math.max(...segments.map((s) => s.b.i)))),
+            step: out(segments[0].step)
+          }
+        : null;
+    domain.push({ pfSide: sign, pf: edge(pp), hl: edge(hh) });
     for (const seg of pp) {
       branches.push({ seg, hh, lo: seg.a.i, hi: seg.b.i });
     }
@@ -511,6 +526,7 @@ export function solveAuto(book, m, params, options = {}) {
     stressVerified &&
     (!best?.candidateLeverage || best.candidateLeverage === Number(m.hl.configuredLeverage));
   return {
+    domain,
     selected: best,
     candidates,
     rejected,

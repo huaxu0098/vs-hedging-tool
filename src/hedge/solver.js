@@ -587,6 +587,7 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
     failureHypeCash: out(failHL.minus(extra)),
     externalReceived: out(dec(s.external)),
     hlBeforePayout: out(passHL.minus(extra)),
+    modelLiq,
     liqMark: liq,
     liqSource: useReference ? '当前仓平台参考' : '全仓档位测算',
     pressureMark: out(pressureMark),
@@ -1037,7 +1038,7 @@ export function solve(s, m, params, options = {}) {
           ? dec(r.buffer)
           : dec(r.roundGain ?? r.pressureCashAfter);
   function amountMargin(r) {
-    return r.initialMargin.reduce((a, b) => a.plus(b), new D(0));
+    return dec(r.initialMargin[1]);
   }
   candidates.sort(
     (a, b) =>

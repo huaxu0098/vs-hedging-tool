@@ -17,6 +17,7 @@
     "paper": "node scripts/serve.js --paper",
     "hedge": "node scripts/serve.js --hedge",
     "test:hedge": "node --test tests/hedge-*.test.js",
+    "test:hedge:opt": "node scripts/qa/current-optimization.js",
     "test:hedge:browser": "node scripts/qa/current-live.js",
     "test:hedge:internal": "node scripts/qa/hedge-browser.js",
     "test:hedge:live": "node scripts/qa/hedge-live.js",

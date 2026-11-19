@@ -48,7 +48,7 @@ try {
   assert.match(await text('#size-plan'), /最差个人现金/);
   assert.match(await text('#cash-plan'), /最差个人现金/);
   assert.match(await text('#success-hl'), /考核利润不可分/);
-  assert.match(await text('#trace-id'), /AUTO-0.9/);
+  assert.match(await text('#trace-id'), /AUTO-0.10/);
   const leverageCheck = await run(`(() => {
     const rows = Array.from(document.querySelector('#leverage-grid').rows, r => Array.from(r.cells, c => c.textContent));
     return { rows, suggested: document.getElementById('suggested-leverage').textContent,
@@ -86,7 +86,7 @@ try {
     assert.ok(filename, '真实浏览器保存核算文件');
     const saved = JSON.parse(await readFile(path.join(downloadDir, filename), 'utf8'));
     assert.equal(filename, 'hedge-' + saved.id + '.json');
-    assert.equal(saved.model, 'AUTO-0.9');
+    assert.equal(saved.model, 'AUTO-0.10');
     assert.equal(saved.inputs.accounts.hl.equity, '409');
     assert.equal(saved.outputs.autoStatus, 'AUTO_PARTIAL');
     assert.ok(saved.outputs.conservative.candidate);
@@ -298,7 +298,7 @@ try {
   await set('pf-equity', '10110');
   await set('receivable', '80');
   assert.match(await text('#rule-events'), /有分成待到账/);
-  assert.match(await text('#rule-events'), /参考点/);
+  await wait("document.querySelector('#rule-events').textContent.includes('参考点')", 15000);
   assert.equal(await val('hl-equity'), '409');
   assert.equal(await val('pf-equity'), '10110');
   done('R10', await text('#rule-events'));

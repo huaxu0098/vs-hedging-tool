@@ -65,11 +65,19 @@ export function evaluateLeverageGrid(book, market, profile, pf, hl, checks) {
       )
     );
   const commonFailure = common.find((c) => c.status === 'fail') ?? common.find((c) => c.status === 'unknown');
+  const hasStress = [checks.adverseBps, ...Object.values(checks.stress ?? {})].some((v) =>
+    dec(String(v || '0')).gt(0)
+  );
+  const basePath = common.find((c) => c.code === 'hl_MAINTENANCE_PATH');
   const funding = {
+    scenario: hasStress ? 'configured_stress' : 'base',
+    baseEquity: basePath?.equity ?? null,
+    baseMaintenance: basePath?.maintenance ?? null,
+    baseSurplus: basePath?.actual ?? null,
     maintenanceMargin: out(maintenance(leg, notional)),
-    stressedSurplus: path?.actual ?? null,
-    stressedEquity: path?.equity ?? null,
-    stressedMaintenance: path?.maintenance ?? null,
+    stressedSurplus: hasStress ? (path?.actual ?? null) : null,
+    stressedEquity: hasStress ? (path?.equity ?? null) : null,
+    stressedMaintenance: hasStress ? (path?.maintenance ?? null) : null,
     exchangeMaxLeverage: upper,
     contractMaxLeverage: Number(leg.exchangeMaxLeverage),
     effectiveLeverage: dec(book.hl).gt(0) ? out(notional.div(book.hl)) : null
@@ -133,8 +141,10 @@ export function evaluateLeverageGrid(book, market, profile, pf, hl, checks) {
       initial: out(margin),
       maintenance: funding.maintenanceMargin,
       liquidation: base.liqMark,
+      scenario: funding.scenario,
+      baseEquity: funding.baseEquity,
       stressedEquity: funding.stressedEquity,
-      surplus: funding.stressedSurplus,
+      surplus: funding.stressedSurplus ?? funding.baseSurplus,
       buffer: base.priceBuffer,
       status: failed?.status ?? 'pass',
       reason: failed?.code ?? null,
@@ -160,6 +170,8 @@ export function evaluateLeverageGrid(book, market, profile, pf, hl, checks) {
     leverageGrid: rows,
     candidateLeverage: best.row.leverage,
     requiredInitialMargin: best.row.initial,
+    otherInitialMargin: out(other),
+    availableAfter: best.extra.find((c) => c.code === 'hl_FREE_RESERVE')?.actual ?? null,
     roundGain:
       code === 'FEASIBLE' && book.ref != null
         ? out(dec(base.pressureCashAfter).minus(book.ref).minus(book.roundIn).plus(book.roundOut))

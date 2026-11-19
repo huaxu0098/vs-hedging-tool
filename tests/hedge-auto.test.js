@@ -134,6 +134,10 @@ test('AUTO09 达到已证明最优的现仓保持，双边差额为零', () => {
   f.a.hl.currentMarginCredit = c.requiredInitialMargin;
   Object.assign(f.a.hl, {
     source: 'Hype 主网 API',
+    mode: 'standard',
+    otherPositions: false,
+    crossMaintenance: '20',
+    liquidation: c.modelLiq,
     crossPoolVerified: true,
     fee: '0',
     capacity: ['30', '30']
@@ -429,7 +433,8 @@ test('LEV02 相同仓位各档保证金、跨档强平根、跳价与调仓延�
     assert.equal(row.initial, out(dec('400').div(row.leverage)));
     assert.equal(row.maintenance, '20');
     assert.equal(row.liquidation, out(dec('542.5').div('4.4')));
-    assert.equal(row.stressedEquity, '80');
+    assert.equal(row.baseEquity, '80');
+    assert.equal(row.stressedEquity, null);
     assert.equal(row.surplus, '58');
   }
   const stress = solve({ stress: { jumpBps: '100', basisBps: '0', delayBps: '50', fundingDebit: '1' } });
@@ -629,6 +634,9 @@ test('STATE01 缺失、显式零、规划及未核实账户均只能产生条件
   const base = calc(stress, f);
   Object.assign(f.a.hl, {
     source: 'Hype 主网 API',
+    mode: 'standard',
+    otherPositions: false,
+    crossMaintenance: '0',
     crossPoolVerified: true,
     configuredLeverage: base.candidate.candidateLeverage,
     fee: '0',
@@ -688,4 +696,195 @@ test('双方案共享可复算快照，行情、规则或账户变化产生不�
   assert.notEqual(calc({}, f).trace.accountsId, x.trace.accountsId);
   f.m.hl.levels[0][0][1] = '28';
   assert.notEqual(calc({}, f).trace.marketId, x.trace.marketId);
+});
+
+test('OPT01 双目标的名义额牺牲与现金缓冲按同帧端点相减，滑块以现金下限重新求解', () => {
+  const r = { pfFee: '0.0005', hlFee: '0.0005', R: '15' };
+  const x = calc(r),
+    mid = calc({ ...r, riskPreference: '50' }),
+    last = calc({ ...r, riskPreference: '100' });
+  const size = x.maximum.candidate,
+    cash = x.conservative.candidate;
+  assert.equal(x.comparison.pfReduction, '300');
+  assert.equal(x.comparison.reductionRatio, '0.3');
+  assert.equal(x.comparison.successGain, out(dec(cash.hlBeforePayout).minus(size.hlBeforePayout)));
+  assert.equal(mid.preference.floor, out(dec(size.worstCash).plus(dec(x.comparison.worstGain).div(2))));
+  assert.ok(dec(mid.candidate.worstCash).gte(mid.preference.floor));
+  assert.equal(mid.candidate.vsNotional, '900');
+  assert.equal(last.candidate.vsNotional, cash.vsNotional);
+});
+test('OPT02 搜索范围记录双边方向、步长和数量上限，预算中断不能证明最优', () => {
+  const f = fixture(),
+    full = calc({}, f);
+  assert.equal(full.domain.length, 2);
+  assert.equal(full.domain[0].pf.step, '1');
+  const partial = calculateCurrent(inputs, f.a, f.m, {}, t, { searchBudget: 1 });
+  assert.equal(partial.search.complete, false);
+  assert.ok(!partial.maximum?.complete);
+  assert.equal(full.trace.model, 'AUTO-0.10');
+});
+test('OPT03 PF 虚拟保证金、目标 Hype 初始、其他占用及调仓后真实可用分别核验', () => {
+  const f = fixture();
+  f.a.hl.otherHold = '10';
+  f.a.hl.free = '110';
+  f.a.hl.flatConfirmedAt = at;
+  const x = calc({ external: '20', externalAt: at }, f);
+  const c = x.candidate;
+  assert.equal(x.marginHL, '110');
+  assert.equal(x.protect, '140');
+  assert.equal(c.otherInitialMargin, '10');
+  assert.equal(c.availableAfter, out(dec('110').minus(c.requiredInitialMargin)));
+  assert.equal(c.initialMargin[0], out(dec(c.vsNotional).div(10)));
+});
+test('OPT04 缺失及显式零只生成基础路径，实际配置才产生压力权益', () => {
+  for (const value of ['', '0']) {
+    const x = calc({ jumpBps: value }),
+      c = x.candidate;
+    assert.equal(c.scenario, 'base');
+    assert.equal(c.stressedEquity, null);
+    assert.ok(c.baseEquity);
+    assert.ok(c.leverageGrid.every((row) => row.stressedEquity === null));
+    assert.equal(x.autoStatus, 'AUTO_PARTIAL');
+  }
+  const c = calc({ B: '159', jumpBps: '1' }).candidate;
+  assert.equal(c.scenario, 'configured_stress');
+  assert.ok(c.stressedEquity);
+});
+test('OPT05 两腿各自新鲜仍触发相对时间熔断，包括标记价及手工快照字段', () => {
+  const f = fixture();
+  f.m.hl.markAt = new Date(t - 1001).toISOString();
+  for (const mode of ['auto', 'keepPF', 'keepHL']) {
+    const x = calc({ mode, quoteSkewMs: '1000' }, f);
+    assert.equal(x.timing.quoteSkew, 1001);
+    assert.equal(x.adjust, undefined);
+    assert.equal(x.candidate, undefined);
+    assert.match(x.issues.join(' '), /行情熔断/);
+  }
+  delete f.m.hl.markAt;
+  f.a.pf.freeAt = new Date(t - 121000).toISOString();
+  const x = calc({}, f);
+  assert.equal(x.autoStatus, 'AUTO_DATA_BLOCKED');
+  assert.equal(x.adjust, undefined);
+  assert.match(x.issues.join(' '), /账户熔断/);
+});
+test('OPT06 独立清算核对覆盖正反向、多档、真实现仓参考不符和无正价交点', async () => {
+  const { crossCheckRoot } = await import('../src/hedge/cross-check.js');
+  const leg = {
+    fx: '1',
+    multiplier: '1',
+    tiers: [
+      { from: '0', mmr: '0.05' },
+      { from: '450', mmr: '0.1' }
+    ]
+  };
+  assert.ok(
+    dec(crossCheckRoot(leg, '-4', '120', '100', '0'))
+      .minus(dec('542.5').div('4.4'))
+      .abs()
+      .lt('1e-20')
+  );
+  assert.ok(
+    dec(crossCheckRoot(leg, '4', '120', '100', '0'))
+      .minus(dec('280').div('3.8'))
+      .abs()
+      .lt('1e-20')
+  );
+  assert.equal(crossCheckRoot(leg, '1', '200', '100', '0'), null);
+  const f = fixture();
+  Object.assign(f.a.hl, {
+    source: 'Hype 主网 API',
+    mode: 'standard',
+    crossPoolVerified: true,
+    otherPositions: false,
+    qty: '1',
+    fee: '0',
+    crossMaintenance: '5',
+    liquidation: '98',
+    currentMarginCredit: '10',
+    capacity: ['30', '30'],
+    configuredLeverage: 5
+  });
+  const x = calc({ B: '159' }, f);
+  assert.equal(x.audit.status, '条件估算');
+  assert.match(x.audit.gaps.join(' '), /强平参考/);
+  delete f.a.hl.otherPositions;
+  assert.match(calc({}, f).audit.gaps.join(' '), /全账户/);
+});
+test('OPT07 双空仓当前 h 无定义，候选 h 来源于真实目标的每点盈亏', () => {
+  const x = calc();
+  assert.equal(x.currentH, undefined);
+  assert.ok(dec(x.candidate.actualRatio).gt(0));
+});
+test('OPT08 规划空仓及权益不进入真实输入，混用来源也触发阻断', async () => {
+  const { presetAccount, manualAccount } = await import('../src/hedge/current-account.js');
+  const r = { ...inputs, planPF: '1000', planCapital: '211', planCrossFlat: true };
+  const state = { assets: {}, shared: {} },
+    f = fixture();
+  for (const k of ['hl', 'pf']) {
+    const live = manualAccount(state, 'BTC', k);
+    assert.equal(live.qty, undefined);
+    assert.equal(live.equity, undefined);
+    assert.equal(presetAccount(r, k).qty, '0');
+  }
+  f.a.hl = presetAccount(r, 'hl');
+  const x = calc({}, f);
+  assert.equal(x.autoStatus, 'AUTO_DATA_BLOCKED');
+  assert.equal(x.candidate, undefined);
+});
+test('OPT09 迟滞仅保留最新快照上仍合法的目标，同时保留原始数学差额', () => {
+  const f = fixture(),
+    x = calc({}, f),
+    c = x.candidate;
+  const previous =
+    x.top.find(
+      (row) =>
+        row.hlTargetQuantity === c.hlTargetQuantity &&
+        dec(row.vsTargetQuantity).minus(c.vsTargetQuantity).abs().eq('1')
+    ) ??
+    x.top.find(
+      (row) =>
+        row.vsTargetQuantity === c.vsTargetQuantity &&
+        dec(row.hlTargetQuantity).minus(c.hlTargetQuantity).abs().eq('1')
+    );
+  assert.ok(previous);
+  const pair = [previous.vsTargetQuantity, previous.hlTargetQuantity];
+  const run = (r, prior) => calculateCurrent({ ...inputs, ...r }, f.a, f.m, {}, t, { priorTarget: prior });
+  const held = run({ rebalanceSteps: '2' }, pair);
+  assert.equal(held.advice.source, 'previous');
+  assert.deepEqual(held.advice.pair, pair);
+  assert.equal(held.adjust.hl.remaining, pair[1]);
+  assert.equal(held.candidate.actualRatio, c.actualRatio);
+  assert.equal(run({ rebalanceSteps: '0' }, pair).advice.source, 'current');
+  assert.equal(run({ rebalanceSteps: '90' }, ['0', '0']).advice.source, 'current');
+});
+test('OPT10 每项未配置压力附独立入口，缺少账户、杠杆、期限可定位', () => {
+  const x = calc({ deadline: '' });
+  assert.equal(x.autoStatus, 'AUTO_PARTIAL');
+  for (const id of ['hl-source', 'deadline', 'adverseBps', 'fundingDebit', 'delayBps', 'jumpBps'])
+    assert.ok(
+      x.missingFields.some((item) => item.id === id),
+      id
+    );
+});
+test('OPT11 未确认截止时间时，配置波幅仍不产生两日通过结论', () => {
+  const x = calc({ deadline: '', movePct: '3' });
+  assert.equal(x.deadline, null);
+  assert.equal(x.stressedEquity, undefined);
+  assert.deepEqual(x.pressure, {});
+  assert.ok(x.candidate);
+  assert.equal(calc({ deadline: at }).autoStatus, 'AUTO_DEADLINE_EXIT_REQUIRED');
+});
+test('OPT12 失败端现金从当前权益、真实成交滑点、开平费用及外部资金逐项复算', () => {
+  const f = fixture();
+  f.a.pf.qty = '-2';
+  f.a.hl.qty = '1';
+  f.m.hl.levels = [[['99.9', '30']], [['100.2', '30']]];
+  const x = calc({ pfFee: '0.0001', hlFee: '0.0005', external: '15', externalAt: at, k: '0.1' }, f),
+    b = x.bridge;
+  assert.equal(b.start, '120');
+  assert.equal(b.external, '15');
+  assert.ok(dec(b.settled).minus(x.candidate.failureHypeCash).abs().lt('1e-35'));
+  assert.ok(dec(b.settled).plus(b.external).minus(x.candidate.failureCash).abs().lt('1e-35'));
+  assert.ok(dec(b.exitFee).gt(0));
+  assert.ok(dec(b.exitFill).lt(0));
 });

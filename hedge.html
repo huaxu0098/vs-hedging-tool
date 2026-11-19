@@ -46,6 +46,7 @@
           >
         </div>
       </div>
+      <div id="funding-banner" class="funding-banner"></div>
       <section class="card" id="plan-settings">
         <h2 id="plan-heading">开考前资金规划</h2>
         <div class="form plan-form" id="plan-fields"></div>
@@ -69,8 +70,8 @@
           <strong id="hl-summary">等待账户</strong><span id="hl-change"></span>
         </article>
         <article>
-          <h2>失败端个人保护资金合计</h2>
-          <strong id="fail-summary">—</strong><span id="fail-parts"></span><span id="fail-change"></span>
+          <h2>失败线触发并完成双边平仓后的条件现金</h2>
+          <strong id="fail-summary">—</strong><span id="cash-bridge"></span><span id="fail-parts"></span><span id="fail-change"></span>
         </article>
         <article>
           <h2 id="pass-heading">成功端 Hype 现金（分成到账前）</h2>
@@ -89,7 +90,7 @@
           <strong id="success-hl">—</strong><span id="summary-margin"></span>
         </article>
         <article>
-          <h2>两日条件可达性</h2>
+          <h2>两日考核 · 截止与可达性</h2><span id="deadline-clock"></span>
           <strong id="reach-label">未验证</strong><span id="summary-buffer"></span>
         </article>
         <div class="desk-ratios">
@@ -106,17 +107,23 @@
           <strong id="configured-leverage">未知</strong><span id="leverage-status"></span>
         </article>
         <article><h2>目标有效杠杆</h2><strong id="effective-level">—</strong><span>目标 Hype 名义额 ÷ Hype 权益</span></article>
-        <article><h2>Hype 保证金</h2><strong id="initial-needed">—</strong><span id="already-used"></span></article>
+        <article><h2 id="margin-detail-title">Hype 初始保证金</h2><strong id="initial-needed">—</strong><span id="already-used"></span></article>
         <p id="leverage-reason"></p>
         <p id="verified-range"></p>
         <p id="summary-status" role="status"></p>
+        <div id="missing-list" aria-label="待核实条件"></div>
       </section>
       <section class="card" id="plan-comparison">
         <h2>双方案对照</h2>
+        <label class="risk-choice">风险偏好 · 仓位优先 → 现金留存优先
+          <input id="riskPreference" type="range" min="0" max="100" step="1" value="0" />
+          <output id="preference-info"></output>
+        </label>
         <div class="dual-plans">
-          <div><h3>最大可行方案</h3><p>优先扩大符合约束的 PF 仓位。首屏金额按此方案显示。</p><p id="size-plan"></p></div>
-          <div><h3>保守推荐方案</h3><p>优先保留两端及已配置压力情景中最少的个人现金，同额时优先较小 PF 仓位。</p><p id="cash-plan"></p></div>
+          <div><h3 id="size-title">最大可行方案</h3><p>优先扩大符合约束的 PF 仓位。每个候选均须满足失败保护及已配置的风险约束。</p><p id="size-plan"></p></div>
+          <div><h3 id="cash-title">保守推荐方案</h3><p>优先保留两端及已配置压力情景中最少的个人现金，同额时优先较小 PF 仓位。</p><p id="cash-plan"></p></div>
         </div>
+        <p id="plan-tradeoff"></p>
       </section>
       <details class="card" id="trace-panel">
         <summary>本次计算依据 · <span id="trace-id"></span></summary>
@@ -127,6 +134,7 @@
       <section class="card" id="snapshot">
         <h2 id="account-heading">当前账户与持仓</h2>
         <div class="flat-entry" id="flat-entry">
+          <div id="separate-confirm"></div>
           <button type="button" id="confirm-flat">确认双方全账户空仓、无挂单，均使用全仓</button>
           <span>仅当前合约空仓时，可单独填写数量 0。权益与可用保证金须来自对应账户。</span
           ><span id="flat-feedback" role="status"></span>
@@ -193,7 +201,7 @@
           <summary>查看已验证的比例点</summary>
           <p id="points"></p>
         </details>
-        <p id="auto-search"></p>
+        <p id="auto-search"></p><p id="hysteresis"></p>
         <p id="two-day"></p>
         <p id="best-two"></p>
         <details>
@@ -206,7 +214,7 @@
                   <th>杠杆</th>
                   <th>初始保证金</th>
                   <th>当前维持保证金</th>
-                  <th>压力后权益</th>
+                  <th id="lev-equity-heading">基础情景权益</th>
                   <th>最低维持余量</th>
                   <th>预计强平标记价</th>
                   <th>验算</th>
@@ -227,10 +235,10 @@
                   <th>比例</th>
                   <th>候选杠杆</th>
                   <th>Hype 初始保证金</th>
-                  <th>压力后最低维持余量</th>
-                  <th>最差压力现金</th>
+                  <th id="candidate-surplus-heading">基础情景最低维持余量</th>
+                  <th id="candidate-cash-heading">最差基础情景现金</th>
                   <th>强平距离</th>
-                  <th>保证金占用</th>
+                  <th>PF 模拟初始保证金</th>
                   <th>核验结果</th>
                 </tr>
               </thead>
@@ -254,7 +262,7 @@
                 <th>当前已持有</th>
                 <th>目标总量</th>
                 <th>目标 − 已持有</th>
-                <th>考虑挂单后尚需调整</th>
+                <th>考虑挂单与迟滞后的建议差额</th>
               </tr>
             </thead>
             <tbody id="legs"></tbody>
@@ -272,7 +280,7 @@
       </section>
       <section class="card" id="risk">
         <h2>强平距离与成交成本</h2>
-        <p id="risk-status"></p>
+        <p id="risk-status"></p><p id="cross-audit"></p>
         <p id="cost-sources"></p>
         <p id="stress-assumptions"></p>
         <dl id="risk-values"></dl>
@@ -294,7 +302,7 @@
       </section>
       <section class="card" id="connections">
         <h2>实时行情与快照来源</h2>
-        <p id="quotes"></p>
+        <p id="quotes"></p><p id="clock-skew"></p>
         <p id="fx-source"></p>
         <p id="sync-status"></p>
         <div class="form">
