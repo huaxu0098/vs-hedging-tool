@@ -1,3 +1,4 @@
+import { scanContext, buildRatioScan, ratioSlice } from './ratio-scan.js';
 import {
   dec,
   out,
@@ -12,7 +13,7 @@ import {
 import { validLeverageCap } from './leverage.js';
 import { auditCross } from './cross-check.js';
 import { adjustmentTarget, comparePlans } from './optimization.js';
-import { settlementBridge } from './funding-formula.js';
+import { settlementBridge, sumPostings } from './settlement-ledger.js';
 import { solveAuto } from './auto.js';
 import { calculationTrace } from './trace.js';
 import {
@@ -73,11 +74,13 @@ export const rules = {
   baseline: '10000',
   share: '0.8',
   B: '500',
+  investedCapital: '',
   registration: '91',
   outsideCosts: '0',
   minBuffer: '0',
   minMaintenanceSurplus: '0',
-  R: '100',
+  R_success: '100',
+  R_free: '0',
   g: '0',
   external: '0',
   inTransit: '0',
@@ -246,7 +249,7 @@ function buildMarket(data, r, a, fx) {
             ? null
             : hlTiers(hl.marginTiers),
       utilization: out(utilization),
-      reserve: isPF ? '0' : r.R,
+      reserve: isPF ? '0' : out(nonnegative(r.R_free)),
       maxQty: limits.length ? out(limits.reduce((a, b) => (a.lt(b) ? a : b))) : null,
       capacity: ac.capacity,
       currentLiquidation: isPF ? null : ac.liquidation,
@@ -281,6 +284,8 @@ export function reason(code) {
       hl_SWITCH_MARGIN: '变更杠杆时原仓初始保证金',
       LEVERAGE_UNVERIFIED: '杠杆与清算模型未验证',
       NO_PAYOUT_TARGET: '提款参考点须高于分成基线',
+      LEDGER_MISMATCH: '成交价独立验算与资金流水不符，已阻断结算与仓位建议',
+      INVALID_PF_RULES: 'PF 失败线必须低于成功线',
       FUNDING_RECONCILIATION: '资金公式与双边成交现金未能对账',
       NO_DISCRETE_MATCH: '按步长取整后没有可行仓位',
       NO_MATCH_IN_SEARCH: '当前搜索范围没有满足约束的仓位',
@@ -338,7 +343,6 @@ function heldOutcomes(book, market, p, pf, hl) {
       continue;
     }
     if (path.some((c) => c.status === 'unknown')) notes.push('现仓到' + label + '的保证金路径未验证');
-    const settled = projectSettlementEquity(book, market, 'hl', hl, shift).plus(book.external).minus(p.k);
     cash.externalReceived = book.external;
     const bridges = (cash.paths ??= {});
     const legs = {};
@@ -358,14 +362,15 @@ function heldOutcomes(book, market, p, pf, hl) {
         side === 'hl' ? p.k : '0'
       );
     }
+    const settled = dec(sumPostings([legs.hl.settled, book.external]));
     bridges[key] = legs;
     if (key === 'fail') {
       cash.failureCash = out(settled);
-      cash.failureHypeCash = out(settled.minus(book.external));
+      cash.failureHypeCash = legs.hl.settled;
       cash.bridge = { ...legs.hl, external: book.external };
     } else {
       cash.cashBeforePayout = out(settled.plus(p.inTransit));
-      cash.hlBeforePayout = out(settled.minus(book.external));
+      cash.hlBeforePayout = legs.hl.settled;
       const payout = p.stage === 'funded' ? profitSplit(p.target, p.baseline, p.share).user : '0';
       cash.expectedUserPayout = payout;
       cash.pressureCashAfter = out(dec(cash.cashBeforePayout).plus(payout));
@@ -374,7 +379,13 @@ function heldOutcomes(book, market, p, pf, hl) {
   return { cash, notes };
 }
 
+// An old R was entered as a success-path reserve. The new collateral floor is independent.
+export function splitReserves(saved = {}) {
+  const { R, ...rest } = saved;
+  return { ...rest, R_success: rest.R_success ?? R ?? rules.R_success, R_free: rest.R_free ?? rules.R_free };
+}
 export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(), options = {}) {
+  r = splitReserves(r);
   const result = computeCurrent(r, a, data, fxData, now, options);
   result.missingFields = [];
   const add = (id, label) => {
@@ -572,7 +583,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
     target,
     baseline: r.baseline,
     share: r.share,
-    R: r.R,
+    R: r.R_success,
     g: r.g,
     k: r.k,
     contributions: r.roundIn,
@@ -580,7 +591,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
   };
   let terminal;
   if (p.E != null && p.C_hl != null) {
-    result.funding = fundingInterval(p);
+    result.funding = { ...fundingInterval(p), R_success: r.R_success, R_free: r.R_free };
     result.range = solveBudgetBounds(p);
     if (result.range.min == null) result.range = null; // Terminal events need fresh positions and executable quotes below.
   }
@@ -678,7 +689,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
     // The account value already includes the open position. Only the exit execution and fee remain.
     let f;
     try {
-      f = estimateFill(out(dec(pf).neg()), market.pf);
+      f = estimateFill(out(dec(pf).neg()), market.pf, market.pf.multiplier);
     } catch (e) {
       issues.push(reason(e.message));
       return result;
@@ -695,9 +706,12 @@ function computeCurrent(r, a, data, fxData, now, options) {
     if (p.C_hl != null) {
       const netRange = solveBudgetBounds({ ...p, E: out(net) });
       terminal = netRange.min == null ? reason(netRange.code) : null;
+      if (!terminal && result.funding?.lower == null) terminal = 'PF 标记权益已到边界，净结算尚待确认';
     }
   }
   if (terminal) {
+    result.range = null;
+    result.funding = null;
     result.notices.push(terminal);
     if (r.mode === 'auto') result.dataState = terminal;
   }
@@ -722,7 +736,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
   if (expired && !issues.length && market) {
     const q = result.qty.hl,
       l = market.hl,
-      f = estimateFill(out(dec(q).neg()), l);
+      f = estimateFill(out(dec(q).neg()), l, l.multiplier);
     const net = dec(result.cash.hl)
       .plus(f ? dec(q).times(l.multiplier).times(l.fx).times(dec(f.price).minus(l.mark)) : 0)
       .minus(f ? dec(f.notional).times(l.fx).times(l.rate) : 0);
@@ -782,8 +796,13 @@ function computeCurrent(r, a, data, fxData, now, options) {
     sizes,
     target,
     sort: 'gain',
+    profitBasis: specified(planning ? r.planCapital : r.investedCapital)
+      ? out(
+          nonnegative(planning ? r.planCapital : r.investedCapital).plus(nonnegative(r.outsideCosts ?? '0'))
+        )
+      : null,
     directions: [1, -1],
-    R: r.R,
+    R: r.R_success,
     g: r.g,
     k: r.k,
     objective: 'size',
@@ -874,6 +893,21 @@ function computeCurrent(r, a, data, fxData, now, options) {
     }
   }
   if (options.searchBudget != null) checks.searchBudget = options.searchBudget;
+  if (
+    options.scanRatios &&
+    r.mode === 'auto' &&
+    market.hl.marginMode === 'cross' &&
+    market.hl.tiers?.length &&
+    market.pf.tiers?.length
+  ) {
+    const ctx = scanContext(book, market, params, checks);
+    const scan = (result.ratioScan = buildRatioScan(ctx, r.scanEndpoint));
+    const feasible = scan.sets.both;
+    checks.seeds = [feasible.largest, feasible.min, feasible.max].filter(Boolean).map((point) => ({
+      vsTargetQuantity: out(dec(market.pf.step).times(point.i).times(point.sign)),
+      hlTargetQuantity: out(dec(market.hl.step).times(point.j).times(-point.sign))
+    }));
+  }
   let solved =
     r.mode === 'auto' ? solveAuto(book, market, params, checks) : solve(book, market, params, checks);
   if (r.mode === 'auto' && solved.selected) {
@@ -963,8 +997,12 @@ function computeCurrent(r, a, data, fxData, now, options) {
     if (solved.selected) {
       const missing = [];
       if (planning) missing.push('账户资金采用预设规划');
-      for (const [side, name] of [['pf','PF'],['hl','Hype']]) {
-        if (!dec(result.qty[side]).isZero() && !a[side].anchor) missing.push(name + ' 非空现仓的权益标记价待确认');
+      for (const [side, name] of [
+        ['pf', 'PF'],
+        ['hl', 'Hype']
+      ]) {
+        if (!dec(result.qty[side]).isZero() && !a[side].anchor)
+          missing.push(name + ' 非空现仓的权益标记价待确认');
       }
       if (result.leverageStatus !== 'ACCOUNT_MODEL') missing.push('实际杠杆设置或调档后可用额度待核实');
       if (result.stress.missing.length || result.stress.zero.length) missing.push(result.stress.label);
@@ -1049,6 +1087,19 @@ function computeCurrent(r, a, data, fxData, now, options) {
     c.availableAfter = c.constraints.find((x) => x.code === 'hl_FREE_RESERVE')?.actual ?? null;
   }
   result.candidate = c;
+  if (result.ratioScan) {
+    const s = result.ratioScan,
+      point = {
+        i: dec(c.vsTargetQuantity).abs().div(market.pf.step).toNumber(),
+        j: dec(c.hlTargetQuantity).abs().div(market.hl.step).toNumber(),
+        sign: dec(c.vsTargetQuantity).cmp(0)
+      };
+    s.defaultPoint =
+      s.sets.joint.count &&
+      !ratioSlice(s, point.sign, point.i, 'joint').some(([lo, hi]) => point.j >= lo && point.j <= hi)
+        ? s.sets.joint.largest
+        : point;
+  }
   if (dec(c.hlTargetQuantity).eq(0)) result.notices.push('Hype 目标为空仓，PF 保留单边敞口');
   const verified = solved.candidates.filter((x) => x.code === 'FEASIBLE');
   if (verified.length) {
@@ -1081,7 +1132,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
     };
   }
   result.audit ??= auditCross(market.hl, a.hl, c, planning);
-  result.paths = c.funding?.paths ?? {};
+  result.paths = c.paths ?? c.funding?.paths ?? {};
   for (const path of ['fail', 'pass']) {
     if (result.paths[path]) continue;
     const legs = {};

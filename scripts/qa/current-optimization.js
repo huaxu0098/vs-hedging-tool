@@ -5,7 +5,7 @@ const b = await openTestBrowser({ current: true });
 const { send, run, wait, click, text } = b;
 const input = (id, v) => b.set('#' + id, v, 'input');
 const ready =
-  "document.querySelector('#plan-tradeoff').textContent.includes('现金缓冲变化') && document.querySelector('#trace-id').textContent.includes('AUTO-0.12')";
+  "document.querySelector('#plan-tradeoff').textContent.includes('现金缓冲变化') && document.querySelector('#trace-id').textContent.includes('AUTO-0.14')";
 try {
   await send('Page.navigate', { url: (process.env.CURRENT_URL ?? b.url) + '/' });
   await wait("typeof document.querySelector('#plan-cross-flat')?.onchange === 'function'");
@@ -42,7 +42,7 @@ try {
   assert.match(fields['current-h'], /不适用/);
   assert.match(fields['target-h'], /%/);
   assert.match(fields['deadline-clock'], /未配置/);
-  assert.match(fields['cash-bridge'], /调仓费.*平仓费.*额外摩擦/);
+  assert.match(fields['cash-bridge'], /调仓深度滑点.*调仓手续费.*平仓深度滑点.*平仓手续费.*另设终点摩擦/);
   console.log(
     'OPT_LIVE',
     JSON.stringify({
@@ -53,6 +53,7 @@ try {
       complete: [x.maximum.complete, x.conservative.complete]
     })
   );
+  await click('#scan-config');
   await click('#missing-list a[href="#jumpBps"]');
   assert.equal(await run('document.activeElement.id'), 'jumpBps');
   const pending = await run(`(() => {const slider=document.querySelector('#riskPreference');slider.value='50';

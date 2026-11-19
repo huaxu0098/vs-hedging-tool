@@ -4,7 +4,7 @@ self.onmessage = ({ data }) => {
   const { version, r, a, m, rates, t } = data;
   try {
     const start = performance.now();
-    const result = calculateCurrent(r, a, m, rates, t, { priorTarget: data.priorTarget });
+    const result = calculateCurrent(r, a, m, rates, t, { priorTarget: data.priorTarget, scanRatios: true });
     result.solveMs = Math.round(performance.now() - start);
     self.postMessage({ version, result });
   } catch (e) {

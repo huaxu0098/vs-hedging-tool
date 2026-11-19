@@ -48,7 +48,7 @@ try {
   assert.match(await text('#size-plan'), /最差个人现金/);
   assert.match(await text('#cash-plan'), /最差个人现金/);
   assert.match(await text('#success-hl'), /考核利润不可分/);
-  assert.match(await text('#trace-id'), /AUTO-0.12/);
+  assert.match(await text('#trace-id'), /AUTO-0.14/);
   const leverageCheck = await run(`(() => {
     const rows = Array.from(document.querySelector('#leverage-grid').rows, r => Array.from(r.cells, c => c.textContent));
     return { rows, suggested: document.getElementById('suggested-leverage').textContent,
@@ -86,7 +86,7 @@ try {
     assert.ok(filename, '真实浏览器保存核算文件');
     const saved = JSON.parse(await readFile(path.join(downloadDir, filename), 'utf8'));
     assert.equal(filename, 'hedge-' + saved.id + '.json');
-    assert.equal(saved.model, 'AUTO-0.12');
+    assert.equal(saved.model, 'AUTO-0.14');
     assert.equal(saved.inputs.accounts.hl.equity, '409');
     assert.equal(saved.outputs.autoStatus, 'AUTO_PARTIAL');
     assert.ok(saved.outputs.conservative.candidate);
@@ -126,7 +126,7 @@ try {
   );
   assert.equal(await text('#pf-summary'), '—');
   console.log('FUNDED_DEFAULT', await text('#bounds-detail'));
-  await set('R', '40');
+  await set('R_success', '40');
   await wait(hasPlan, 30000);
   assert.match(await text('#plan-basis'), /101.50 U/);
   assert.match(await text('#pass-heading'), /到账/);
@@ -192,7 +192,7 @@ try {
   assert.match(await text('#pf-meta'), /手工确认.*按标记价估算/);
   done('R05', await text('#pf-meta'));
   await set('stage', 'funded');
-  await set('R', '40');
+  await set('R_success', '40');
   await set('hl-equity', '101.50');
   await wait(candidate, 25000);
   assert.equal(await val('ref'), '');
@@ -204,7 +204,7 @@ try {
     cash: await text('#cash-results')
   });
   await set('stage', 'challenge');
-  await set('R', '100');
+  await set('R_success', '100');
   await position('0.08', '-0.005', { orders: [{ qty: '-0.002', id: 'manual-check' }] });
   await wait(candidate, 18000);
   const pendingRow = await row();
@@ -232,7 +232,7 @@ try {
   });
   await click('#sync');
   await wait(candidate, 30000);
-  await set('R', '60'); // Keep sufficient room for the observed inventory's rebalancing fee.
+  await set('R_success', '60'); // Keep sufficient room for the observed inventory's rebalancing fee.
   const user = '0x010461c14e146ac35fe42271bdc1134ee31c703a';
   const req = async (q) => {
     const res = await fetch('https://api.hyperliquid.xyz/info', {
@@ -330,7 +330,7 @@ try {
     'pf-marginMode': 'cross',
     'hl-marginMode': 'cross',
 
-    R: '100'
+    R_success: '100'
   }))
     await set(id, value);
   const recommended = "/推荐|基础候选|已验候选/.test(document.querySelector('#target-h').textContent)";

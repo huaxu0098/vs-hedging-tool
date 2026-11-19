@@ -1,6 +1,7 @@
 import { dec, out, nonnegative, positive } from './math.js';
 import {
   rules,
+  splitReserves,
   calculateCurrent,
   fresh,
   quoteClock,
@@ -8,6 +9,8 @@ import {
   stressFields,
   reason as constraintReason
 } from './current.js';
+import { renderScan, setupScan } from './ratio-ui.js';
+import { ledgerLabels, presentLedger } from './settlement-ledger.js';
 import { captureScript } from '../vs-parser.js';
 import { manualVs } from './adapters.js';
 import { accountSnapshot, manualAccount, presetAccount } from './current-account.js';
@@ -34,8 +37,8 @@ if (state.stressVersion !== 1) {
 const planDefaults = { planCapital: '500', planPF: '10000', planFundedCash: '101.50' };
 const planning = () => state.fundingView === 'plan';
 state.fundingView ??= 'plan';
-state.rules = { ...rules, ...state.rules };
-state.planRules = { ...rules, ...planDefaults, ...state.planRules };
+state.rules = { ...rules, ...splitReserves(state.rules) };
+state.planRules = { ...rules, ...planDefaults, ...splitReserves(state.planRules) };
 let r = planning() ? state.planRules : state.rules;
 const save = () => localStorage.setItem(key, JSON.stringify(state));
 const fmt = (x, n = 2) => {
@@ -78,6 +81,7 @@ const ruleFields = {
   adverseBps: 'Hype 不利基差及汇率偏移（基点，1 基点 = 0.01%）',
   externalFx: '每单位外币的已确认 USDC 估值（选填）',
   registration: '本金中已支付的报名费（U）',
+  investedCapital: '净收益核算的实际总投入（含报名费及已投入的外部资金，U）',
   outsideCosts: '本金之外另需收回的历史成本（U）',
   minMaintenanceSurplus: 'Hype 路径最低维持保证金余量（U）',
   minBuffer: '成功线到 Hype 强平线的最低价格距离',
@@ -212,9 +216,10 @@ function inputs() {
   $('plan-cross-flat').checked = r.planCrossFlat === true;
   $('funding-view').value = state.fundingView;
   $('plan-settings').hidden = !planning();
+  $('investedCapital').parentElement.hidden = planning();
   for (const id of ['hl-source', 'wallet', 'paste', 'bridge-pair', 'leg-settings']) {
     const el = $(id);
-    const wrapper = el.closest('details') ?? el.closest('.form');
+    const wrapper = el.closest('details:not(#desk-details)') ?? el.closest('.form');
     if (wrapper) wrapper.hidden = planning();
   }
   put('sync', planning() ? '立即刷新双边行情' : '立即刷新行情与账户');
@@ -226,7 +231,8 @@ function inputs() {
     'mode',
     'stage',
     'B',
-    'R',
+    'R_success',
+    'R_free',
     'riskPreference',
     'externalCurrency',
     ...Object.keys(ruleFields)
@@ -398,11 +404,14 @@ function freshnessLabel(at, seconds) {
   if (!at) return '未确认';
   return fresh(at, Date.now(), Number(seconds) * 1000) ? '有效' : '过期';
 }
+let lastFinished = null,
+  workerTimer;
 let worker = null,
   version = 0,
   running = null,
   completed = null;
 function cancelAuto() {
+  clearTimeout(workerTimer);
   worker?.terminate();
   worker = null;
   running = null;
@@ -411,6 +420,7 @@ function cancelAuto() {
 }
 function currentFrame(a, m, t) {
   const base = calculateCurrent(r, a, m, rates, t, { deferAuto: true });
+  base.lastFinished = lastFinished;
   if (!base.needsSearch) {
     if (running || completed) cancelAuto();
     return base;
@@ -433,11 +443,18 @@ function currentFrame(a, m, t) {
   if (!running && completed?.key !== key) {
     const frameRates = rates;
     const revision = ++version;
-    running = { context, key };
+    running = {
+      context,
+      key,
+      since: performance.now(),
+      trigger: completed?.context === context ? '实时行情或汇率更新' : '账户、资金规则或行情输入更新'
+    };
     if (!worker) worker = new Worker('/src/hedge/auto-worker.js', { type: 'module' });
     const finish = (result) => {
       if (revision !== version) return;
+      clearTimeout(workerTimer);
       running = null;
+      if (result.ratioScan) lastFinished = { id: result.trace.id, at: result.trace.at };
       completed = {
         context,
         key,
@@ -452,15 +469,38 @@ function currentFrame(a, m, t) {
       };
       render();
     };
+    workerTimer = setTimeout(() => {
+      if (revision !== version) return;
+      worker.terminate();
+      worker = null;
+      finish({
+        ...base,
+        needsSearch: false,
+        range: null,
+        funding: null,
+        autoStatus: 'AUTO_PARTIAL',
+        issues: ['比例扫描超过 10 秒，本帧结果已撤回。下一次行情或输入更新后重试。']
+      });
+    }, 10000);
     worker.onmessage = ({ data }) => {
       if (data.version === revision)
-        finish(data.error ? { ...base, autoStatus: 'AUTO_PARTIAL', issues: [data.error] } : data.result);
+        finish(
+          data.error
+            ? {
+                ...base,
+                autoStatus: 'AUTO_PARTIAL',
+                range: null,
+                funding: null,
+                issues: [constraintReason(data.error)]
+              }
+            : data.result
+        );
     };
     worker.onerror = () => {
       if (revision !== version) return;
       worker.terminate();
       worker = null;
-      finish({ ...base, autoStatus: 'AUTO_PARTIAL', issues: ['后台计算失败'] });
+      finish({ ...base, range: null, funding: null, autoStatus: 'AUTO_PARTIAL', issues: ['后台计算失败'] });
     };
     const priorTarget = completed?.context === context ? completed.result.advice?.pair : null;
     worker.postMessage({ version: revision, r, a, m, rates, t, priorTarget });
@@ -468,11 +508,17 @@ function currentFrame(a, m, t) {
   // A new tick queues the latest frame without starving an in-flight search.
   // Account edits, safety gates and rule changes invalidate old answers immediately.
   if (completed?.key === key && completed.stamps.every((v) => fresh(v, t, Number(r.quoteSecs) * 1000)))
-    return { ...completed.result, refreshPending: completed.key !== key };
+    return { ...completed.result, lastFinished, refreshPending: completed.key !== key };
   return {
     ...base,
+    range: null,
+    funding: null,
+    trace: null,
     autoStatus: 'AUTO_PARTIAL',
     refreshPending: true,
+    lastFinished,
+    trigger: running?.trigger,
+    since: running?.since,
     issues: ['当前快照正在重算，仓位调整建议已暂停']
   };
 }
@@ -500,7 +546,7 @@ function updateDeadline() {
 }
 setInterval(updateDeadline, 1000);
 const frameCards = document.querySelectorAll(
-  '.desk-summary article, .desk-ratios, .dual-plans > div, [aria-labelledby="result-heading"], #risk, #cash-results'
+  '.desk-summary article, .desk-ratios, .dual-plans > div, [aria-labelledby="result-heading"], #risk, #cash-results, #funding-formula'
 );
 for (const el of frameCards) {
   const stamp = document.createElement('small');
@@ -552,14 +598,16 @@ function renderFunding(result, a, m, plan) {
           '；到账前上限 (' +
           fmt(f.C_H) +
           ' − ' +
-          fmt(f.R) +
+          fmt(f.R_success) +
           ' − ' +
           fmt(f.passCost) +
           ') ÷ ' +
           fmt(f.gain) +
           ' = ' +
           pct(f.upper) +
-          '。此处费用仅含额外终点预算。' +
+          '。理论区间仅含另设的终点摩擦预算。开仓后可用抵押品另须达到 R_free ' +
+          money(f.R_free) +
+          '。' +
           (f.code === 'NO_CASH_INTERSECTION'
             ? '理论无交集。取下限时成功端缺 ' +
               money(f.successShortfallAtLower) +
@@ -596,40 +644,70 @@ function renderFunding(result, a, m, plan) {
   );
   const paths = result.paths;
   const cols = ['fail', 'pass'].flatMap((s) => ['pf', 'hl'].map((k) => paths?.[s]?.[k]));
-  const items = [
-    ['起始标记权益', 'start'],
-    ['目标仓标记盈亏', 'move'],
-    ['差额调仓 Mark 至买卖一档', 'entrySpread'],
-    ['调仓深度滑点（扣）', 'entrySlippage'],
-    ['调仓手续费（扣）', 'entryFee'],
-    ['平仓 Mark 至买卖一档', 'exitSpread'],
-    ['平仓深度滑点（扣）', 'exitSlippage'],
-    ['平仓手续费（扣）', 'exitFee'],
-    ['另设终点摩擦（扣）', 'friction'],
-    ['预计双边平仓后各自结算余额', 'settled'],
-    ['起始标记价', 'mark'],
-    ['差额调仓均价', 'entryPrice'],
-    ['边界标记价', 'exitMark'],
-    ['预计平仓均价', 'exitPrice'],
-    ['合约乘数', 'multiplier'],
-    ['结算币兑 U', 'fx'],
-    ['数量步长', 'step']
-  ];
-  const rows = paths
-    ? items.map(([title, key], i) =>
-        cellRow([title, ...cols.map((b) => (b?.[key] == null ? '—' : i < 10 ? fmt(b[key], 4) : b[key]))])
-      )
-    : [];
+  const exact = $('ledger-exact').checked;
+  const views = cols.map((x) => x && (exact ? { entries: x.entries, total: x.settled } : presentLedger(x)));
+  const rows = [];
+  if (paths) {
+    for (const [key, label] of Object.entries(ledgerLabels)) {
+      const row = cellRow([label, ...views.map((v) => v?.entries[key] ?? '—')]);
+      row.dataset.posting = key;
+      rows.push(row);
+    }
+    if (!exact) {
+      const row = cellRow(['逐项显示舍入差（U）', ...views.map((v) => v?.rounding ?? '—')]);
+      row.dataset.posting = 'rounding';
+      rows.push(row);
+    }
+    const total = cellRow(['结算权益（以上逐项相加）', ...views.map((v) => v?.total ?? '—')]);
+    total.dataset.total = 'settled';
+    rows.push(total);
+    for (const [field, label] of Object.entries({
+      difference: '与按成交均价独立复算差额（U）',
+      target: '平仓数量（有符号目标仓）',
+      adjustment: '本次调仓数量（有符号差额）',
+      mark: '当前标记价',
+      entryPrice: '调仓成交均价',
+      exitMark: '边界映射标记价',
+      exitPrice: '预计平仓成交均价',
+      entryNominal: '调仓计费名义额（U）',
+      exitNominal: '平仓计费名义额（U）',
+      rate: '单边费率',
+      multiplier: '合约乘数',
+      fx: '结算币兑 U',
+      factor: '共同价格变动映射系数',
+      step: '数量步长'
+    }))
+      rows.push(cellRow([label, ...cols.map((x) => x?.[field] ?? '—')]));
+  }
   const table = $('path-rows');
   if (table.textContent !== rows.map((row) => row.textContent).join('')) table.replaceChildren(...rows);
   put(
     'settlement-note',
     paths
-      ? '终点按当前可见盘口平移至 VS 触线时的预计成交均价。表内价差、深度滑点和手续费各计一次。PF 模拟利润留在 PF 账本。外部已到账 ' +
+      ? '正数增加权益，负数减少权益。初始保证金单列为占用。独立复算容差 0.000000000001 U。终点按当前可见盘口平移至 VS 触线时的预计成交均价。表内价差、深度滑点和手续费各计一次。PF 模拟利润留在 PF 账本。外部已到账 ' +
           money(result.externalValue) +
           '。成功时预计可分 ' +
           money((c ?? result.heldCash)?.expectedUserPayout) +
           '，到账前不计入 Hype。'
+      : ''
+  );
+  put(
+    'path-mapping',
+    paths
+      ? ['fail', 'pass']
+          .map((k) => {
+            const legs = paths[k],
+              change = dec(legs.pf.exitMark).div(legs.pf.mark).minus(1);
+            return (
+              (k === 'fail' ? '失败' : '成功') +
+              ' · PF 标记价变化 ' +
+              pct(change) +
+              '，Hype 映射标记价 ' +
+              fmt(legs.hl.exitMark, 5)
+            );
+          })
+          .join(' ｜ ') +
+          '。两日内是否触线未知。按本帧映射系数、固定汇率和平移盘口结算；有其他仓位时假定其权益贡献不变。'
       : ''
   );
   const pass = paths?.pass;
@@ -685,10 +763,24 @@ function renderFunding(result, a, m, plan) {
           '、已知更优解 ' +
           s.pruned.incumbentBound +
           '。' +
-          (s.stoppedByBudget ? '已用尽预算，最优性未证实。' : '') +
+          (s.proof
+            ? '最优目标下界 ' +
+              (s.proof.lower ?? '未知') +
+              ' U，上界 ' +
+              (s.proof.upper ?? '未知') +
+              ' U，最优性容差 ' +
+              s.proof.optimalityTolerance +
+              ' U。'
+            : '') +
+          (s.complete && s.proof?.complete
+            ? '仅在本帧给定约束和合法网格内证明。'
+            : '搜索或条件不完整，最优性未证实。') +
+          (s.stoppedByBudget ? '已用尽预算。' : '') +
           (result.solveMs == null ? '' : '本帧联合求解 ' + result.solveMs + ' ms。')
       : ''
   );
+  if ($('bound-details').open)
+    put('bound-witness', s?.proof ? JSON.stringify(s.proof, null, 2) : '等待同一快照的搜索证明');
 }
 function renderConditions(result, a, m, plan) {
   renderFunding(result, a, m, plan);
@@ -889,6 +981,7 @@ function render() {
           : '已验算所设保证金条件')
       : result.issues[0] || result.notices.at(-1) || '等待当前快照';
   const plan = planning();
+  renderScan(result, m, r, plan, status);
   renderConditions(result, a, m, plan);
   const leverage = c?.candidateLeverage;
   const configured =
@@ -947,12 +1040,25 @@ function render() {
     !plan && !a.hl.error && fresh(fieldTime(a.hl, 'used'), Date.now(), Number(r.accountSecs) * 1000)
       ? a.hl.used
       : null;
-  put('already-used', plan ? '实际已占用金额待账户快照确认' : '当前已占用 ' + money(used));
+  const withdrawable =
+    !plan && !a.hl.error && fresh(a.hl.at, Date.now(), Number(r.accountSecs) * 1000)
+      ? a.hl.withdrawable
+      : null;
+  put(
+    'already-used',
+    (plan ? '当前占用按规划估算' : '当前账户占用 ' + money(used)) +
+      ' · 交易所可提金额 ' +
+      (withdrawable == null ? '未核实' : money(withdrawable))
+  );
   put('leverage-reason', why);
   const levRows = grid.map((x) =>
     cellRow([
       x.leverage ? x.leverage + '×' : '空仓',
       money(x.initial),
+      money(x.postEntryEquity),
+      money(x.marginUsed),
+      money(x.freeAfter) + ' / ' + money(x.freeFloor),
+      money(x.successEquity) + ' / ' + money(r.R_success),
       money(x.maintenance),
       money(x.stressedEquity ?? x.baseEquity),
       money(x.surplus),
@@ -965,7 +1071,8 @@ function render() {
         ? x.leverage === leverage
           ? '通过所设条件 · 最低可行'
           : '通过所设条件'
-        : constraintReason(x.reason)
+        : constraintReason(x.reason) +
+          (x.reason === 'hl_FREE_RESERVE' ? ' · R_free 缺 ' + money(x.constraint.shortfall) : '')
     ])
   );
   if ($('leverage-grid').textContent !== levRows.map((x) => x.textContent).join(''))
@@ -1104,20 +1211,15 @@ function render() {
   put(
     'cash-bridge',
     bridge
-      ? 'Hype 当前 ' +
-          money(bridge.start) +
-          '，至失败线标记盈亏 ' +
-          signedMoney(bridge.move) +
-          '，调仓及平仓成交价影响 ' +
-          signedMoney(out(dec(bridge.entryFill).plus(bridge.exitFill))) +
-          '，调仓费 ' +
-          money(bridge.entryFee) +
-          '、平仓费 ' +
-          money(bridge.exitFee) +
-          '、额外摩擦 ' +
-          money(bridge.friction) +
+      ? '失败路径 Hype（U） · ' +
+          Object.entries(ledgerLabels)
+            .map(([k, label]) => label + ' ' + fmt(bridge.entries[k], 4))
+            .join('，') +
           '，预计结算 ' +
-          money(bridge.settled)
+          fmt(bridge.settled, 4) +
+          '。显示舍入差 ' +
+          presentLedger(bridge).rounding +
+          ' U。'
       : ''
   );
   put('protect-funds', money(result.protect));
@@ -1356,7 +1458,11 @@ function render() {
     if (!trace) return;
     const { inputs, ...identity } = trace;
     const { trace: _, calculationRates, calculationMarket, ...outputs } = result;
-    const payload = JSON.stringify({ ...identity, inputs: JSON.parse(inputs), outputs }, null, 2);
+    const payload = JSON.stringify(
+      { ...identity, inputs: JSON.parse(inputs), outputs },
+      (_, v) => (typeof v === 'bigint' ? String(v) : v),
+      2
+    );
     const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
     const link = document.createElement('a');
     link.href = url;
@@ -1561,7 +1667,10 @@ function render() {
             ? ' · 整轮利润上限 ' + (b.profitMax == null ? '缺少本轮起点' : pct(b.profitMax))
             : '') +
           (b.code !== 'FEASIBLE'
-            ? ' · 按最低保护比例，成功端现金 ' + money(b.atMinimum.hlBefore) + '，要求留存 ' + money(r.R)
+            ? ' · 按最低保护比例，成功端现金 ' +
+              money(b.atMinimum.hlBefore) +
+              '，要求留存 ' +
+              money(r.R_success)
             : '')
       : '资金范围只需两边当前权益和已设规则。'
   );
@@ -1581,7 +1690,7 @@ function render() {
           '。成功端现金上限 = (Hype 权益 − 最低留存 − 额外摩擦预算) ÷ VS 到成功线的净值距离 = (' +
           fmt(result.cash.hl) +
           ' − ' +
-          fmt(r.R) +
+          fmt(r.R_success) +
           ' − ' +
           fmt(r.k) +
           ') ÷ ' +
@@ -1850,6 +1959,16 @@ function render() {
         : '当前使用手工账户快照，公开行情独立更新。'
   );
 }
+// Consume one coherent public tick at a time. A slow scan gets a chance to
+// publish before polling the latest book again; the independent expiry timer
+// still revokes data at its original timestamp.
+function pollNextMarket() {
+  if (running && ['pf', 'hl'].every((k) => quoteClock(feed[k], Date.now(), Number(r.quoteSecs) * 1000).ok)) {
+    quoteTimer = setTimeout(pollNextMarket, 120);
+    return;
+  }
+  refreshMarket();
+}
 async function refreshMarket() {
   const version = ++feedVersion,
     symbol = asset();
@@ -1873,7 +1992,7 @@ async function refreshMarket() {
   }
   if (res[1].status === 'fulfilled') rates = res[1].value.rates ?? {};
   render();
-  quoteTimer = setTimeout(refreshMarket, 1250);
+  quoteTimer = setTimeout(pollNextMarket, 1250);
 }
 async function refreshAccount() {
   const version = ++accountVersion;
@@ -2118,13 +2237,15 @@ for (const k of [
   'mode',
   'stage',
   'B',
-  'R',
+  'R_success',
+  'R_free',
   'riskPreference',
   'externalCurrency',
   ...Object.keys(ruleFields)
 ]) {
   $(k).addEventListener('input', () => {
     r[k] = $(k).value.trim();
+    if (k === 'mode' && r.mode !== 'auto') $('desk-details').open = true;
     r.editedAt = now();
     if (planning() && ['stage', 'registration'].includes(k)) inputs();
     if (k === 'external' || k === 'externalCurrency') r.externalAt = r.editedAt;
@@ -2300,13 +2421,16 @@ $('confirm-flat').onclick = () => {
   if (planning() || !window.confirm('确认刚刚核对两边全账户空仓、无挂单，并且均使用全仓模式？')) return;
   confirmFacts(useAPI() ? ['pf'] : ['pf', 'hl'], Object.keys(factNames));
 };
+$('ledger-exact').onchange = render;
+$('bound-details').ontoggle = render;
 window.addEventListener('storage', (event) => {
   if (event.key !== key) return;
   const next = JSON.parse(localStorage.getItem(key) || 'null');
   if (next?.version !== 1) return;
   Object.assign(state, { assets: next.assets, shared: next.shared, asset: next.asset });
-  Object.assign(state.rules, rules, next.rules);
-  Object.assign(state.planRules, rules, planDefaults, next.planRules);
+  state.rules = { ...rules, ...splitReserves(next.rules) };
+  state.planRules = { ...rules, ...planDefaults, ...splitReserves(next.planRules) };
+  r = planning() ? state.planRules : state.rules;
   const switched = feed.asset !== asset();
   if (switched) {
     feed = {};
@@ -2391,6 +2515,18 @@ $('confirm-quote').onclick = () => {
     put('manual-status', e.message);
   }
 };
+setupScan(
+  (path) => {
+    r.scanEndpoint = path;
+    r.editedAt = now();
+    save();
+    render();
+  },
+  () => {
+    $('desk-details').open = true;
+    $('quick-entry').click();
+  }
+);
 inputs();
 render();
 refreshMarket();

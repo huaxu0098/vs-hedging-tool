@@ -22,7 +22,7 @@ const lerp = (a, b, i) =>
           .div(b.i - a.i)
       );
 
-function segments(book, market, v, sign, old, applyCaps = true) {
+export function segments(book, market, v, sign, old, applyCaps = true, audit = null) {
   const l = market[v],
     step = positive(l.step),
     unit = units(l),
@@ -65,6 +65,22 @@ function segments(book, market, v, sign, old, applyCaps = true) {
     ceiling = min(ceiling, max(held, held.plus(l.capacity[sign > 0 ? 0 : 1])));
   const lo = ordinal(max(v === 'pf' ? 1 : 0, held.minus(exit).div(step).ceil())),
     hi = ordinal(ceiling.div(step).floor());
+  audit?.domains.push({
+    venue: v,
+    sign,
+    minIndex: lo,
+    maxIndex: hi,
+    step: out(step),
+    current: old,
+    entryDepth: out(entry),
+    exitDepth: out(exit),
+    capacity: l.capacity ?? null,
+    quantityLimit: l.maxQty ?? null,
+    credit: credit ?? null,
+    free: free?.toString() ?? null,
+    reserve: l.reserve ?? '0',
+    leverage: l.leverage ?? null
+  });
   if (hi < lo) return [];
   const starts = new Set([lo, hi + 1]);
   for (const c of cuts) {
@@ -111,7 +127,17 @@ function segments(book, market, v, sign, old, applyCaps = true) {
         const left = gaps(lo)[k],
           right = gaps(hi)[k];
         if (left == null || right == null) continue;
-        const range = clip(lo, hi, left, right);
+        const range = clip(
+          lo,
+          hi,
+          left,
+          right,
+          audit && {
+            audit,
+            context: { rule: k === 0 ? 'equityUtilization' : 'freeCollateral', venue: v, sign },
+            required: dec('0')
+          }
+        );
         if (!range) {
           hi = lo - 1;
           break;
@@ -139,7 +165,50 @@ function shiftAt(seg, i, target) {
 }
 // Clip an integer interval by an affine cash inequality. Positive slack also
 // admits near-boundary lots, which are subsequently rechecked by evaluateCandidate.
-function clip(low, high, left, right) {
+function clip(low, high, left, right, witness = null) {
+  const kept = clipAffine(low, high, left, right);
+  if (witness) {
+    const removed = kept
+      ? [
+          [low, kept[0] - 1],
+          [kept[1] + 1, high]
+        ]
+      : [[low, high]];
+    for (const [first, last] of removed) {
+      if (first > last) continue;
+      const at = (i) =>
+        low === high
+          ? left
+          : left.plus(
+              right
+                .minus(left)
+                .times(i - low)
+                .div(high - low)
+            );
+      const upper = max(at(first), at(last)).plus(witness.required);
+      recordBound(witness.audit, {
+        ...witness.context,
+        from: first,
+        to: last,
+        affineDomain: [low, high],
+        left: out(left.plus(witness.required)),
+        right: out(right.plus(witness.required)),
+        upper: out(upper),
+        threshold: out(witness.required)
+      });
+    }
+  }
+  return kept;
+}
+function recordBound(audit, row) {
+  if (audit.rows.length >= 12000) {
+    audit.omitted++;
+    return;
+  }
+  audit.rows.push(row);
+}
+// Retain adjacent integers on the safe side of every affine intersection.
+function clipAffine(low, high, left, right) {
   left = left.plus(slack);
   right = right.plus(slack);
   if (left.lt(0) && right.lt(0)) return null;
@@ -263,6 +332,7 @@ export function solveAuto(book, m, params, options = {}) {
     ratios = new Set(),
     seen = new Set(),
     current = [old('pf'), old('hl')];
+  const audit = { domains: [], rows: [], omitted: 0 };
   const pruned = { sizeBound: 0, invalidPrice: 0, cashBound: 0, incumbentBound: 0 };
   let gridPairs = 0n,
     leverageRows = 0,
@@ -324,6 +394,7 @@ export function solveAuto(book, m, params, options = {}) {
       candidates.length = Math.min(candidates.length, limit);
       best = candidates[0];
     } catch (e) {
+      if (e.message === 'LEDGER_MISMATCH') throw e;
       if (
         ![
           'INVALID_PRICE_ENDPOINT',
@@ -348,8 +419,8 @@ export function solveAuto(book, m, params, options = {}) {
   const branches = [],
     domain = [];
   for (const sign of [1, -1]) {
-    const pp = segments(book, m, 'pf', sign, current[0]),
-      hh = segments(book, m, 'hl', -sign, current[1]);
+    const pp = segments(book, m, 'pf', sign, current[0], true, audit),
+      hh = segments(book, m, 'hl', -sign, current[1], true, audit);
     const edge = (segments) =>
       segments.length
         ? {
@@ -381,6 +452,13 @@ export function solveAuto(book, m, params, options = {}) {
       candidates.length === limit &&
       seg.step.times(hi).lt(dec(candidates.at(-1).vsTargetQuantity).abs())
     ) {
+      recordBound(audit, {
+        rule: 'sizeBound',
+        sign: seg.sign,
+        pf: [lo, hi],
+        upper: out(seg.step.times(hi).times(units(m.pf)).times(m.pf.mark)),
+        threshold: candidates.at(-1).vsNotional
+      });
       pruned.sizeBound++;
       continue;
     }
@@ -391,8 +469,22 @@ export function solveAuto(book, m, params, options = {}) {
     }
     // A range whose most favourable boundary still crosses zero contains no executable path.
     const invalidBoundary = [p.floor, p.target].some((target) => {
-      const upper = max(shiftAt(seg, lo, target), shiftAt(seg, hi, target));
-      return [m.pf, m.hl].some((leg) => upper.times(leg.factor).plus(leg.mark).lte(0));
+      const upperShift = max(shiftAt(seg, lo, target), shiftAt(seg, hi, target));
+      return ['pf', 'hl'].some((venue) => {
+        const leg = m[venue],
+          upper = upperShift.times(leg.factor).plus(leg.mark);
+        if (upper.gt(0)) return false;
+        recordBound(audit, {
+          rule: 'invalidPrice',
+          sign: seg.sign,
+          pf: [lo, hi],
+          target,
+          venue,
+          upper: out(upper),
+          threshold: '0'
+        });
+        return true;
+      });
     });
     if (invalidBoundary) {
       pruned.invalidPrice++;
@@ -430,6 +522,11 @@ export function solveAuto(book, m, params, options = {}) {
       const debitFloor = minDelta
         .times(delayPerLot)
         .plus(h.a.i > 0 ? options.stress?.fundingDebit || '0' : '0');
+      const witness = (rule, required, shift) => ({
+        audit,
+        required,
+        context: { rule, sign: seg.sign, pf: [lo, hi], hl: [h.a.i, h.b.i], shift: out(shift) }
+      });
       const offset = adverseMove.times(-h.sign);
       let minFailure = failNeed,
         minSuccess = passNeed;
@@ -438,19 +535,31 @@ export function solveAuto(book, m, params, options = {}) {
         minFailure = max(minFailure, cashFloor);
         minSuccess = max(minSuccess, cashFloor);
       }
-      for (const [shift, need] of [
-        [fail.plus(offset), minFailure.plus(debitFloor)],
-        [pass.plus(offset), minSuccess.plus(debitFloor)]
+      for (const [rule, shift, need] of [
+        ['failureCash', fail.plus(offset), minFailure.plus(debitFloor)],
+        ['successEquity', pass.plus(offset), minSuccess.plus(debitFloor)]
       ]) {
         const [a, b] = range;
-        range = clip(a, b, cash(a, shift).minus(need), cash(b, shift).minus(need));
+        range = clip(
+          a,
+          b,
+          cash(a, shift).minus(need),
+          cash(b, shift).minus(need),
+          witness(rule, need, shift)
+        );
         if (!range) break;
       }
       if (range && coupledShift != null) {
         const need = minFailure.plus(passWeight.times(minSuccess.minus(minFailure))).plus(debitFloor);
         const shift = coupledShift.plus(offset);
         const [a, b] = range;
-        range = clip(a, b, cash(a, shift).minus(need), cash(b, shift).minus(need));
+        range = clip(
+          a,
+          b,
+          cash(a, shift).minus(need),
+          cash(b, shift).minus(need),
+          witness('coupledCash', need, shift)
+        );
       }
       if (!range) {
         pruned.cashBound++;
@@ -485,7 +594,13 @@ export function solveAuto(book, m, params, options = {}) {
           for (const shift of [fail, pass]) {
             const [a, b] = possible,
               need = dec(cutoff.worstCash).minus(book.external).plus(p.k);
-            possible = clip(a, b, cash(a, shift).minus(need), cash(b, shift).minus(need));
+            possible = clip(
+              a,
+              b,
+              cash(a, shift).minus(need),
+              cash(b, shift).minus(need),
+              witness('incumbentCash', need, shift)
+            );
             if (!possible) break;
           }
           if (!possible) {
@@ -536,7 +651,35 @@ export function solveAuto(book, m, params, options = {}) {
     current[0] === best.vsTargetQuantity &&
     current[1] === best.hlTargetQuantity &&
     (!best.candidateLeverage || String(best.candidateLeverage) === m.hl.configuredLeverage);
-  complete = complete && !unknown;
+  const boundsValid =
+    !audit.omitted &&
+    audit.rows.every((x) =>
+      x.rule === 'invalidPrice' ? dec(x.upper).lte(x.threshold) : dec(x.upper).lt(x.threshold)
+    );
+  complete = complete && !unknown && boundsValid;
+  const lower = best ? (cashFirst ? best.worstCash : best.vsNotional) : null;
+  const sizeUpper = max(
+    '0',
+    ...domain.map((d) =>
+      dec(d.pf?.max ?? '0')
+        .times(units(m.pf))
+        .times(m.pf.mark)
+    )
+  );
+  const proof = {
+    ...audit,
+    objective: cashFirst ? 'minCash' : 'pfNotional',
+    lower,
+    upper: complete ? lower : cashFirst ? null : out(sizeUpper),
+    complete,
+    boundsValid,
+    cashFloor: params.cashFloor ?? null,
+    winner: best ? [best.vsTargetQuantity, best.hlTargetQuantity, best.candidateLeverage] : null,
+    optimalityTolerance: '0',
+    outwardSlack: out(slack),
+    method:
+      '在单一深度分段上现金对数量为仿射函数。区间上界取两端较大值。PF 触线偏移为 A/i+B，按对冲方向取最有利边界；联合界采用相同 PF 数量的失败/成功凸组合。'
+  };
   const pressure = {};
   if (!cashFirst && params.movePct && p.stage === 'challenge')
     for (const sign of [1, -1]) pressure[sign] = requiredAtMove(book, m, p, current[0], sign, params.movePct);
@@ -566,6 +709,7 @@ export function solveAuto(book, m, params, options = {}) {
     domain,
     funding,
     coverage: {
+      proof,
       gridPairs: String(gridPairs),
       exactPairs: evaluations,
       leverageRows,

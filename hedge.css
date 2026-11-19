@@ -487,3 +487,26 @@ label input[type='checkbox'] {
 #missing-list {grid-column:1/-1;padding:0 18px 10px} #missing-list a {color:#d6efe9;margin-right:14px;display:inline-block}
 .frame-key {display:block;font-size:10px;opacity:.76;line-height:1.4;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 #separate-confirm {display:flex;flex-wrap:wrap;gap:6px} #separate-confirm button {font-size:12px}
+
+#scan-desk {display:grid;gap:12px;margin:12px 0 20px}
+.scan-quotes,.scan-sets {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.scan-quotes>div,.scan-sets article,#scan-results {padding:14px 18px;background:white;border:1px solid var(--line);border-radius:8px;min-width:0}
+.scan-quotes strong,.scan-sets strong {display:block;font-size:clamp(18px,2vw,26px);line-height:1.5}
+.scan-quotes small,.scan-sets small,#scan-status {color:var(--muted)}
+#scan-desk h2 {font-size:15px;margin:0}
+.scan-tools,.scan-slider {display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.scan-tools label {display:flex;align-items:center;gap:8px}
+.scan-slider input {flex:1;min-width:130px}
+#scan-results .table-wrap {max-height:270px;overflow:auto;margin:12px 0}
+#scan-results th {position:sticky;top:0;background:#eef3f4}
+#scan-rows tr {cursor:pointer}
+#scan-rows tr[aria-selected=true] {background:#d6ece6;color:#173e36}
+#scan-selected {font-weight:700}
+#scan-audit,#bound-witness {white-space:pre-wrap;max-height:25rem;overflow:auto;overflow-wrap:anywhere}
+#desk-details>summary {padding:12px 0;font-weight:650;cursor:pointer}
+#scan-status,#scan-results p {margin:4px 0}
+@media(max-width:700px){.scan-quotes,.scan-sets{gap:5px}.scan-quotes>div,.scan-sets article{padding:8px}.scan-sets strong,.scan-quotes strong{font-size:16px}.scan-tools label{flex-wrap:wrap}#scan-results{padding:10px}.scan-tools input{max-width:160px}}
+.scan-stale .scan-sets,.scan-stale #scan-results,.scan-stale #scan-intersection,.scan-stale #scan-loss {opacity:.55}
+#scan-focus {padding:10px 16px;border-left:3px solid #31846d;background:#e9f4ef}
+#scan-focus p {margin:2px 0}
+.scan-stale #scan-focus {opacity:.55}

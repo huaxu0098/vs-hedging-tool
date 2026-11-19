@@ -52,7 +52,7 @@ test('固定已有 PF 精确保留数量和方向，挂单不改变已成交 h',
 });
 test('未知 C_ref 保留 Funded 目标与前向现金，补录基准后只额外评估整轮收益', () => {
   const a = { ...accounts, hl: { ...accounts.hl, equity: '101.50' } };
-  const p = { ...r, stage: 'funded', R: '40' };
+  const p = { ...r, stage: 'funded', R_success: '40' };
   const x = calc(p, a);
   assert.equal(x.range.profitMax, null);
   assert.equal(x.round, null);

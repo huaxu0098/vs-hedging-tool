@@ -1,57 +1,5 @@
 import { dec, out, max, min, fundingInterval, normalizeExposure } from './math.js';
 
-// Cash is already marked at the frame price. Only the changed quantity trades on entry.
-export function settlementBridge(cash, l, target, adjustment, shift, entry, exit, friction = '0') {
-  const qty = dec(target),
-    delta = dec(adjustment);
-  const unit = dec(l.multiplier).times(l.fx);
-  const mark = dec(l.mark),
-    exitMark = mark.plus(dec(shift).times(l.factor));
-  const entryFill = delta.isZero() ? dec('0') : delta.times(unit).times(mark.minus(entry.price));
-  const move = qty.times(unit).times(exitMark.minus(mark));
-  const exitFill = qty.isZero() ? dec('0') : qty.times(unit).times(dec(exit.price).minus(exitMark));
-  // Mark to best quote and best quote to depth-weighted fill are disjoint.
-  const entrySpread = delta.isZero()
-    ? dec('0')
-    : delta.times(unit).times(mark.minus((delta.gt(0) ? l.asks : l.bids)[0][0]));
-  const exitBest = qty.isZero()
-    ? null
-    : dec((qty.gt(0) ? l.bids : l.asks)[0][0]).plus(dec(shift).times(l.factor));
-  const exitSpread = qty.isZero() ? dec('0') : qty.times(unit).times(exitBest.minus(exitMark));
-  const settled = dec(cash)
-    .plus(move)
-    .plus(entrySpread)
-    .plus(exitSpread)
-    .minus(entry.impact)
-    .minus(exit.impact)
-    .minus(entry.fee)
-    .minus(exit.fee)
-    .minus(friction);
-  return {
-    start: cash,
-    move: out(move),
-    entryFill: out(entryFill),
-    exitFill: out(exitFill),
-    entrySpread: out(entrySpread),
-    exitSpread: out(exitSpread),
-    entrySlippage: entry.impact,
-    exitSlippage: exit.impact,
-    entryFee: entry.fee,
-    exitFee: exit.fee,
-    entryPrice: entry.price,
-    exitPrice: exit.price,
-    mark: l.mark,
-    target,
-    adjustment,
-    multiplier: l.multiplier,
-    fx: l.fx,
-    step: l.step,
-    friction,
-    exitMark: out(exitMark),
-    settled: out(settled)
-  };
-}
-
 function executionDrag(leg) {
   return dec(leg.entryFee)
     .plus(leg.exitFee)

@@ -40,16 +40,26 @@ export function evaluateLeverageGrid(book, market, profile, pf, hl, checks) {
   const available = leg.directionalFree?.[side] ?? leg.free;
   // Include fill impact vs mark and the actual delta fee in available collateral.
   const executionCost = max(0, dec(book.hl).minus(initial.actual));
-  const common = base.constraints.filter(
-    (c) =>
-      ![
-        'hl_INITIAL_MARGIN',
-        'hl_AVAILABLE',
-        'hl_FREE_RESERVE',
-        'hl_UTILIZATION',
-        'hl_TIER_LEVERAGE'
-      ].includes(c.code)
-  );
+  const moneyRules = [
+    'FAILURE_RECOVERY',
+    'CASH_BEFORE_PAYOUT',
+    'ROUND_GAIN',
+    'STRESS_FAILURE',
+    'STRESS_RESERVE',
+    'STRESS_GAIN'
+  ];
+  const common = base.constraints
+    .filter((c) => !checks.scanRiskOnly || !moneyRules.includes(c.code))
+    .filter(
+      (c) =>
+        ![
+          'hl_INITIAL_MARGIN',
+          'hl_AVAILABLE',
+          'hl_FREE_RESERVE',
+          'hl_UTILIZATION',
+          'hl_TIER_LEVERAGE'
+        ].includes(c.code)
+    );
 
   const path = common
     .filter((c) => c.equity != null && c.code !== 'pf_MAINTENANCE_PATH')
@@ -139,6 +149,11 @@ export function evaluateLeverageGrid(book, market, profile, pf, hl, checks) {
     const row = {
       leverage: n || null,
       initial: out(margin),
+      marginUsed: out(total),
+      postEntryEquity: initial.actual,
+      freeAfter: extra.find((c) => c.code === 'hl_FREE_RESERVE')?.actual ?? null,
+      freeFloor: leg.reserve ?? '0',
+      successEquity: base.hlBeforePayout,
       maintenance: funding.maintenanceMargin,
       liquidation: base.liqMark,
       scenario: funding.scenario,

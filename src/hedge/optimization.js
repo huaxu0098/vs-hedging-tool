@@ -56,7 +56,8 @@ export function adjustmentTarget(book, market, params, checks, picked, prior, th
       )
         continue;
       return { pair, leverage: c.candidateLeverage, source, threshold: out(steps) };
-    } catch {
+    } catch (e) {
+      if (e.message === 'LEDGER_MISMATCH') throw e;
       /* Invalidated old target; use the new solution. */
     }
   }

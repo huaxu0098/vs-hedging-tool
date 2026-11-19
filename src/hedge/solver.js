@@ -13,7 +13,8 @@ import {
   solveExactBounds,
   profitSplit
 } from './math.js';
-import { settlementBridge, verifyFundingPair } from './funding-formula.js';
+import { verifyFundingPair } from './funding-formula.js';
+import { settlementBridge, sumPostings } from './settlement-ledger.js';
 import { balances, markEquity } from './book.js';
 
 const leg = (name, unit, mark, multiplier, step, fee, underlying) => ({
@@ -98,7 +99,7 @@ export function executionDetail(l, delta, shift = '0') {
   };
 }
 
-export function fundingProof(profile, market, c) {
+function settlementPaths(profile, market, c) {
   const paths = { fail: {}, pass: {} };
   for (const [venue, cash, target, delta] of [
     ['pf', profile.E, c.vsTargetQuantity, c.vsDeltaQuantity],
@@ -116,11 +117,14 @@ export function fundingProof(profile, market, c) {
         shift,
         entry,
         exit,
-        venue === 'hl' ? profile.k : '0'
+        venue === 'hl' ? (profile.k ?? '0') : '0'
       );
     }
   }
-  return verifyFundingPair(profile, market, c, paths);
+  return paths;
+}
+export function fundingProof(profile, market, c) {
+  return verifyFundingPair(profile, market, c, c.paths ?? settlementPaths(profile, market, c));
 }
 
 export function projectSettlementEquity(
@@ -269,7 +273,7 @@ export function validateMargin(s, m, v, q, shifts, catalog = { [m.id]: m }, fund
   const path = constraint(v + '_MAINTENANCE_PATH', out(worst), '0', 'U');
   path.equity = out(worstEquity);
   path.maintenance = out(worstMaintenance);
-  if (!dec(q).isZero() && worst.lte(0)) path.status = 'fail';
+  if (!dec(q).isZero() && worst.lte('1e-36')) path.status = 'fail';
   return [...checks, path];
 }
 // Each segment has constant sensitivity and a linear maintenance requirement.
@@ -411,9 +415,17 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
   );
   if (dec(lines.pass).times(v).lte(0) || dec(lines.fail).times(v).gte(0))
     throw Error('CANDIDATE_ALREADY_AT_BOUNDARY');
-  const personal = balances(s, { [m.id]: m.hl.mark }),
-    failHL = projectSettlementEquity(s, m, 'hl', hlQty, lines.fail, 'net_settlement', options.catalog),
-    passHL = projectSettlementEquity(s, m, 'hl', hlQty, lines.pass, 'net_settlement', options.catalog);
+  const paths =
+    options.currentSnapshot && Object.values(s.positions).every((x) => x.asset === m.id)
+      ? settlementPaths(p, m, {
+          lines,
+          vsTargetQuantity: pfQty,
+          hlTargetQuantity: hlQty,
+          vsDeltaQuantity: out(v.minus(qty(pos(s, m, 'pf')))),
+          hlDeltaQuantity: out(h.minus(qty(pos(s, m, 'hl'))))
+        })
+      : null;
+  const personal = balances(s, { [m.id]: m.hl.mark });
   const payout =
     p.stage === 'funded'
       ? profitSplit(
@@ -423,13 +435,23 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
         ).user
       : '0';
   const extra = options.currentSnapshot ? nonnegative(p.k) : new D(0);
-  const protect = failHL.plus(s.external).minus(extra),
-    before = passHL.minus(extra).plus(s.external).plus(personal.inTransit),
+  const failureHypeCash =
+    paths?.fail.hl.settled ??
+    out(
+      projectSettlementEquity(s, m, 'hl', hlQty, lines.fail, 'net_settlement', options.catalog).minus(extra)
+    );
+  const successHypeCash =
+    paths?.pass.hl.settled ??
+    out(
+      projectSettlementEquity(s, m, 'hl', hlQty, lines.pass, 'net_settlement', options.catalog).minus(extra)
+    );
+  const protect = dec(sumPostings([failureHypeCash, s.external])),
+    before = dec(sumPostings([successHypeCash, s.external, personal.inTransit])),
     after = before.plus(payout),
     round = s.ref == null ? null : after.minus(s.ref).minus(s.roundIn).plus(s.roundOut);
   constraints.push(
     constraint('FAILURE_RECOVERY', out(protect), p.B, 'U'),
-    constraint('CASH_BEFORE_PAYOUT', out(passHL.minus(extra)), p.R, 'U')
+    constraint('CASH_BEFORE_PAYOUT', successHypeCash, p.R, 'U')
   );
   if (p.stage === 'funded' && round !== null)
     constraints.push(constraint('ROUND_GAIN', out(round), p.g, 'U'));
@@ -619,10 +641,11 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
     stress,
     scenarioCash,
     endpointStress,
-    worstAvailableCash: out(min(protect, passHL.minus(extra).plus(s.external), ...scenarioCash)),
-    failureHypeCash: out(failHL.minus(extra)),
+    worstAvailableCash: out(min(protect, dec(successHypeCash).plus(s.external), ...scenarioCash)),
+    paths,
+    failureHypeCash,
     externalReceived: out(dec(s.external)),
-    hlBeforePayout: out(passHL.minus(extra)),
+    hlBeforePayout: successHypeCash,
     modelLiq,
     liqMark: liq,
     liqSource: useReference ? '当前仓平台参考' : '全仓档位测算',
@@ -1055,6 +1078,7 @@ export function solve(s, m, params, options = {}) {
                 candidates.push(r);
               else rejected.push(r);
             } catch (e) {
+              if (e.message === 'LEDGER_MISMATCH') throw e;
               rejected.push({
                 code: e.message,
                 targetEquity: target,

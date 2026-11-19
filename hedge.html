@@ -20,7 +20,7 @@
     </header>
     <main id="current" class="live-desk">
       <div class="heading">
-        <h1>实时双平台动态对冲计算</h1>
+        <h1>实时对冲比例扫描</h1>
         <div class="selectors">
           <label
             >资金来源<select id="funding-view">
@@ -39,7 +39,7 @@
           >
           <label
             >计算方式<select id="mode">
-              <option value="auto">自动联合求解</option>
+              <option value="auto">全网格比例扫描</option>
               <option value="keepPF">固定 VS 现仓，计算 Hype</option>
               <option value="keepHL">固定 Hype 现仓，计算 VS</option>
             </select></label
@@ -47,6 +47,21 @@
         </div>
       </div>
       <div id="funding-banner" class="funding-banner"></div>
+      <section id="scan-desk" aria-label="实时比例扫描">
+        <div class="scan-quotes"><div>VS 标记价<strong id="scan-pf-price">—</strong><small id="scan-pf-quote"></small></div><div>Hyperliquid 标记价<strong id="scan-hl-price">—</strong><small id="scan-hl-quote"></small></div><div>换汇后价差 · Hype − VS<strong id="scan-basis">—</strong><small id="scan-clock"></small></div></div>
+        <div class="scan-tools"><span id="scan-capital"></span><button type="button" id="scan-config">账户与资金规则</button></div>
+        <div class="scan-sets"><article><h2>本金保护比例</h2><strong id="scan-protect">—</strong><small id="scan-protect-count"></small></article><article><h2>成功端现金承受比例</h2><strong id="scan-survive">—</strong><small id="scan-survive-count"></small></article><article><h2>路径净盈利比例</h2><strong id="scan-profit">待选择终点</strong><small id="scan-profit-count"></small></article></div>
+        <div class="scan-tools"><label>净收益结算终点 <select id="scan-endpoint"><option value="">选择条件路径</option><option value="fail">VS 失败 · 双边平仓</option><option value="pass">VS 成功 · 分成到账前</option><option value="paid">Funded · 首次分成实际到账时</option></select></label><span id="scan-intersection"></span></div>
+        <div id="scan-focus" hidden><p id="scan-selected"></p><p id="scan-cash"></p><p id="scan-risk"></p></div><p id="scan-status" role="status"></p>
+        <div id="scan-results" hidden>
+          <div class="scan-tools"><h2>比例与双边目标仓位</h2><label>定位范围 <select id="scan-filter"><option value="legal">全部合法数量</option><option value="both">保护本金及留存</option><option value="joint">三项交集</option><option value="profit">选定路径净盈利</option><option value="protect">失败端保本金</option><option value="survive">成功端满足留存</option><option value="loss">成功端相对本金亏损</option><option value="high">高风险或资金缺口</option></select></label><label>查看比例（%） <input id="scan-percent" type="number" min="0" step="any" placeholder="输入比例，定位最近网格" /></label><button id="scan-find" type="button">定位比例</button><button id="scan-reset" type="button">回到默认候选</button></div>
+          <div class="table-wrap"><table><thead><tr><th>实际 h</th><th>PF 价值 / 数量</th><th>Hype 价值 / 数量</th><th>失败缺口率</th><th>成功端权益变化</th><th>所选终点净收益</th><th>初始保证金占用率 / 风险</th></tr></thead><tbody id="scan-rows"></tbody></table></div>
+          <label class="scan-slider">在所选 PF 仓位上逐个查看 Hype 数量步长<input id="scan-slider" type="range" min="0" max="0" value="0" step="1" /></label>
+          <details><summary>查看同一比例的其他 PF 规模</summary><div class="scan-tools"><label>PF 方向<select id="scan-side"><option value="1">多</option><option value="-1">空</option></select></label><label>PF 数量<input type="number" id="scan-size" min="0" step="any" /></label><button type="button" id="scan-scale">定位这组仓位</button></div></details><p id="scan-bands"></p>
+          <p id="scan-loss"></p><details id="scan-detail"><summary>所选比例的价格路径、费用流水与清算依据</summary><pre id="scan-audit"></pre></details>
+        </div>
+      </section>
+      <details id="desk-details"><summary>账户、资金规则与计算详情</summary>
       <section class="card" id="plan-settings">
         <h2 id="plan-heading">开考前资金规划</h2>
         <div class="form plan-form" id="plan-fields"></div>
@@ -74,7 +89,7 @@
           <strong id="fail-summary">—</strong><span id="cash-bridge"></span><span id="fail-parts"></span><span id="fail-change"></span>
         </article>
         <article>
-          <h2 id="pass-heading">成功路径预计 Hype 现金（双边平仓、分成到账前）</h2>
+          <h2 id="pass-heading">成功路径预计 Hype 账户权益（双边平仓、分成到账前）</h2>
           <strong id="pass-summary">—</strong><span id="pass-bridge"></span><span id="pass-change"></span>
         </article>
         <article>
@@ -95,7 +110,7 @@
         </article>
         <div class="desk-ratios">
           <div>当前实际对冲比例<strong id="current-h">—</strong></div>
-          <div>理论区间 · 现金约束<strong id="range">—</strong></div>
+          <div>简化理论区间 · 未计逐笔费用<strong id="range">—</strong></div>
           <div>目标对冲比例<strong id="target-h">—</strong></div>
         </div>
         <article>
@@ -117,10 +132,10 @@
         <h2>资金规则如何决定对冲比例</h2>
         <p id="formula-inputs"></p><p id="formula-bounds"></p><p id="formula-pair"></p>
         <details><summary>核对失败和成功路径的成交现金</summary>
-          <div class="table-wrap"><table><thead><tr><th>项目（U）</th><th>失败 · PF 模拟</th><th>失败 · Hype</th><th>成功 · PF 模拟</th><th>成功 · Hype</th></tr></thead>
+          <label><input id="ledger-exact" type="checkbox" /> 显示未舍入流水</label><div class="table-wrap"><table><thead><tr><th>资金流水（U）及核算依据</th><th>失败 · PF 模拟</th><th>失败 · Hype</th><th>成功 · PF 模拟</th><th>成功 · Hype</th></tr></thead>
           <tbody id="path-rows"></tbody></table></div><p id="settlement-note"></p>
         </details>
-        <p id="frame-times"></p>
+        <p id="path-mapping"></p><p id="frame-times"></p>
       </section>
       <section class="card" id="plan-comparison">
         <h2>双方案对照</h2>
@@ -198,7 +213,7 @@
                 <option value="funded">出金 · 首次分成</option>
               </select></label
             ><label>保护本金 B（含已付报名费，U）<input id="B" inputmode="decimal" /></label
-            ><label>成功时 Hype 至少留存 R（U）<input id="R" inputmode="decimal" /></label>
+            ><label>成功平仓后 Hype 最低权益 R_success（U）<input id="R_success" inputmode="decimal" /></label><label>开仓后最低可用抵押品 R_free（U）<input id="R_free" inputmode="decimal" /></label>
           </div>
         </div>
         <div id="quick-margin" class="form"></div>
@@ -211,7 +226,7 @@
           <summary>查看已验证的比例点</summary>
           <p id="points"></p>
         </details>
-        <p id="auto-search"></p><p id="search-coverage"></p><p id="hysteresis"></p>
+        <p id="auto-search"></p><p id="search-coverage"></p><details id="bound-details"><summary>核对本次搜索上界与剪枝区间</summary><pre id="bound-witness"></pre></details><p id="hysteresis"></p>
         <p id="two-day"></p>
         <p id="best-two"></p>
         <details>
@@ -223,7 +238,7 @@
                 <tr>
                   <th>杠杆</th>
                   <th>初始保证金</th>
-                  <th>当前维持保证金</th>
+                  <th>开仓后权益</th><th>占用保证金</th><th>开仓后可用抵押品 / R_free</th><th>成功平仓后权益 / R_success</th><th>当前维持保证金</th>
                   <th id="lev-equity-heading">基础情景权益</th>
                   <th>最低维持余量</th>
                   <th>预计强平标记价</th>
@@ -405,6 +420,7 @@
           现金范围按当前权益计算。条件仓位按双边盘口、差额成交费及数量步长核算，假设到达边界期间标的同步变动；未来基差、滑点变化和资金费待核实。
         </p>
       </section>
+      </details>
       <footer><a href="/dev/replay">开发测试 · 行情回放</a></footer>
     </main>
   </body>

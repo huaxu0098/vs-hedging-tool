@@ -44,7 +44,8 @@ export function profitSplit(e, baseline, share) {
 export function ruleState(p) {
   if (!['challenge', 'funded'].includes(p.stage)) throw Error('未知阶段');
   const e = dec(p.E),
-    target = positive(p.target);
+    target = dec(p.target);
+  if (dec(p.floor).lt(0) || dec(p.floor).gte(target)) return 'INVALID_PF_RULES';
   if (e.lte(nonnegative(p.floor))) return p.stage === 'challenge' ? 'CHALLENGE_FAILED' : 'FUNDED_FAILED';
   if (p.stage === 'funded' && target.lte(positive(p.baseline))) return 'NO_PAYOUT_TARGET';
   if (target.lte(e))

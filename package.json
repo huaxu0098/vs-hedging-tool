@@ -18,6 +18,7 @@
     "hedge": "node scripts/serve.js --hedge",
     "test:hedge": "node --test tests/hedge-*.test.js",
     "test:hedge:funding": "node --test tests/hedge-funding-formula.test.js && node scripts/qa/current-funding.js",
+    "test:hedge:ranges": "node --test --test-name-pattern=RANGE tests/hedge-auto.test.js && node scripts/qa/current-ranges.js",
     "test:hedge:opt": "node scripts/qa/current-optimization.js",
     "test:hedge:browser": "node scripts/qa/current-live.js",
     "test:hedge:internal": "node scripts/qa/hedge-browser.js",
