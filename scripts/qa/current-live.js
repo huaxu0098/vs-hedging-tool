@@ -32,6 +32,9 @@ try {
   await send('Page.navigate', { url: desk + '/' });
   await wait("document.querySelector('#calc-status')?.textContent");
   assert.equal(await val('funding-view'), 'plan');
+  assert.equal(await run("document.querySelectorAll('#planLeverage,#hl-leverage').length"), 0);
+  assert.equal(await run("document.getElementById('plan-cross-flat').checked"), false);
+  await click('#plan-cross-flat');
   const hasPlan = "document.querySelector('#best-two').textContent.includes('第二优 PF')";
   await wait(hasPlan, 40000);
   assert.match(await text('#plan-basis'), /500.00 U.*91.00 U.*409.00 U/);
@@ -41,10 +44,30 @@ try {
     'PLAN_LIVE',
     JSON.stringify(
       await run(
-        "Object.fromEntries(['pf-quote','hl-quote','best-two','legs','range','target-h','fail-summary','fail-change','pass-summary','pass-change','times'].map(k=>[k,document.getElementById(k).textContent]))"
+        "Object.fromEntries(['pf-quote','hl-quote','best-two','legs','range','target-h','fail-summary','fail-change','pass-summary','pass-change','suggested-leverage','configured-leverage','leverage-cap','leverage-reason','risk-values','times'].map(k=>[k,document.getElementById(k).textContent]))"
       )
     )
   );
+  for (const [field, value] of Object.entries({
+    jumpBps: '1',
+    delayBps: '1',
+    adverseBps: '1',
+    fundingDebit: '0.05'
+  }))
+    await set(field, value);
+  await wait(
+    hasPlan + " && document.getElementById('stress-assumptions').textContent.includes('四项非零')",
+    40000
+  );
+  console.log(
+    'LEV_STRESS_LIVE',
+    JSON.stringify(
+      await run(
+        "Object.fromEntries(['pf-summary','hl-summary','target-h','leverage-cap','suggested-leverage','configured-leverage','risk-values','leverage-reason','auto-search','quotes','times'].map(id=>[id,document.getElementById(id).textContent]))"
+      )
+    )
+  );
+  for (const field of ['jumpBps', 'delayBps', 'adverseBps', 'fundingDebit']) await set(field, '');
   await set('jumpBps', '0');
   await wait(hasPlan);
   assert.match(await text('#stress-assumptions'), /零压力假设.*跳价/);
@@ -82,7 +105,9 @@ try {
   assert.equal(await val('hl-qty'), '');
   await click('#confirm-flat');
   await wait(hasPlan, 30000);
-  assert.match(await text('#best-two'), /实际杠杆未录入/);
+  assert.match(await text('#suggested-leverage'), /^[1-9][0-9]*×$/);
+  assert.match(await text('#leverage-status'), /LEVERAGE_UNVERIFIED/);
+  assert.ok(await run("document.getElementById('leverage-grid').rows.length>1"));
   assert.equal(await val('pf-qty'), '0');
   assert.equal(await val('hl-qty'), '0');
   assert.match(await text('#top-auto'), /淘汰/);
@@ -232,13 +257,15 @@ try {
   await wait("document.querySelector('#sync-status').textContent.includes('返回账户价值')", 25000);
   console.log(
     '公开账户与挂单',
+    await text('#configured-leverage'),
+    await text('#leverage-status'),
     await text('#sync-status'),
     await val('hl-qty'),
     (await text('#order-detail')).slice(0, 150)
   );
   await b.set('#hl-source', 'manual');
   await set('mode', 'keepPF');
-  await position('0.08', '-0.005');
+  await position('0.08', '-0.005', { leverage: '10' });
   for (const [id, value] of Object.entries({
     'pf-free': '9700',
     'hl-free': '375',
@@ -246,7 +273,7 @@ try {
     'hl-otherHold': '0',
     'pf-marginMode': 'cross',
     'hl-marginMode': 'cross',
-    'hl-leverage': '10',
+
     R: '100'
   }))
     await set(id, value);
@@ -336,9 +363,9 @@ try {
       recommended,
     25000
   );
-  await set('objective', 'cash');
+
   await wait("document.querySelector('#auto-search').textContent.includes('AUTO_FEASIBLE')", 30000);
-  console.log('AUTO 保守排序', await text('#auto-search'), await text('#top-auto'));
+  console.log('AUTO 杠杆联合排序', await text('#auto-search'), await text('#top-auto'));
   await send('Network.emulateNetworkConditions', {
     offline: true,
     latency: 0,

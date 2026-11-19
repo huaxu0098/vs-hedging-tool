@@ -76,6 +76,7 @@ export async function currentMarket(asset) {
               receivedAt: d.receivedAt,
               sizeDecimals: d.sizeDecimals,
               maxLeverage: d.maxLeverage,
+              onlyIsolated: d.onlyIsolated,
               marginTiers:
                 d.marginTables?.find(([id]) => id === d.marginTableId)?.[1]?.marginTiers ??
                 (Number.isInteger(d.marginTableId) && d.marginTableId > 0 && d.marginTableId < 50

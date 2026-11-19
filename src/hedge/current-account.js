@@ -52,6 +52,9 @@ export async function accountSnapshot(user, asset, query) {
     anchor,
     orders: mapped,
     mode,
+    crossPoolVerified:
+      result(0).crossMarginSummary?.accountValue != null &&
+      dec(String(result(0).crossMarginSummary.accountValue)).eq(account.equity),
     unsupported,
     marginMode,
     otherPositions: account.positions.some((p) => p.symbol !== asset && !dec(p.qty).isZero()),
@@ -67,7 +70,9 @@ export async function accountSnapshot(user, asset, query) {
       validCap && Array.isArray(cap.availableToTrade) && cap.availableToTrade.length === 2
         ? cap.availableToTrade.map((x) => out(nonnegative(x)))
         : null,
-    leverage: validCap ? String(cap.leverage?.value ?? '') : null,
+    configuredLeverage: (validCap ? cap.leverage?.value : null) ?? pos?.leverage?.value ?? null,
+    leverage: String((validCap ? cap.leverage?.value : null) ?? pos?.leverage?.value ?? '') || null,
+    currentMarginCredit: !unsupported && marginMode === 'cross' && pos ? pos.margin : null,
     capacity: validCap ? cap.maxTradeSzs : null,
     fee: result(4)?.userCrossRate ? out(nonnegative(result(4).userCrossRate)) : null,
     used: account.used,
@@ -87,6 +92,8 @@ export function manualAccount(state, asset, side) {
   return {
     ...leg,
     equity,
+    configuredLeverage: null,
+    currentMarginCredit: null,
     equityAt,
     qtyAt: leg.qtyAt ?? null,
     freeAt: leg.origins?.free?.at ?? null,
@@ -107,10 +114,10 @@ export function presetAccount(r, side) {
   const common = {
     sourceKind: 'plan',
     source: '预设资金规划',
-    qty: '0',
-    orders: [],
-    otherHold: '0',
-    marginMode: 'cross'
+    qty: r.planCrossFlat === true ? '0' : null,
+    orders: r.planCrossFlat === true ? [] : null,
+    otherHold: r.planCrossFlat === true ? '0' : null,
+    marginMode: r.planCrossFlat === true ? 'cross' : null
   };
   try {
     const capital = nonnegative(r.planCapital);
@@ -125,8 +132,7 @@ export function presetAccount(r, side) {
     return {
       ...common,
       equity,
-      free: equity,
-      leverage: side === 'hl' ? out(positive(r.planLeverage)) : null
+      free: r.planCrossFlat === true ? equity : null
     };
   } catch (e) {
     return { ...common, error: '请核对预设参数：' + e.message };

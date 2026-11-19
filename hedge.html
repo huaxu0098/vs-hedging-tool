@@ -44,18 +44,13 @@
               <option value="keepHL">固定 Hype 现仓，计算 VS</option>
             </select></label
           >
-          <label id="objective-label"
-            >优化目标<select id="objective">
-              <option value="size">最大可行 PF 仓位</option>
-              <option value="cash">保守现金优先</option>
-            </select></label
-          >
         </div>
       </div>
       <section class="card" id="plan-settings">
         <h2 id="plan-heading">开考前资金规划</h2>
         <div class="form plan-form" id="plan-fields"></div>
         <p id="plan-basis"></p>
+        <label><input type="checkbox" id="plan-cross-flat" /> 本次规划采用双边全仓、空仓且无挂单</label>
       </section>
       <section class="intake" aria-label="数据检查">
         <div>
@@ -102,6 +97,15 @@
           <div>理论区间 · 现金约束<strong id="range">—</strong></div>
           <div>目标对冲比例<strong id="target-h">—</strong></div>
         </div>
+        <article>
+          <h2>Hype 建议杠杆</h2>
+          <strong id="suggested-leverage">—</strong><span id="leverage-cap"></span>
+        </article>
+        <article>
+          <h2>Hype 当前账户设置</h2>
+          <strong id="configured-leverage">未知</strong><span id="leverage-status"></span>
+        </article>
+        <p id="leverage-reason"></p>
         <p id="verified-range"></p>
         <p id="summary-status" role="status"></p>
       </section>
@@ -177,6 +181,25 @@
         <p id="auto-search"></p>
         <p id="two-day"></p>
         <p id="best-two"></p>
+        <details>
+          <summary>首选仓位各档杠杆核算</summary>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>杠杆</th>
+                  <th>初始保证金</th>
+                  <th>当前维持保证金</th>
+                  <th>压力后权益</th>
+                  <th>最低维持余量</th>
+                  <th>预计强平标记价</th>
+                  <th>验算</th>
+                </tr>
+              </thead>
+              <tbody id="leverage-grid"></tbody>
+            </table>
+          </div>
+        </details>
         <details id="alternatives" open>
           <summary>候选仓位与淘汰原因</summary>
           <div class="table-wrap">
@@ -186,6 +209,9 @@
                   <th>PF 目标数量 / 名义额</th>
                   <th>Hype 目标数量 / 名义额</th>
                   <th>比例</th>
+                  <th>候选杠杆</th>
+                  <th>Hype 初始保证金</th>
+                  <th>压力后最低维持余量</th>
                   <th>最差压力现金</th>
                   <th>强平距离</th>
                   <th>保证金占用</th>

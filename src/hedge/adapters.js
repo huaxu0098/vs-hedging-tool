@@ -224,6 +224,7 @@ export async function collectHype({ symbol, user = '', now = Date.now(), request
     funding: norm(ctx.funding),
     sizeDecimals: spec.szDecimals,
     maxLeverage: spec.maxLeverage,
+    onlyIsolated: spec.onlyIsolated === true || ['strictIsolated', 'noCross'].includes(spec.marginMode),
     marginTables: meta[0].marginTables,
     marginTableId: spec.marginTableId,
     collateralToken: meta[0].collateralToken,

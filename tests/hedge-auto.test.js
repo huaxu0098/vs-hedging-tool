@@ -36,6 +36,7 @@ function fixture() {
         symbol: 'BTC',
         sizeDecimals: 0,
         collateralToken: 0,
+        maxLeverage: 10,
         maxQty: '6',
         marginTiers: [{ lowerBound: '0', maxLeverage: 10 }]
       },
@@ -129,6 +130,8 @@ test('AUTO09 达到已证明最优的现仓保持，双边差额为零', () => {
     c = calc().candidate;
   f.a.pf.qty = c.vsTargetQuantity;
   f.a.hl.qty = c.hlTargetQuantity;
+  f.a.hl.configuredLeverage = String(c.candidateLeverage);
+  f.a.hl.currentMarginCredit = c.requiredInitialMargin;
   const x = calc({}, f);
   assert.equal(x.autoStatus, 'AUTO_HOLD');
   assert.equal(x.candidate.vsDeltaQuantity, '0');
@@ -156,7 +159,7 @@ test('AUTO11 已到账外币折算、未知估值、在途和分成分开', () =
   assert.equal(y.protect, '120');
   assert.match(y.notices.join(' '), /估值未确认/);
 });
-test('AUTO12 最优性与完整枚举逐笔交叉验证，两种排序及搜索未完成状态', () => {
+test('AUTO12 逐仓位逐杠杆穷举对照，含非零压力和搜索未完成状态', () => {
   const s = createBook({ id: 'grid', mode: 'demo', time: at });
   s.pf = '1000';
   s.hl = '120';
@@ -185,29 +188,38 @@ test('AUTO12 最优性与完整枚举逐笔交叉验证，两种排序及搜索�
         ['100.3', '20']
       ]
     });
-  for (const objective of ['size', 'cash']) {
-    const params = { objective, R: '20', g: '0', k: '0' },
-      opts = { currentSnapshot: true, liveLimits: true },
+  base.hl.exchangeMaxLeverage = 5;
+  base.hl.tiers[0].maxLeverage = '5';
+  for (const stress of [null, { jumpBps: '5', delayBps: '3', basisBps: '1', fundingDebit: '0.02' }]) {
+    const params = { objective: 'size', R: '20', g: '0', k: '0' },
+      opts = { currentSnapshot: true, liveLimits: true, stress },
       p = profileInputs(s, params, base),
       all = [];
     for (const d of [1, -1])
       for (let i = 1; i <= 10; i++)
         for (let j = 0; j <= 6; j++) {
-          try {
-            const c = evaluateCandidate(s, base, p, String(d * i), String(-d * j), opts);
-            if (c.code === 'FEASIBLE') {
-              c.worstCash = out(min(c.failureCash, c.pressureCashAfter));
-              all.push(c);
+          let winner = null;
+          for (let lev = 1; lev <= base.hl.exchangeMaxLeverage; lev++) {
+            try {
+              const market = { ...base, hl: { ...base.hl, leverage: String(lev) } };
+              const c = evaluateCandidate(s, market, p, String(d * i), String(-d * j), opts);
+              if (c.code !== 'FEASIBLE') continue;
+              c.candidateLeverage = j ? lev : null;
+              c.worstCash = out(min(c.failureCash, c.pressureCashAfter, ...c.scenarioCash));
+              if (!winner || compareAuto(c, winner) < 0) winner = c;
+            } catch (e) {
+              assert.match(e.message, /INVALID_PRICE_ENDPOINT|CANDIDATE_ALREADY_AT_BOUNDARY/);
             }
-          } catch {}
+          }
+          if (winner) all.push(winner);
         }
-    all.sort((a, b) => compareAuto(a, b, objective));
+    all.sort(compareAuto);
     assert.ok(all.length > 5);
     const solved = solveAuto(s, base, params, opts);
     assert.equal(solved.searchComplete, true);
     assert.deepEqual(
-      solved.candidates.map((x) => [x.vsTargetQuantity, x.hlTargetQuantity]),
-      all.slice(0, 5).map((x) => [x.vsTargetQuantity, x.hlTargetQuantity])
+      solved.candidates.map((x) => [x.vsTargetQuantity, x.hlTargetQuantity, x.candidateLeverage]),
+      all.slice(0, 5).map((x) => [x.vsTargetQuantity, x.hlTargetQuantity, x.candidateLeverage])
     );
     const partial = solveAuto(s, base, params, { ...opts, searchBudget: 1 });
     assert.equal(partial.searchComplete, false);
@@ -219,6 +231,7 @@ test('自动仓位同时校验待成交敞口与跳价、资金费、延迟压�
   f.a.hl.orders = [{ qty: '1', conditional: true }];
   assert.equal(calc({}, f).autoStatus, 'AUTO_PARTIAL');
   f.a.hl.orders = [{ qty: '2' }];
+  f.a.hl.configuredLeverage = '5';
   const x = calc({}, f);
   assert.ok(dec(x.candidate.hlDeltaQuantity).gte('2'));
   assert.equal(x.adjust.hl.remaining, out(dec(x.candidate.hlDeltaQuantity).minus('2')));
@@ -279,19 +292,18 @@ test('保护金不复用旧 Hype 权益，保证金与外部现金独立确认',
   assert.equal(x.marginHL, '12');
 });
 
-test('未知数量、明确空仓及缺实际杠杆的全额抵押条件求解严格区分', () => {
+test('未知数量、明确空仓及缺少实际设置的档位搜索严格区分', () => {
   const f = fixture();
   f.a.hl.qty = '';
   assert.equal(calc({}, f).qty.hl, null);
   f.a.hl.qty = '0';
   delete f.a.hl.leverage;
-  assert.equal(calc({}, f).candidate, undefined);
+  assert.ok(calc({}, f).candidate);
   f.a.hl.flatConfirmedAt = at;
   const x = calc({ B: '120', R: '10' }, f);
   assert.ok(x.candidate, x.issues.join(' '));
-  assert.equal(x.autoStatus, 'AUTO_PARTIAL');
-  assert.match(x.sizingAssumption, /实际杠杆未录入/);
-  assert.ok(dec(x.candidate.hlNotional).lte(f.a.hl.free));
+  assert.equal(x.leverageStatus, 'LEVERAGE_UNVERIFIED');
+  assert.ok(dec(x.candidate.requiredInitialMargin).lte(f.a.hl.free));
   f.a.hl.marginMode = 'isolated';
   assert.equal(calc({}, f).candidate, undefined);
 });
@@ -327,7 +339,7 @@ test('预设按本金扣一次报名费，隔离账户来源；未开户也能�
     planPF: '1000',
     planCapital: '211',
     registration: '91',
-    planLeverage: '5',
+    planCrossFlat: true,
     planFundedCash: '101.50'
   };
   const accounts = { pf: presetAccount(r, 'pf'), hl: presetAccount(r, 'hl') };
@@ -343,4 +355,205 @@ test('预设按本金扣一次报名费，隔离账户来源；未开户也能�
   broken.errors = { hl: '接口断开' };
   assert.equal(calculateCurrent(r, accounts, broken, {}, t).candidate, undefined);
   assert.equal(accounts.hl.equity, '120');
+});
+
+test('LEV01 AUTO 双边合法数量和杠杆联合搜索，无杠杆输入，无静默空仓', async () => {
+  const { presetAccount } = await import('../src/hedge/current-account.js');
+  const f = fixture();
+  delete f.a.hl.leverage;
+  const x = calc({}, f),
+    c = x.candidate;
+  assert.ok(c);
+  assert.deepEqual(
+    c.leverageGrid.map((row) => row.leverage),
+    Array.from({ length: 10 }, (_, i) => i + 1)
+  );
+  assert.ok(c.leverageGrid.filter((row) => row.status === 'pass').length > 1);
+  const plan = { ...inputs, planCapital: '211', planPF: '1000' };
+  assert.equal(presetAccount(plan, 'hl').qty, null);
+  assert.equal(presetAccount({ ...plan, planCrossFlat: true }, 'hl').qty, '0');
+});
+
+test('LEV02 相同仓位各档保证金、跨档强平根、跳价与调仓延迟均可独立复算', async () => {
+  const { evaluateLeverageGrid } = await import('../src/hedge/leverage.js');
+  const s = createBook({ id: 'tier', mode: 'demo', time: at });
+  Object.assign(s, {
+    pf: '1000',
+    hl: '120',
+    B: '160',
+    challengeFloor: '900',
+    challengeTarget: '1100',
+    positions: {}
+  });
+  const m = demoMarket('unit');
+  for (const leg of [m.pf, m.hl])
+    Object.assign(leg, {
+      mark: '100',
+      step: '1',
+      rate: '0',
+      bids: [['100', '100']],
+      asks: [['100', '100']],
+      free: leg === m.hl ? '120' : '1000',
+      reserve: '0',
+      leverage: '10',
+      utilization: '1'
+    });
+  Object.assign(m.hl, {
+    exchangeMaxLeverage: 10,
+    tiers: [
+      { from: '0', mmr: '0.05', deduction: '0', maxLeverage: '10' },
+      { from: '450', mmr: '0.1', deduction: '22.5', maxLeverage: '5' }
+    ]
+  });
+  const p = profileInputs(s, { R: '20', g: '0', k: '0' }, m);
+  const solve = (opts) =>
+    evaluateLeverageGrid(s, m, p, '10', '-4', { currentSnapshot: true, liveLimits: true, ...opts });
+  const clean = solve({});
+  for (const row of clean.leverageGrid) {
+    assert.equal(row.initial, out(dec('400').div(row.leverage)));
+    assert.equal(row.maintenance, '20');
+    assert.equal(row.liquidation, out(dec('542.5').div('4.4')));
+    assert.equal(row.stressedEquity, '80');
+    assert.equal(row.surplus, '58');
+  }
+  const stress = solve({ stress: { jumpBps: '100', basisBps: '0', delayBps: '50', fundingDebit: '1' } });
+  assert.equal(stress.stressedEquity, '73'); // 120 - 4*(111-100) - 2 delay - 1 funding
+  assert.equal(stress.stressedMaintenance, '22.2');
+  assert.equal(stress.stressedSurplus, '50.8');
+  assert.equal(stress.stressLiqMark, out(dec('539.5').div('4.4')));
+  assert.ok(stress.constraints.some((x) => x.code === 'STRESS_FAILURE' && x.status === 'fail'));
+  assert.ok(stress.stress.some((x) => x.name.includes('原仓')));
+});
+
+test('LEV03 最大杠杆仍无法跨过缓冲时搜较小规模；全部失败则无解', () => {
+  const largest = calc().candidate;
+  const x = calc({ minBuffer: '22' });
+  assert.ok(x.candidate, x.issues.join(' '));
+  assert.ok(dec(x.candidate.vsNotional).lt(largest.vsNotional));
+  assert.ok(x.candidate.priceBuffer == null || dec(x.candidate.priceBuffer).gte('22'));
+  assert.ok(
+    x.rejections.some((row) => row.candidate.leverageGrid?.every((level) => level.status === 'fail'))
+  );
+  const impossible = calc({ minMaintenanceSurplus: '2000' });
+  assert.equal(impossible.autoStatus, 'AUTO_INFEASIBLE');
+  assert.equal(impossible.candidate, undefined);
+});
+
+test('LEV04 排序逐项比较名义额、最差现金、缓冲、保证金，完全并列选低杠杆', () => {
+  const c = calc().candidate,
+    sort = (patch) => compareAuto(c, { ...c, ...patch }, 'size');
+  assert.ok(sort({ vsNotional: out(dec(c.vsNotional).minus(1)), worstCash: '100000' }) < 0);
+  assert.ok(sort({ worstCash: out(dec(c.worstCash).minus(1)) }) < 0);
+  assert.ok(sort({ stressPriceBuffer: '0' }) < 0);
+  assert.ok(sort({ initialMargin: ['100000', '100000'], candidateLeverage: 1 }) < 0);
+  assert.ok(compareAuto({ ...c, candidateLeverage: 3 }, { ...c, candidateLeverage: 4 }, 'size') < 0);
+});
+
+test('LEV05 未读取当前设置仍能计算条件仓位；历史规划与手填杠杆不定义搜索范围', () => {
+  const f = fixture();
+  delete f.a.hl.leverage;
+  const a = calc({ planLeverage: '1' }, f);
+  f.a.hl.leverage = '2';
+  const b = calc({ planLeverage: '99' }, f);
+  assert.equal(a.leverageStatus, 'LEVERAGE_UNVERIFIED');
+  assert.equal(a.configuredLeverage, null);
+  assert.ok(a.candidate.candidateLeverage > 2);
+  assert.deepEqual(a.candidate.leverageGrid, b.candidate.leverageGrid);
+});
+
+test('LEV06 模式、全仓资格、合约上限或维持表不完整时无实盘杠杆结论', () => {
+  for (const change of [
+    (f) => delete f.a.hl.marginMode,
+    (f) => (f.a.hl.marginMode = 'isolated'),
+    (f) => (f.m.hl.onlyIsolated = true),
+    (f) => delete f.m.hl.maxLeverage,
+    (f) => delete f.m.hl.marginTiers,
+    (f) => (f.m.hl.marginTiers = [{ lowerBound: '30', maxLeverage: 5 }]),
+    (f) => (f.a.hl.crossPoolVerified = false)
+  ]) {
+    const f = fixture();
+    change(f);
+    const x = calc({}, f);
+    assert.equal(x.leverageStatus, 'LEVERAGE_UNVERIFIED');
+    assert.equal(x.candidate, undefined);
+    assert.ok(x.issues.length);
+  }
+});
+
+test('LEV07 只读账户新快照能改变可用档位，已用保证金只按原仓释放一次', async () => {
+  const { accountSnapshot } = await import('../src/hedge/current-account.js');
+  const user = '0x' + '1'.repeat(40),
+    calls = [];
+  async function snap(level) {
+    return accountSnapshot(user, 'BTC', async (body) => {
+      calls.push(body.type);
+      const summary = { accountValue: '120', totalMarginUsed: '0' };
+      const byType = {
+        clearinghouseState: {
+          time: t,
+          marginSummary: summary,
+          crossMarginSummary: summary,
+          assetPositions: [],
+          withdrawable: '120'
+        },
+        frontendOpenOrders: [],
+        userAbstraction: 'disabled',
+        activeAssetData: {
+          user,
+          coin: 'BTC',
+          leverage: { type: 'cross', value: level },
+          availableToTrade: ['120', '120'],
+          maxTradeSzs: ['100', '100']
+        },
+        userFees: {}
+      };
+      return byType[body.type];
+    });
+  }
+  const f = fixture();
+  f.a.hl = await snap(3);
+  const first = calc({}, f);
+  f.a.hl = await snap(7);
+  const second = calc({}, f);
+  assert.equal(first.configuredLeverage, 3);
+  assert.equal(second.configuredLeverage, 7);
+  assert.equal(first.candidate.candidateLeverage, second.candidate.candidateLeverage);
+  assert.deepEqual(
+    [...new Set(calls)],
+    ['clearinghouseState', 'frontendOpenOrders', 'userAbstraction', 'activeAssetData', 'userFees']
+  );
+  const c = second.candidate;
+  Object.assign(f.a.hl, {
+    qty: c.hlTargetQuantity,
+    currentMarginCredit: '15',
+    directionalFree: ['50', '50']
+  });
+  const next = calc({}, f).candidate;
+  assert.ok(next);
+  assert.equal(
+    next.constraints.find((v) => v.code === 'hl_FREE_RESERVE').actual,
+    out(dec('65').minus(next.requiredInitialMargin))
+  );
+});
+
+test('LEV08 按合法最终数量重算档位与清算，跨边界复核', () => {
+  const f = fixture();
+  f.m.hl.maxLeverage = 8;
+  f.m.hl.marginTiers = [
+    { lowerBound: '0', maxLeverage: 10 },
+    { lowerBound: '400', maxLeverage: 6 }
+  ];
+  f.m.hl.sizeDecimals = 0;
+  f.m.hl.contractMultiplier = '2';
+  const x = calc({}, f);
+  assert.ok(x.candidate);
+  for (const c of x.top) {
+    const qty = dec(c.hlTargetQuantity);
+    assert.ok(qty.isInteger());
+    const n = qty.abs().times(200);
+    assert.equal(c.hlNotional, out(n));
+    assert.equal(c.exchangeMaxLeverage, n.gte(400) ? 6 : 8);
+    assert.equal(c.requiredInitialMargin, out(n.div(c.candidateLeverage)));
+    assert.equal(c.maintenanceMargin, out(n.gte(400) ? dec('20').plus(n.minus(400).div(12)) : n.div(20)));
+  }
 });

@@ -2,7 +2,8 @@
 // settlement at today's mark is affine in lots; the boundary shift is A/lots + B.
 // Those bounds let us exclude whole rectangles without assuming a hedge ratio.
 import { D, dec, positive, nonnegative, out, min, max, profitSplit } from './math.js';
-import { evaluateCandidate, executionDetail, projectSettlementEquity, profileInputs } from './solver.js';
+import { evaluateLeverageGrid } from './leverage.js';
+import { executionDetail, projectSettlementEquity, profileInputs } from './solver.js';
 
 const slack = dec('1e-28'); // Round bounds outwards; final admission always uses the exact candidate.
 const units = (l) => positive(l.multiplier).times(l.fx);
@@ -39,18 +40,29 @@ function segments(book, market, v, sign, old, applyCaps = true) {
     cuts.push(exit, held.minus(exit));
   }
   let ceiling = min(exit, held.plus(entry));
+  const credit = l.currentMarginCredit;
   const free = l.directionalFree ? max(...l.directionalFree.map(dec)) : l.free;
   if (applyCaps && free != null && l.leverage)
     ceiling = min(
       ceiling,
-      held.abs().plus(
-        max(0, dec(free).minus(l.reserve ?? '0'))
-          .times(l.leverage)
-          .div(nominal)
-      )
+      credit != null
+        ? max(
+            0,
+            dec(free)
+              .plus(credit)
+              .minus(l.reserve ?? '0')
+          )
+            .times(l.leverage)
+            .div(nominal)
+        : held.abs().plus(
+            max(0, dec(free).minus(l.reserve ?? '0'))
+              .times(l.leverage)
+              .div(nominal)
+          )
     );
   if (applyCaps && l.maxQty != null) ceiling = min(ceiling, l.maxQty);
-  if (applyCaps && l.capacity) ceiling = min(ceiling, max(held, held.plus(l.capacity[sign > 0 ? 0 : 1])));
+  if (applyCaps && l.capacity && credit == null)
+    ceiling = min(ceiling, max(held, held.plus(l.capacity[sign > 0 ? 0 : 1])));
   const lo = ordinal(max(v === 'pf' ? 1 : 0, held.minus(exit).div(step).ceil())),
     hi = ordinal(ceiling.div(step).floor());
   if (hi < lo) return [];
@@ -75,9 +87,10 @@ function segments(book, market, v, sign, old, applyCaps = true) {
       const gaps = (i) => {
         const q = step.times(i).times(sign),
           delta = q.minus(old),
-          fee = dec(executionDetail(l, out(delta)).fee);
+          // The final Hype check debits actual fill cost versus the mark. Zero is a safe lower bound here.
+          fee = credit != null ? '0' : executionDetail(l, out(delta)).fee;
         const im = step.times(i).times(nominal).div(l.leverage),
-          previous = dec(old).abs().times(nominal).div(l.leverage);
+          previous = credit != null ? dec(credit) : dec(old).abs().times(nominal).div(l.leverage);
         const avail = l.directionalFree?.[delta.lt(0) ? 1 : 0] ?? l.free;
         const marked = projectSettlementEquity(book, market, v, out(q), '0', 'mark_equity');
         return [
@@ -137,23 +150,27 @@ function clip(low, high, left, right) {
     : [low, Math.min(high, ordinal(cross.ceil()))];
 }
 
-export function compareAuto(a, b, objective) {
+export function compareAuto(a, b) {
   const pairs = [
-    [a.worstCash, b.worstCash],
-    [a.vsNotional, b.vsNotional]
+    [a.vsNotional, b.vsNotional],
+    [a.worstCash, b.worstCash]
   ];
-  if (objective !== 'cash') pairs.reverse();
   for (const [x, y] of pairs) {
     const cmp = dec(y).cmp(x);
     if (cmp) return cmp;
   }
   // A verified long with no positive liquidation root survives down to price zero.
-  const unexposed = Number(dec(b.hlTargetQuantity).isZero()) - Number(dec(a.hlTargetQuantity).isZero());
-  if (unexposed) return unexposed;
-  const buffer = (c) => dec(c.priceBuffer ?? (dec(c.hlTargetQuantity).gt(0) ? c.pressureMark : '0'));
+
+  const buffer = (c) =>
+    dec(c.stressPriceBuffer ?? c.priceBuffer ?? (dec(c.hlTargetQuantity).gt(0) ? c.pressureMark : '0'));
   const margin = (c) => c.initialMargin.reduce((n, x) => n.plus(x), new D(0));
   const turns = (c) => Number(c.vsDeltaQuantity !== '0') + Number(c.hlDeltaQuantity !== '0');
-  return buffer(b).cmp(buffer(a)) || margin(a).cmp(margin(b)) || turns(a) - turns(b);
+  return (
+    buffer(b).cmp(buffer(a)) ||
+    margin(a).cmp(margin(b)) ||
+    (a.candidateLeverage ?? 0) - (b.candidateLeverage ?? 0) ||
+    turns(a) - turns(b)
+  );
 }
 
 function requiredAtMove(book, m, p, old, sign, percent) {
@@ -219,6 +236,17 @@ function requiredAtMove(book, m, p, old, sign, percent) {
 }
 
 export function solveAuto(book, m, params, options = {}) {
+  if (!m.hl.exchangeMaxLeverage || !m.hl.tiers?.length || m.hl.marginMode !== 'cross')
+    return { code: 'LEVERAGE_UNVERIFIED', candidates: [], rejected: [], searchComplete: false, pressure: {} };
+  // An optimistic grid bound. Candidate admission still checks the tier at the actual rounded notional.
+  m = {
+    ...m,
+    hl: {
+      ...m.hl,
+      leverage: String(m.hl.exchangeMaxLeverage),
+      currentMarginCredit: m.hl.currentMarginCredit ?? '0'
+    }
+  };
   const p = profileInputs(book, params, m),
     old = (v) =>
       Object.values(book.positions).find((x) => x.asset === m.id && x.venue === v && x.pool === m[v].pool)
@@ -254,7 +282,7 @@ export function solveAuto(book, m, params, options = {}) {
     seen.add(id);
     evaluations++;
     try {
-      const c = evaluateCandidate(book, m, p, pf, hl, options);
+      const c = evaluateLeverageGrid(book, m, p, pf, hl, options);
       if (c.code !== 'FEASIBLE') {
         if (
           c.constraints?.some((t) => t.status === 'unknown') &&
@@ -267,13 +295,22 @@ export function solveAuto(book, m, params, options = {}) {
       c.worstCash = out(min(c.failureCash, c.pressureCashAfter, ...(c.scenarioCash ?? [])));
       ratios.add(c.actualRatio);
       candidates.push(c);
-      candidates.sort((a, b) => compareAuto(a, b, params.objective));
+      candidates.sort(compareAuto);
       candidates.length = Math.min(candidates.length, 5);
       best = candidates[0];
     } catch (e) {
+      if (['MARGIN_UNVERIFIED', 'LEVERAGE_UNVERIFIED'].includes(e.message)) unknown = true;
       if (!rejected.length) rejected.push({ code: e.message, vsTargetQuantity: pf, hlTargetQuantity: hl });
     }
   };
+  const adverseMove = max(options.adverseBps || '0', options.stress?.jumpBps || '0')
+    .times(m.hl.mark)
+    .div(10000)
+    .div(m.hl.factor);
+  const delayPerLot = units(m.hl)
+    .times(m.hl.mark)
+    .times(options.stress?.delayBps || '0')
+    .div(10000);
   const branches = [];
   for (const sign of [1, -1]) {
     const pp = segments(book, m, 'pf', sign, current[0]),
@@ -291,11 +328,7 @@ export function solveAuto(book, m, params, options = {}) {
   while (branches.length) {
     branches.sort((a, b) => a.hi - b.hi);
     const { seg, hh, lo, hi } = branches.pop();
-    if (
-      candidates.length === 5 &&
-      params.objective !== 'cash' &&
-      seg.step.times(hi).lt(dec(candidates.at(-1).vsTargetQuantity).abs())
-    )
+    if (candidates.length === 5 && seg.step.times(hi).lt(dec(candidates.at(-1).vsTargetQuantity).abs()))
       continue;
     if (++nodes > budget || evaluations >= budget) {
       complete = false;
@@ -312,32 +345,28 @@ export function solveAuto(book, m, params, options = {}) {
     for (const h of hh) {
       const cash = (i, shift) => lerp(h.a, h.b, i).plus(h.slope.times(i).times(shift));
       let range = [h.a.i, h.b.i];
+      // Bound the most favorable outcome possible inside this rectangle, including the
+      // least delay cost on the interval. Exact path and margin checks still run on each survivor.
+      const firstQty = h.step.times(h.a.i).times(h.sign),
+        lastQty = h.step.times(h.b.i).times(h.sign);
+      const minDelta = max(
+        0,
+        min(firstQty, lastQty).minus(current[1]),
+        dec(current[1]).minus(max(firstQty, lastQty))
+      );
+      const debitFloor = minDelta
+        .times(delayPerLot)
+        .plus(h.a.i > 0 ? options.stress?.fundingDebit || '0' : '0');
+      const offset = adverseMove.times(-h.sign);
       for (const [shift, need] of [
-        [fail, failNeed],
-        [pass, passNeed]
+        [fail.plus(offset), failNeed.plus(debitFloor)],
+        [pass.plus(offset), passNeed.plus(debitFloor)]
       ]) {
         const [a, b] = range;
         range = clip(a, b, cash(a, shift).minus(need), cash(b, shift).minus(need));
         if (!range) break;
       }
       if (!range) continue;
-      if (candidates.length === 5 && params.objective === 'cash') {
-        const optimistic = min(
-          max(...range.map((i) => cash(i, fail)))
-            .plus(book.external)
-            .minus(p.k),
-          max(...range.map((i) => cash(i, pass)))
-            .plus(book.external)
-            .minus(p.k)
-            .plus(payout)
-        );
-        const cutoff = candidates.at(-1);
-        if (
-          optimistic.plus(slack).lt(cutoff.worstCash) ||
-          (optimistic.eq(cutoff.worstCash) && seg.step.times(hi).lt(dec(cutoff.vsTargetQuantity).abs()))
-        )
-          continue;
-      }
       possible = true;
       if (lo !== hi) break;
       const pf = out(seg.step.times(lo).times(seg.sign));
@@ -359,10 +388,7 @@ export function solveAuto(book, m, params, options = {}) {
       }
       for (let i = first; i <= last; i++) {
         const cutoff = candidates.at(-1);
-        if (
-          candidates.length === 5 &&
-          (params.objective === 'cash' || dec(pf).abs().eq(dec(cutoff.vsTargetQuantity).abs()))
-        ) {
+        if (candidates.length === 5 && dec(pf).abs().eq(dec(cutoff.vsTargetQuantity).abs())) {
           let possible = [i, last];
           for (const [shift, credit] of [
             [fail, '0'],
@@ -411,7 +437,11 @@ export function solveAuto(book, m, params, options = {}) {
       ]
     });
   }
-  const unchanged = best && current[0] === best.vsTargetQuantity && current[1] === best.hlTargetQuantity;
+  const unchanged =
+    best &&
+    current[0] === best.vsTargetQuantity &&
+    current[1] === best.hlTargetQuantity &&
+    (!best.candidateLeverage || String(best.candidateLeverage) === m.hl.configuredLeverage);
   complete = complete && !unknown;
   const pressure = {};
   if (params.movePct && p.stage === 'challenge')

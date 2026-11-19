@@ -1,5 +1,12 @@
 import { dec, out, nonnegative, positive } from './math.js';
-import { rules, calculateCurrent, fresh, fieldTime, stressFields } from './current.js';
+import {
+  rules,
+  calculateCurrent,
+  fresh,
+  fieldTime,
+  stressFields,
+  reason as constraintReason
+} from './current.js';
 import { captureScript } from '../vs-parser.js';
 import { manualVs } from './adapters.js';
 import { accountSnapshot, manualAccount, presetAccount } from './current-account.js';
@@ -23,7 +30,7 @@ if (state.stressVersion !== 1) {
   for (const k of Object.keys(stressFields)) if (state.rules[k] === '0') delete state.rules[k];
   state.stressVersion = 1;
 }
-const planDefaults = { planCapital: '500', planPF: '10000', planFundedCash: '101.50', planLeverage: '1' };
+const planDefaults = { planCapital: '500', planPF: '10000', planFundedCash: '101.50' };
 const planning = () => state.fundingView === 'plan';
 state.fundingView ??= 'plan';
 state.rules = { ...rules, ...state.rules };
@@ -71,6 +78,7 @@ const ruleFields = {
   externalFx: '每单位外币的已确认 USDC 估值（选填）',
   registration: '本金中已支付的报名费（U）',
   outsideCosts: '本金之外另需收回的历史成本（U）',
+  minMaintenanceSurplus: 'Hype 压力后最低维持保证金余量（U）',
   minBuffer: '成功线到 Hype 强平线的最低价格距离',
   challengeFloor: '考核固定失败线（U）',
   challengeTarget: '考核通过净值（U）',
@@ -113,23 +121,14 @@ function input(box, id, label, type = 'text') {
 const planFields = {
   planCapital: '个人起始本金（U）',
   planPF: 'VS 起始权益（U）',
-  planLeverage: 'Hype 规划杠杆（倍）',
   planFundedCash: '通过后 Hype 结余（U）'
 };
 for (const [k, label] of Object.entries(planFields)) input('plan-fields', k, label);
 for (const [k, label] of Object.entries(ruleFields))
   input('rule-fields', k, label, k === 'deadline' ? 'datetime-local' : 'text');
 for (const side of ['pf', 'hl'])
-  for (const [k, label] of Object.entries({
-    ...legFields,
-    ...(side === 'hl' ? { leverage: '当前杠杆倍数' } : {})
-  }))
-    if (k !== 'free')
-      input(
-        k === 'leverage' ? 'quick-margin' : 'leg-settings',
-        side + '-' + k,
-        (side === 'pf' ? 'VS ' : 'Hype ') + label
-      );
+  for (const [k, label] of Object.entries(legFields))
+    if (k !== 'free') input('leg-settings', side + '-' + k, (side === 'pf' ? 'VS ' : 'Hype ') + label);
 for (const side of ['pf', 'hl']) {
   const label = document.createElement('label'),
     select = document.createElement('select');
@@ -200,6 +199,7 @@ function approvedOrders(v) {
   });
 }
 function inputs() {
+  $('plan-cross-flat').checked = r.planCrossFlat === true;
   $('funding-view').value = state.fundingView;
   $('plan-settings').hidden = !planning();
   for (const id of ['hl-source', 'wallet', 'paste', 'bridge-pair', 'leg-settings']) {
@@ -212,9 +212,9 @@ function inputs() {
   for (const k of Object.keys(planFields)) $(k).value = r[k] ?? '';
   $('planFundedCash').parentElement.hidden = r.stage !== 'funded';
   $('asset').value = asset();
-  for (const k of ['mode', 'stage', 'B', 'R', 'objective', 'externalCurrency', ...Object.keys(ruleFields)])
+  for (const k of ['mode', 'stage', 'B', 'R', 'externalCurrency', ...Object.keys(ruleFields)])
     $(k).value = r[k] ?? '';
-  $('objective-label').hidden = r.mode !== 'auto';
+
   for (const side of ['pf', 'hl']) {
     const a = account(side);
     for (const k of ['equity', 'qty', ...Object.keys(legFields), 'leverage', 'marginMode']) {
@@ -323,7 +323,16 @@ function renderRisk(result, accounts, market) {
         ? fmt(c.priceBuffer) + ' 价格单位 · ' + pct(out(dec(c.priceBuffer).div(c.pressureMark)))
         : '—'
     ],
-    ['路径最低 Hype 维持保证金余量', money(c?.buffer)],
+    ['Hype 目标仓初始保证金', money(c?.requiredInitialMargin)],
+    ['Hype 目标仓当前维持保证金', money(c?.maintenanceMargin)],
+    ['压力情景标记价 / 强平价', fmt(c?.stressPressureMark) + ' / ' + fmt(c?.stressLiqMark)],
+    ['额外跳价与延迟后的清算缓冲', fmt(c?.stressPriceBuffer)],
+    ['最小余量处的权益 / 维持保证金', money(c?.stressedEquity) + ' / ' + money(c?.stressedMaintenance)],
+    ['路径最低 Hype 维持保证金余量', money(c?.stressedSurplus ?? c?.buffer)],
+    [
+      '有效杠杆（目标名义额 ÷ Hype 权益）',
+      c?.effectiveLeverage != null ? fmt(c.effectiveLeverage, 3) + '×' : '—'
+    ],
     ['目标初始保证金（含其他占用）', 'VS ' + margin('pf') + ' / Hype ' + margin('hl')]
   ]);
   const rows = ['pf', 'hl'].map((k) => {
@@ -346,65 +355,76 @@ function freshnessLabel(at, seconds) {
 }
 let worker = null,
   version = 0,
-  pendingKey = '',
-  response = null,
-  displayed = null;
+  running = null,
+  completed = null;
 function cancelAuto() {
-  if (worker) {
-    worker.terminate();
-    worker = null;
-  }
-  pendingKey = '';
-  response = null;
-  displayed = null;
+  worker?.terminate();
+  worker = null;
+  running = null;
+  completed = null;
   version++;
 }
 function currentFrame(a, m, t) {
   const base = calculateCurrent(r, a, m, rates, t, { deferAuto: true });
   if (!base.needsSearch) {
-    if (pendingKey) cancelAuto();
+    if (running || completed) cancelAuto();
     return base;
   }
-  const context = JSON.stringify([r, a, m.asset, useAPI(), base.sizingAssumption]);
-  const signature = JSON.stringify([context, m, rates]);
-  if (signature !== pendingKey) {
-    if (worker && !response) {
-      worker.terminate();
-      worker = null;
-    }
-    pendingKey = signature;
-    response = null;
+  const { obtainedAt, ...spec } = m.spec;
+  const context = JSON.stringify([
+    r,
+    a,
+    m.asset,
+    useAPI(),
+    $('quote-source').value,
+    spec,
+    m.hl.marginTiers,
+    m.hl.maxLeverage,
+    m.hl.sizeDecimals,
+    m.hl.onlyIsolated
+  ]);
+  const key = JSON.stringify([context, m, rates]);
+  if ((running && running.context !== context) || (completed && completed.context !== context)) cancelAuto();
+  if (!running && completed?.key !== key) {
     const revision = ++version;
+    running = { context, key };
     if (!worker) worker = new Worker('/src/hedge/auto-worker.js', { type: 'module' });
-    worker.onmessage = ({ data }) => {
-      if (revision !== version || data.version !== version) return;
-      response = data.error
-        ? { ...base, autoStatus: 'AUTO_PARTIAL', issues: [data.error] }
-        : { ...data.result, stateVersion: data.version };
+    const finish = (result) => {
+      if (revision !== version) return;
+      running = null;
+      completed = {
+        context,
+        key,
+        stamps: [m.pf.asOf, m.hl.asOf, m.pf.markAt, m.hl.markAt].filter(Boolean),
+        result: {
+          ...result,
+          stateVersion: revision,
+          calculatedAt: new Date(t).toISOString(),
+          calculationMarket: m
+        }
+      };
       render();
     };
-    worker.onerror = () => {
-      if (revision === version) {
-        worker.terminate();
-        worker = null;
-        response = { ...base, autoStatus: 'AUTO_PARTIAL', issues: ['后台计算失败，请刷新重试'] };
-        render();
-      }
+    worker.onmessage = ({ data }) => {
+      if (data.version === revision)
+        finish(data.error ? { ...base, autoStatus: 'AUTO_PARTIAL', issues: [data.error] } : data.result);
     };
-    worker.postMessage({ version, r, a, m, rates, t });
+    worker.onerror = () => {
+      if (revision !== version) return;
+      worker.terminate();
+      worker = null;
+      finish({ ...base, autoStatus: 'AUTO_PARTIAL', issues: ['后台计算失败'] });
+    };
+    worker.postMessage({ version: revision, r, a, m, rates, t });
   }
-  if (response) {
-    displayed = { context, stamps: [m.pf.asOf, m.hl.asOf, m.hl.markAt].filter(Boolean) };
-    return response;
-  }
+  // A new tick queues the latest frame without starving an in-flight search.
+  // Account edits, safety gates and rule changes invalidate old answers immediately.
   if (
-    displayed?.context === context &&
-    displayed.stamps.every((at) => fresh(at, t, Number(r.quoteSecs) * 1000))
-  ) {
-    put('summary-status', '行情已更新，正在核算。当前展示上一帧及其计算时间。');
-    return null;
-  }
-  return { ...base, autoStatus: 'AUTO_PARTIAL', issues: ['正在检查双边合法仓位'] };
+    completed?.context === context &&
+    completed.stamps.every((v) => fresh(v, t, Number(r.quoteSecs) * 1000))
+  )
+    return { ...completed.result, refreshPending: completed.key !== key };
+  return { ...base, autoStatus: 'AUTO_PARTIAL', issues: ['正在检查双边合法仓位与候选杠杆'] };
 }
 const autoLabels = {
   AUTO_FEASIBLE: '有可行仓位',
@@ -415,12 +435,12 @@ const autoLabels = {
   AUTO_HOLD: '保持现仓'
 };
 function render() {
-  const m = market(),
-    a = { pf: account('pf'), hl: account('hl') };
+  let m = market();
+  const a = { pf: account('pf'), hl: account('hl') };
   let result;
   try {
     result = currentFrame(a, m, Date.now());
-    if (!result) return;
+    if (result.calculationMarket) m = result.calculationMarket;
   } catch (e) {
     cancelAuto();
     result = {
@@ -436,7 +456,7 @@ function render() {
     b = result.range,
     stale = result.issues.some((x) => /过期|请求失败|断开|未连接/.test(x));
   const status = result.autoStatus
-    ? (result.dataState ?? autoLabels[result.autoStatus]) +
+    ? (result.flatHold ? '无可行非零仓位，保持空仓' : (result.dataState ?? autoLabels[result.autoStatus])) +
       ' · ' +
       (result.issues[0] ?? result.notices.at(-1) ?? '按当前资金和保证金规则计算')
     : c
@@ -444,6 +464,69 @@ function render() {
         (c.code === 'MARGIN_UNVERIFIED' ? '保证金条件待验证' : '已验算所设保证金条件')
       : result.issues[0] || result.notices.at(-1) || '等待当前快照';
   const plan = planning();
+  const leverage = c?.candidateLeverage;
+  const configured =
+    useAPI() && !a.hl.error && fresh(a.hl.at, Date.now(), Number(r.accountSecs) * 1000)
+      ? a.hl.configuredLeverage
+      : null;
+  put('suggested-leverage', leverage ? leverage + '×' : c?.hlTargetQuantity === '0' ? '空仓' : '—');
+  put('configured-leverage', configured ? configured + '×' : '未知');
+  put(
+    'leverage-cap',
+    c?.exchangeMaxLeverage
+      ? '该仓位档位上限 ' + c.exchangeMaxLeverage + '× · 合约上限 ' + c.contractMaxLeverage + '×'
+      : '合约上限 ' + (m.hl?.maxLeverage ? m.hl.maxLeverage + '×' : '待核实')
+  );
+  put(
+    'leverage-status',
+    plan
+      ? '规划资金 · LEVERAGE_UNVERIFIED'
+      : configured
+        ? 'Hyperliquid 只读快照 · ' +
+          clock(a.hl.at) +
+          (result.leverageStatus === 'LEVERAGE_UNVERIFIED' ? ' · LEVERAGE_UNVERIFIED' : '')
+        : '账户设置未读取 · LEVERAGE_UNVERIFIED'
+  );
+  const grid = c?.leverageGrid ?? [];
+  const lower = grid.filter((x) => x.leverage < leverage && x.status === 'pass');
+  const higher = grid.filter((x) => x.leverage > leverage && x.status !== 'pass');
+  const why = !leverage
+    ? c?.hlTargetQuantity === '0'
+      ? 'Hype 目标为空仓。'
+      : ''
+    : '本仓位按 ' +
+      leverage +
+      '× 占用 ' +
+      money(c.requiredInitialMargin) +
+      '。' +
+      (lower.length
+        ? '较低的可行档位占用更多保证金，例如 ' +
+          lower.at(-1).leverage +
+          '× 需 ' +
+          money(lower.at(-1).initial) +
+          '。'
+        : leverage > 1
+          ? '较低档位未通过资金或账户约束。'
+          : '该档为最低合法档位。') +
+      (higher.length
+        ? '更高档位未通过 ' + [...new Set(higher.map((x) => constraintReason(x.reason)))].join('、') + '。'
+        : '更高倍数超出该仓位合法范围。') +
+      '同一全仓仓位的维持保证金及强平价取决于权益和敞口。';
+  put('leverage-reason', why);
+  const levRows = grid.map((x) =>
+    cellRow([
+      x.leverage ? x.leverage + '×' : '空仓',
+      money(x.initial),
+      money(x.maintenance),
+      money(x.stressedEquity),
+      money(x.surplus),
+      !x.leverage ? '空仓' : x.liquidation == null ? '无正价交点' : fmt(x.liquidation),
+      x.status === 'pass' ? '通过所设条件' : constraintReason(x.reason)
+    ])
+  );
+  if ($('leverage-grid').textContent !== levRows.map((x) => x.textContent).join(''))
+    $('leverage-grid').replaceChildren(...levRows);
+
   $('planFundedCash').parentElement.hidden = r.stage !== 'funded';
   put('account-heading', plan ? '规划起点与计算条件' : '当前账户与持仓');
   put('protection-label', plan ? '规划个人保护资金' : '已确认个人保护资金');
@@ -458,7 +541,8 @@ function render() {
             ' − 报名费 ' +
             money(r.registration) +
             ' = Hype 起始资金 ' +
-            money(a.hl.equity)) + '。按双方全仓、空仓且无挂单计算。杠杆为规划参数，报价随实时盘口更新。'
+            money(a.hl.equity)) +
+          (r.planCrossFlat ? '。规划条件已确认。' : '。请确认下方规划条件以计算目标。')
       : ''
   );
   put('plan-heading', r.stage === 'funded' ? '首次分成资金规划' : '开考前资金规划');
@@ -466,14 +550,25 @@ function render() {
   const directional = (qty, amount) =>
     (dec(qty).gt(0) ? '多 ' : dec(qty).lt(0) ? '空 ' : '空仓 ') + money(amount);
 
-  const msg = [status, c && result.sizingAssumption, c && coverage].filter(Boolean).join(' · ');
+  const msg = [
+    status,
+    c && result.leverageStatus === 'LEVERAGE_UNVERIFIED' && '条件方案 · 账户设置未验证',
+    c && coverage
+  ]
+    .filter(Boolean)
+    .join(' · ');
   put('calc-status', (plan ? '预设规划 · ' : '') + msg);
   const gaps = result.inputGaps ?? [];
   const checklist = [
     ...gaps.map((g) => g.text),
     ...result.issues.filter((v) => !gaps.some((g) => g.text === v) && !v.includes('持仓数量未录入'))
   ];
-  put('quick-status', [...new Set(checklist)].join(' · ') || (c ? '已按当前输入计算' : status));
+  put(
+    'quick-status',
+    plan && !r.planCrossFlat
+      ? '请先确认资金规划的账户模式、空仓与挂单条件'
+      : [...new Set(checklist)].join(' · ') || (c ? '已按当前输入计算' : status)
+  );
   put('quick-entry', plan ? '调整预设参数' : '快速录入当前账户');
   $('quick-entry').onclick = () => {
     if (plan) {
@@ -524,7 +619,7 @@ function render() {
       'fund-source',
       '预设 Hype 权益 ' + money(result.cash.hl) + ' ＋ 规划外部已到账 ' + money(result.externalValue)
     );
-    put('collateral-source', '仅计规划 Hype 本金 · 全仓 ' + (r.planLeverage || '—') + ' 倍');
+    put('collateral-source', r.planCrossFlat ? '按已确认的全仓规划计算' : '等待确认规划起点');
   }
   put(
     'summary-status',
@@ -642,6 +737,9 @@ function render() {
         money(c.vsNotional),
       signed(c.hlTargetQuantity) + ' / ' + money(c.hlNotional),
       pct(c.actualRatio),
+      c.candidateLeverage ? c.candidateLeverage + '×' : '空仓',
+      money(c.requiredInitialMargin),
+      money(c.stressedSurplus),
       money(c.worstCash),
       fmt(c.priceBuffer),
       money(c.initialMargin.reduce((sum, x) => sum.plus(x), dec('0')).toString()),
@@ -656,11 +754,14 @@ function render() {
   for (const bad of result.rejections ?? [])
     rowsAuto.push(
       cellRow([
-        '淘汰 · ' + signed(bad.pf),
-        signed(bad.hl),
-        '—',
-        '—',
-        '—',
+        '淘汰 · ' + signed(bad.pf) + ' / ' + money(bad.candidate?.vsNotional),
+        signed(bad.hl) + ' / ' + money(bad.candidate?.hlNotional),
+        pct(bad.candidate?.actualRatio),
+        bad.candidate?.candidateLeverage ? bad.candidate.candidateLeverage + '×' : '—',
+        money(bad.candidate?.requiredInitialMargin),
+        money(bad.candidate?.stressedSurplus),
+        money(bad.candidate?.worstCash),
+        fmt(bad.candidate?.priceBuffer),
         '—',
         bad.why +
           (bad.check
@@ -698,7 +799,7 @@ function render() {
         : result.search
           ? '未找到第二个可行候选'
           : '',
-      result.sizingAssumption
+      result.leverageStatus === 'LEVERAGE_UNVERIFIED' ? '账户设置未验证' : ''
     ]
       .filter(Boolean)
       .join(' ｜ ')
@@ -790,7 +891,9 @@ function render() {
               ? ' · 已验候选'
               : result.stress?.missing.length || result.stress?.zero.length
                 ? ' · 基础候选'
-                : ' · 推荐'
+                : result.leverageStatus === 'LEVERAGE_UNVERIFIED'
+                  ? ' · 条件推荐'
+                  : ' · 推荐'
             : ' · 待验证')
       : '—'
   );
@@ -812,10 +915,7 @@ function render() {
   put(
     'basis',
     r.mode === 'auto'
-      ? (r.objective === 'cash'
-          ? '优先最差压力情景个人剩余现金，再比较 PF 仓位。'
-          : '优先最大可行 PF 名义额，再比较最差压力情景个人剩余现金。') +
-          '并列时优先较大强平缓冲、较低保证金占用。'
+      ? '先比较可行 PF 名义额，再比较最差情景剩余现金、强平缓冲、较低的保证金占用及较低的杠杆。'
       : '固定所选一侧的已成交仓位，在可行候选中优先成功端剩余现金。'
   );
   put(
@@ -961,7 +1061,11 @@ function render() {
     );
   }
   if (plan)
-    for (const s of ['pf', 'hl']) put(s + '-meta', '预设起始权益 ' + money(a[s].equity) + ' · 规划空仓');
+    for (const s of ['pf', 'hl'])
+      put(
+        s + '-meta',
+        '预设起始权益 ' + money(a[s].equity) + (r.planCrossFlat ? ' · 规划空仓' : ' · 起始持仓待确认')
+      );
   if ($('legs').textContent !== rows.map((row) => row.textContent).join(''))
     $('legs').replaceChildren(...rows);
   put('order-detail', orders.join(' ｜ '));
@@ -1005,7 +1109,9 @@ function render() {
     [...(budget ? ['仅按资金参考比例估算，具体成交成本待验算'] : []), ...result.notices].join(' · ')
   );
   if (stale) lastCalculation = '当前时间 ' + clock(now()) + ' · 过期，暂停调整量';
-  else lastCalculation = '计算于 ' + clock(now());
+  else
+    lastCalculation =
+      '计算于 ' + clock(result.calculatedAt ?? now()) + (result.refreshPending ? ' · 新行情正在重算' : '');
   put(
     'times',
     lastCalculation +
@@ -1384,7 +1490,7 @@ async function pollBridge() {
 setInterval(pollBridge, 1500);
 $('paste').oninput = invalidatePreview;
 $('paste-kind').onchange = invalidatePreview;
-for (const k of ['mode', 'stage', 'B', 'R', 'objective', 'externalCurrency', ...Object.keys(ruleFields)]) {
+for (const k of ['mode', 'stage', 'B', 'R', 'externalCurrency', ...Object.keys(ruleFields)]) {
   $(k).addEventListener('input', () => {
     r[k] = $(k).value.trim();
     r.editedAt = now();
@@ -1397,7 +1503,7 @@ for (const k of ['mode', 'stage', 'B', 'R', 'objective', 'externalCurrency', ...
       $('externalFx').value = '';
     }
     if (k === 'fx') r.fxAt = now();
-    $('objective-label').hidden = r.mode !== 'auto';
+
     save();
     render();
   });
@@ -1437,6 +1543,14 @@ for (const field of Object.keys(planFields))
     inputs();
     render();
   };
+$('plan-cross-flat').onchange = () => {
+  if (planning()) {
+    r.planCrossFlat = $('plan-cross-flat').checked;
+    save();
+    inputs();
+    render();
+  }
+};
 $('funding-view').onchange = () => {
   state.fundingView = $('funding-view').value;
   r = planning() ? state.planRules : state.rules;
@@ -1606,6 +1720,7 @@ setInterval(() => {
   const t = Date.now(),
     m = market();
   const next = [
+    completed?.stamps.every((v) => fresh(v, t, Number(r.quoteSecs) * 1000)) ?? false,
     ...['pf', 'hl'].map((k) => fresh(m[k]?.asOf, t, Number(r.quoteSecs) * 1000)),
     !m.hl?.markAt || fresh(m.hl.markAt, t, Number(r.quoteSecs) * 1000),
     ...['pf', 'hl'].map((k) => fresh(account(k).at, t, Number(r.accountSecs) * 1000)),

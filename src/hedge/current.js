@@ -8,6 +8,7 @@ import {
   normalizeExposure,
   estimateFill
 } from './math.js';
+import { validLeverageCap } from './leverage.js';
 import { solveAuto } from './auto.js';
 import {
   solve,
@@ -34,6 +35,7 @@ export const rules = {
   registration: '91',
   outsideCosts: '0',
   minBuffer: '0',
+  minMaintenanceSurplus: '0',
   R: '100',
   g: '0',
   external: '0',
@@ -105,14 +107,25 @@ export function remainingOrder(delta, current, orders) {
 function hlTiers(tiers) {
   if (!Array.isArray(tiers) || !tiers.length) return null;
   let prior = dec('0'),
-    deduction = dec('0');
-  return tiers.map((t) => {
+    deduction = dec('0'),
+    previousBound = null;
+  const normalized = [];
+  for (const t of tiers) {
+    if (!validLeverageCap(t?.maxLeverage) || !specified(t?.lowerBound)) return null;
     const from = nonnegative(String(t.lowerBound));
-    const rate = dec('0.5').div(positive(String(t.maxLeverage)));
+    const rate = dec('0.5').div(String(t.maxLeverage));
+    if (previousBound ? from.lte(previousBound) || rate.lt(prior) : !from.isZero()) return null;
     deduction = deduction.plus(from.times(rate.minus(prior)));
+    normalized.push({
+      from: out(from),
+      mmr: out(rate),
+      deduction: out(deduction),
+      maxLeverage: String(t.maxLeverage)
+    });
     prior = rate;
-    return { from: out(from), mmr: out(rate), deduction: out(deduction), maxLeverage: String(t.maxLeverage) };
-  });
+    previousBound = from;
+  }
+  return normalized;
 }
 
 function buildMarket(data, r, a, fx) {
@@ -142,7 +155,10 @@ function buildMarket(data, r, a, fx) {
     const step = out(dec('10').pow(-n));
     const im = r.stage === 'challenge' ? spec.capitalInitMarginRatio : spec.fundedInitMarginRatio;
     const rate = isPF ? r.pfFee : (ac.fee ?? r.hlFee);
-    const lev = isPF && im ? out(dec('1').div(positive(im))) : optional(ac.leverage);
+    const lev =
+      isPF && im
+        ? out(dec('1').div(positive(im)))
+        : optional(!isPF && r.mode === 'auto' ? ac.configuredLeverage : ac.leverage);
     if (nonnegative(String(rate)).gte(1)) throw Error('单边费率须小于 100%');
     const utilization = nonnegative(String((isPF ? r.pfUtil : r.hlUtil) ?? '100')).div(100);
     if (utilization.gt(1)) throw Error('最大保证金占用率必须在 0 至 100% 之间');
@@ -168,6 +184,14 @@ function buildMarket(data, r, a, fx) {
       rate: out(nonnegative(String(rate))),
       pool: 'current',
       leverage: lev,
+      configuredLeverage: isPF
+        ? null
+        : validLeverageCap(ac.configuredLeverage)
+          ? String(ac.configuredLeverage)
+          : null,
+      exchangeMaxLeverage: isPF ? null : validLeverageCap(hl.maxLeverage),
+      currentMarginCredit:
+        !isPF && ac.currentMarginCredit != null ? out(nonnegative(ac.currentMarginCredit)) : null,
       marginMode: ac.marginMode || null,
       hold: optional(ac.otherHold),
       tiers:
@@ -199,13 +223,18 @@ function equityAt(s, q, px, unit) {
     )
   );
 }
-function reason(code) {
+export function reason(code) {
   return (
     {
       CHALLENGE_FAILED: 'VS 已触及考核失败线',
       FUNDED_FAILED: 'VS 已触及出金户失败线',
       REFERENCE_REACHED: '已到提款参考点，核对可申领金额',
       CHALLENGE_PASS_PENDING_SETTLEMENT: '考核目标已到，待平台确认结算',
+      hl_STRESS_SURPLUS: 'Hype 压力后最低维持保证金余量',
+      hl_ORDER_LEVERAGE: '挂单在新档位的资金占用待确认',
+      hl_SWITCH_TIER: '变更杠杆前的原仓档位上限',
+      hl_SWITCH_MARGIN: '变更杠杆时原仓初始保证金',
+      LEVERAGE_UNVERIFIED: '杠杆与清算模型未验证',
       NO_PAYOUT_TARGET: '提款参考点须高于分成基线',
       NO_DISCRETE_MATCH: '按步长取整后没有可行仓位',
       NO_MATCH_IN_SEARCH: '当前搜索范围没有满足约束的仓位',
@@ -283,6 +312,7 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
       qty: {},
       currentNotional: {},
       notices: [],
+      leverageStatus: r.mode === 'auto' ? 'LEVERAGE_UNVERIFIED' : null,
       autoStatus: r.mode === 'auto' ? 'AUTO_DATA_BLOCKED' : null
     };
   const stage = r.stage,
@@ -421,6 +451,8 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
     })
   );
   const market = fx && buildMarket(data, r, a, fx);
+  result.configuredLeverage =
+    a.hl.source === 'Hype 主网 API' && usable('hl', 'leverage') ? (a.hl.configuredLeverage ?? null) : null;
   const { pf, hl } = result.qty;
   if (market && quoteOK('pf') && quoteOK('hl') && pf !== null && hl !== null && !dec(pf).isZero()) {
     const v = dec(normalizeExposure(pf, market.pf)),
@@ -598,13 +630,14 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
     R: r.R,
     g: r.g,
     k: r.k,
-    objective: r.objective,
+    objective: 'size',
     movePct: specified(r.movePct) ? out(nonnegative(r.movePct)) : null
   };
   const checks = {
     currentSnapshot: true,
     liveLimits: true,
     adverseBps: out(nonnegative(r.adverseBps || '0')),
+    minMaintenanceSurplus: out(nonnegative(r.minMaintenanceSurplus || '0')),
     minPriceBuffer: out(nonnegative(r.minBuffer ?? '0')),
     now: new Date(now).toISOString()
   };
@@ -616,6 +649,7 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
       fundingDebit: r.fundingDebit || '0'
     };
   if (r.mode === 'auto') {
+    result.leverageStatus = 'LEVERAGE_UNVERIFIED';
     const missing = [];
     for (const [key, label] of [
       ['pf', 'VS'],
@@ -640,13 +674,22 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
       ) {
         const locked = dec(result.cash[key]).minus(l.free);
         if (l.hold == null || locked.gt(l.hold)) l.hold = out(locked.gt(0) ? locked : dec('0'));
-        if (key === 'hl' && !l.leverage) {
-          l.leverage = '1';
-          result.sizingAssumption = 'Hype 实际杠杆未录入，按每 1 U 名义仓位占用 1 U 初始保证金计算条件仓位';
-        }
       }
-      if (l.marginMode !== 'cross') missing.push(label + ' 已支持的全仓模式');
-      if (!l.leverage || !l.tiers?.length) missing.push(label + ' 杠杆或维持保证金档位');
+      if (l.marginMode !== 'cross') missing.push(label + ' 全仓模式（逐仓及未知模式的清算未验证）');
+      if (key === 'hl') {
+        if (
+          l.hold === '0' ||
+          (a.hl.flatConfirmedAt && fresh(a.hl.flatConfirmedAt, now, ttl) && !a.hl.otherPositions) ||
+          (a.hl.source === 'Hype 主网 API' && !a.hl.otherPositions)
+        )
+          l.otherMaintenance = '0';
+        else if (l.hold != null) missing.push('其他占用对应的全仓维持保证金');
+        if (!l.exchangeMaxLeverage || !l.tiers?.length || data.hl.onlyIsolated)
+          missing.push('Hype 合约杠杆上限、全仓资格或维持保证金档位');
+        if (a.hl.crossPoolVerified === false) missing.push('Hype 独立全仓抵押池权益');
+        if (!l.configuredLeverage && !planning)
+          result.notices.push('当前 Hype 杠杆设置未知，按交易所合法档位计算条件方案');
+      } else if (!l.leverage || !l.tiers?.length) missing.push('VS 初始或维持保证金规则');
       if (l.hold == null) missing.push(label + ' 其他仓位及挂单占用');
       if (l.free == null && !l.directionalFree) missing.push(label + ' 实际可用抵押品');
     }
@@ -656,6 +699,10 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
       issues.push('资金比例可算，待确认 ' + missing.join('、'));
       return result;
     }
+    result.leverageStatus =
+      !planning && market.hl.configuredLeverage && !a.hl.otherPositions && a.hl.otherHold === '0'
+        ? 'ACCOUNT_MODEL'
+        : 'LEVERAGE_UNVERIFIED';
     if (options.deferAuto) {
       result.needsSearch = true;
       return result;
@@ -664,34 +711,38 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
   const solved =
     r.mode === 'auto' ? solveAuto(book, market, params, checks) : solve(book, market, params, checks);
   if (r.mode === 'auto') {
+    const creditUnknown = hl !== '0' && market.hl.currentMarginCredit == null;
+    if (creditUnknown) {
+      result.notices.push('现仓占用的可释放初始保证金未经确认，按零释放核算');
+      solved.searchComplete = false;
+      if (solved.code === 'AUTO_INFEASIBLE') solved.code = 'AUTO_PARTIAL';
+    }
     result.autoStatus = solved.code;
     result.search = { complete: solved.searchComplete, evaluations: solved.evaluations, nodes: solved.nodes };
+    if (
+      solved.selected?.candidateLeverage &&
+      market.hl.configuredLeverage &&
+      solved.selected.candidateLeverage !== Number(market.hl.configuredLeverage)
+    ) {
+      result.leverageStatus = 'LEVERAGE_UNVERIFIED';
+      result.notices.push('建议档位与当前设置不同，变更后的实际可开额度须由交易所新快照确认');
+    }
     result.top = solved.candidates;
     result.rejections = solved.rejected.map((c) => ({
       pf: c.vsTargetQuantity,
       hl: c.hlTargetQuantity,
+      candidate: c,
       why: reason(c.constraints?.find((x) => x.status === 'fail')?.code ?? c.code),
       check: c.constraints?.find((x) => x.status === 'fail')
     }));
     result.waiting = solved.hold;
     result.pressure = solved.pressure;
-    if (params.objective === 'cash' || (params.movePct && !funded)) {
-      const maxSize =
-        params.objective === 'cash'
-          ? solveAuto(book, market, { ...params, objective: 'size', movePct: null }, checks)
-          : solved;
-      result.maximum = {
-        amount: maxSize.selected?.vsNotional ?? null,
-        complete: maxSize.searchComplete,
-        candidate: maxSize.selected
-      };
-    }
-    result.maximum ??= {
+    result.maximum = {
       amount: solved.selected?.vsNotional,
       complete: solved.searchComplete,
       candidate: solved.selected
     };
-    if (result.sizingAssumption && solved.selected) result.autoStatus = 'AUTO_PARTIAL';
+
     if (solved.code === 'AUTO_HOLD' && !solved.selected) result.flatHold = true;
     if (!planning && !funded && !r.deadline && solved.selected) {
       result.autoStatus = 'AUTO_PARTIAL';
@@ -775,7 +826,8 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
   ]) {
     const l = market[key];
     if (l.marginMode !== 'cross') result.riskMissing.push(label + ' 全仓模式');
-    if (!l.leverage) result.riskMissing.push(label + ' 当前杠杆');
+    if (!l.leverage && !(key === 'hl' && result.candidate?.candidateLeverage) && !dec(targetQty).isZero())
+      result.riskMissing.push(label + ' 当前杠杆');
     if (!l.tiers?.length) result.riskMissing.push(label + ' 维持保证金档位');
     if (l.hold == null) result.riskMissing.push(label + ' 其他占用');
     if (!dec(delta).eq(0) && l.free == null && !l.capacity) result.riskMissing.push(label + ' 可用保证金');

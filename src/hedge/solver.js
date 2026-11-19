@@ -167,7 +167,7 @@ export function solveBoundaryPrices(
   };
   return { pass: price(target, passTrigger), fail: price(floor, failureTrigger) };
 }
-const constraint = (code, actual, required, unit, source = 'simulation_assumption') => ({
+export const constraint = (code, actual, required, unit, source = 'simulation_assumption') => ({
   code,
   status: actual === null ? 'unknown' : dec(actual).gte(required) ? 'pass' : 'fail',
   actual,
@@ -176,7 +176,7 @@ const constraint = (code, actual, required, unit, source = 'simulation_assumptio
   unit,
   source
 });
-function maintenance(l, nominal) {
+export function maintenance(l, nominal) {
   if (!Array.isArray(l.tiers) || !l.tiers.length) return null;
   let prev = null,
     chosen = null;
@@ -195,7 +195,7 @@ export function validateMargin(s, m, v, q, shifts, catalog = { [m.id]: m }, fund
   if (!l.leverage || !l.tiers?.length || l.hold == null || l.marginMode !== 'cross' || !l.pool)
     return unknown();
   let otherInitial = nonnegative(l.hold),
-    otherMaint = nonnegative(l.hold);
+    otherMaint = nonnegative(l.otherMaintenance ?? l.hold);
   for (const p of Object.values(s.positions)) {
     if (p.venue !== v || (p.asset === m.id && p.pool === l.pool)) continue;
     const other = catalog[p.asset]?.[v];
@@ -222,7 +222,9 @@ export function validateMargin(s, m, v, q, shifts, catalog = { [m.id]: m }, fund
       const knot = dec(tier.from).div(nominal).minus(l.mark).div(l.factor);
       if (knot.gt(D.min(...shifts)) && knot.lt(D.max(...shifts))) points.add(out(knot));
     }
-  let worst = null;
+  let worst = null,
+    worstEquity = null,
+    worstMaintenance = null;
   for (const shift of points) {
     const mark = sourcePrice(l, shift);
     if (mark.lte(0)) throw Error('INVALID_PRICE_ENDPOINT');
@@ -232,18 +234,24 @@ export function validateMargin(s, m, v, q, shifts, catalog = { [m.id]: m }, fund
       .minus(otherMaint)
       .minus(mm)
       .minus(funding);
-    worst = worst === null ? excess : min(worst, excess);
+    if (worst === null || excess.lt(worst)) {
+      worst = excess;
+      worstMaintenance = mm.plus(otherMaint);
+      worstEquity = excess.plus(worstMaintenance);
+    }
   }
   const path = constraint(v + '_MAINTENANCE_PATH', out(worst), '0', 'U');
+  path.equity = out(worstEquity);
+  path.maintenance = out(worstMaintenance);
   if (!dec(q).isZero() && worst.lte(0)) path.status = 'fail';
   return [...checks, path];
 }
 // Each segment has constant sensitivity and a linear maintenance requirement.
-export function liquidationMark(s, m, q, catalog = { [m.id]: m }) {
+export function liquidationMark(s, m, q, catalog = { [m.id]: m }, debit = '0') {
   const l = m.hl,
     qty = dec(q);
   if (qty.isZero() || l.marginMode !== 'cross' || !l.tiers?.length || l.hold == null) return null;
-  let other = nonnegative(l.hold);
+  let other = nonnegative(l.otherMaintenance ?? l.hold);
   for (const p of Object.values(s.positions).filter((p) => p.venue === 'hl' && p.asset !== m.id)) {
     const spec = catalog[p.asset]?.hl;
     if (!spec || p.pool !== l.pool || spec.marginMode !== 'cross') return null;
@@ -254,7 +262,7 @@ export function liquidationMark(s, m, q, catalog = { [m.id]: m }) {
   const signed = qty.times(value(l)),
     size = signed.abs(),
     mark = positive(l.mark),
-    equity = projectSettlementEquity(s, m, 'hl', q, '0', 'mark_equity');
+    equity = projectSettlementEquity(s, m, 'hl', q, '0', 'mark_equity').minus(debit);
   const currentMaintenance = maintenance(l, size.times(mark));
   if (currentMaintenance === null) return null;
   if (equity.minus(other).lte(currentMaintenance)) return out(mark);
@@ -512,13 +520,23 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
   constraints.push(...stress);
   const modelLiq = liquidationMark(s, m, hlQty, options.catalog);
   const pressureMark = sourcePrice(m.hl, lines.pass);
+  const stressMark = sourcePrice(m.hl, out(dec(lines.pass).plus(shock)));
+  const stressLiq = extraDebit.isZero()
+    ? modelLiq
+    : liquidationMark(s, m, hlQty, options.catalog, out(extraDebit));
   const currentRef = h.eq(qty(pos(s, m, 'hl'))) && !h.eq(0) ? m.hl.currentLiquidation : null;
   const useReference =
     currentRef != null && (modelLiq == null || dec(currentRef).minus(modelLiq).times(h).gte(0));
   const liq = useReference ? currentRef : modelLiq;
   if (currentRef != null) {
     const distance = min(
-      ...['0', lines.pass, lines.fail].map((shift) =>
+      ...[
+        '0',
+        lines.pass,
+        lines.fail,
+        out(dec(lines.fail).plus(shock)),
+        out(dec(lines.pass).plus(shock))
+      ].map((shift) =>
         sourcePrice(m.hl, shift)
           .minus(currentRef)
           .times(h.gt(0) ? 1 : -1)
@@ -534,6 +552,11 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
     if (distance.lte(0)) refCheck.status = 'fail';
     constraints.push(refCheck);
   }
+  const stressRoot =
+    currentRef != null && (stressLiq == null || dec(currentRef).minus(stressLiq).times(h).gte(0))
+      ? currentRef
+      : stressLiq;
+  const stressBuffer = stressRoot == null ? null : out(stressMark.minus(stressRoot).times(h.gt(0) ? 1 : -1));
   const priceBuffer = liq === null ? null : out(pressureMark.minus(liq).times(h.gt(0) ? 1 : -1));
   if (options.minPriceBuffer && nonnegative(options.minPriceBuffer).gt(0) && !h.eq(0)) {
     // Validate the entire extra adverse price move, including a possible tier change.
@@ -565,6 +588,9 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
     liqMark: liq,
     liqSource: useReference ? '当前仓平台参考' : '全仓档位测算',
     pressureMark: out(pressureMark),
+    stressLiqMark: stressRoot,
+    stressPressureMark: out(stressMark),
+    stressPriceBuffer: stressBuffer,
     priceBuffer,
     targetEquity: p.target,
     expectedUserPayout: payout,
