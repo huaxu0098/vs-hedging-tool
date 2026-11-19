@@ -1,5 +1,7 @@
 import { positive, nonnegative, out } from './math.js';
 
+export const fundedPreviewLimits = { R: '40', g: '20' };
+
 export function sizingParameters(val) {
   const list = (k) =>
     val(k)

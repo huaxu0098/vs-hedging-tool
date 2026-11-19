@@ -228,6 +228,29 @@ try {
   assert.match(cards[2], /VS 通过.*剩 101.50 U.*亏 398.50 U.*VS 1.20 U，Hype 0.92 U/);
   assert.match(cards[3], /VS 失败.*剩 500.06 U.*赚 0.06 U.*VS 0.94 U，Hype 0.72 U/);
   assert.deepEqual(await workspace(), ledgerBeforeObservation);
+  await click('nav a[href="/?simulation=funded"]');
+  const fundedReady =
+    "document.title === '首次出金模拟 · VS × Hype' && document.querySelectorAll('#account-readout .card').length === 4";
+  await wait(fundedReady);
+  assert.match(
+    await text('#account-readout'),
+    /承接考核通过后的个人现金 101\.50 U，VS 出金户净值重置为 10,000\.00 U/
+  );
+  const fundedCards = () =>
+    run("Array.from(document.querySelectorAll('#account-readout .card'), c => c.textContent)");
+  const firstPayout = await fundedCards();
+  assert.match(firstPayout[0], /VS 做空4,998\.86 U.*0\.0357 BTC/);
+  assert.match(firstPayout[1], /Hype 做多999\.77 U.*0\.00714 BTC/);
+  assert.match(firstPayout[2], /VS 爆号.*8,000\.00 U.*剩 500\.06 U.*赚 0\.06 U.*VS 1\.20 U，Hype 1\.20 U/);
+  assert.match(
+    firstPayout[3],
+    /首次分成到账.*10,100\.00 U.*剩 160\.31 U.*亏 339\.69 U.*到账前 80\.31 U，外部账户收到 80\.00 U.*扣除毛利润 100\.00 U.*平台分得 20\.00 U.*分配后净值 10,000\.00 U.*VS 0\.99 U，Hype 0\.99 U/
+  );
+  await send('Page.reload');
+  await wait(fundedReady);
+  assert.deepEqual(await fundedCards(), firstPayout);
+  assert.deepEqual(await workspace(), ledgerBeforeObservation);
+  console.log('通过 过关余额与模拟价格结转、出金户新仓位、爆号及首次分成到账后的累计净盈亏');
   await click('nav a[href="/?accounts=last"]');
   await wait("document.querySelector('#account-readout')?.innerText.includes('不适用 · 主账户')");
   console.log('通过 独立默认考核模拟仓位、两条触线的扣费剩余现金、500 U 基准盈亏与原账本隔离');

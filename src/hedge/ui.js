@@ -1,4 +1,4 @@
-import { sizingParameters } from './sizing-parameters.js';
+import { sizingParameters, fundedPreviewLimits } from './sizing-parameters.js';
 import { D, dec, out, positive, nonnegative, ratio, normalizeExposure, solveBudgetBounds } from './math.js';
 import { createBook, applyLedgerEvent, advanceClock, balances, markEquity, iso } from './book.js';
 import { solve, profileInputs, projectSettlementEquity } from './solver.js';
@@ -1021,8 +1021,8 @@ $('demo-stage').onclick = handle(async () => {
       });
   });
   if (stage === 'funded') {
-    $('reserve').value = '40';
-    $('gain').value = '20';
+    $('reserve').value = fundedPreviewLimits.R;
+    $('gain').value = fundedPreviewLimits.g;
   }
   render();
   rememberView();

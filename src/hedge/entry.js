@@ -1,7 +1,8 @@
 const params = new URLSearchParams(location.search);
-if (params.get('simulation') === 'challenge') {
-  const { showChallengeSimulation } = await import('./account-report.js');
-  showChallengeSimulation();
+const stage = params.get('simulation');
+if (stage === 'challenge' || stage === 'funded') {
+  const { showStageSimulation } = await import('./account-report.js');
+  showStageSimulation(stage);
 } else if (params.get('accounts') === 'last') {
   const { showReport } = await import('./account-report.js');
   showReport();

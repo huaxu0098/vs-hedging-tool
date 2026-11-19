@@ -1,9 +1,9 @@
 import { defaults } from './workspace.js';
-import { createBook } from './book.js';
+import { createBook, applyLedgerEvent, balances } from './book.js';
 import { dec } from './math.js';
 import { demoMarket, solve } from './solver.js';
 import { applyTargets, atPrice, settleBoundary } from './replay.js';
-import { sizingParameters } from './sizing-parameters.js';
+import { sizingParameters, fundedPreviewLimits } from './sizing-parameters.js';
 import { observationKey, assessObservation, validateObservation } from './account-observation.js';
 
 const main = document.querySelector('main');
@@ -132,46 +132,93 @@ function units(value) {
   return whole.replace(/\B(?=(?:\d{3})+(?!\d))/g, ',') + '.' + cents + ' U';
 }
 
-export function showChallengeSimulation() {
-  const parameters = sizingParameters((id) => {
+function simulateStage(book, market, parameters, at) {
+  const result = solve(book, market, parameters, { now: at });
+  if (!result.selected) return { result, book, market, parameters };
+  const { vsTargetQuantity: pf, hlTargetQuantity: hl, lines } = result.selected;
+  const opened = applyTargets(book, market, { pf, hl }, at, book.stage + '/open');
+  const settle = (event, shift) => {
+    const exitMarket = atPrice(market, shift);
+    return { ...settleBoundary(opened, exitMarket, event, at, book.stage + '/' + event), market: exitMarket };
+  };
+  return {
+    result,
+    book,
+    market,
+    parameters,
+    pass: settle('pass', lines.pass),
+    fail: settle('failure', lines.fail)
+  };
+}
+
+export function showStageSimulation(stage) {
+  const funded = stage === 'funded';
+  const challengeParameters = sizingParameters((id) => {
     const field = document.getElementById(id);
     if (field instanceof HTMLSelectElement)
       return (Array.from(field.options).find((option) => option.defaultSelected) ?? field.options[0]).value;
     return field.defaultValue;
   });
   const at = new Date().toISOString();
-  const book = createBook({ ...defaults, id: 'challenge-preview', pf: defaults.baseline, time: at });
-  const market = demoMarket('btc');
+  const challenge = simulateStage(
+    createBook({ ...defaults, id: 'challenge-preview', pf: defaults.baseline, time: at }),
+    demoMarket('btc'),
+    challengeParameters,
+    at
+  );
+  const run =
+    funded && challenge.pass
+      ? simulateStage(
+          challenge.pass.state,
+          challenge.pass.market,
+          { ...challengeParameters, ...fundedPreviewLimits },
+          at
+        )
+      : challenge;
+  const { book, market, parameters, result } = run;
 
   main.replaceChildren();
   main.id = 'account-readout';
-  document.title = '默认考核模拟 · VS × Hype';
+  document.title = funded ? '首次出金模拟 · VS × Hype' : '默认考核模拟 · VS × Hype';
   const back = make('a', '返回动态匹配');
   back.href = '/';
   const nav = document.querySelector('nav');
-  nav.replaceChildren(back);
+  const next = make('a', funded ? '查看上一轮考核' : '通过后，继续模拟首次出金');
+  next.href = funded ? '/?simulation=challenge' : '/?simulation=funded';
+  nav.replaceChildren(back, next);
   if (localStorage.getItem(observationKey)) {
     const latest = make('a', '上次账户识别');
     latest.href = '/?accounts=last';
     nav.append(latest);
   }
+  main.append(make('h1', funded ? 'BTC 首次出金模拟' : 'BTC 考核模拟'));
+  if (funded && !challenge.pass) {
+    main.append(make('p', '上一轮考核没有可行的双边仓位。'));
+    return;
+  }
   main.append(
-    make('h1', 'BTC 考核模拟'),
     make(
       'p',
-      'VS 初始净值 ' +
-        units(book.pf) +
-        '。个人本金 ' +
-        units(book.B) +
-        ' 扣除报名费 ' +
-        units(book.fees.registration) +
-        '，Hype 开仓前可用 ' +
-        units(book.hl) +
-        '。'
+      funded
+        ? '承接考核通过后的个人现金 ' +
+            units(book.hl) +
+            '，VS 出金户净值重置为 ' +
+            units(book.pf) +
+            '。上一轮已支付报名费 ' +
+            units(book.fees.registration) +
+            '。'
+        : 'VS 初始净值 ' +
+            units(book.pf) +
+            '。个人本金 ' +
+            units(book.B) +
+            ' 扣除报名费 ' +
+            units(book.fees.registration) +
+            '，Hype 开仓前可用 ' +
+            units(book.hl) +
+            '。'
     )
   );
 
-  const result = solve(book, market, parameters, { now: at });
   const candidate = result.selected;
   if (!candidate) {
     main.append(
@@ -180,13 +227,6 @@ export function showChallengeSimulation() {
     );
     return;
   }
-  const opened = applyTargets(
-    book,
-    market,
-    { pf: candidate.vsTargetQuantity, hl: candidate.hlTargetQuantity },
-    at,
-    'open'
-  );
   const tickets = make('div', undefined, 'observation-grid');
   for (const [name, qty, notional, margin] of [
     ['VS', candidate.vsTargetQuantity, candidate.vsNotional, candidate.initialMargin[0]],
@@ -203,26 +243,61 @@ export function showChallengeSimulation() {
   }
   main.append(section('两边各开多少'), tickets, section('触线平仓后，个人还剩多少'));
   const outcomes = make('div', undefined, 'observation-grid');
-  for (const [label, event, shift, threshold] of [
-    ['VS 通过', 'pass', candidate.lines.pass, book.challengeTarget],
-    ['VS 失败', 'failure', candidate.lines.fail, book.challengeFloor]
-  ]) {
-    // Both settlements start from the same opening fills and include their own closing fees.
-    const exitMarket = atPrice(market, shift);
-    const closing = settleBoundary(opened, exitMarket, event, at, event);
-    const pnl = dec(closing.cash).minus(book.B);
+  const cases = funded
+    ? [
+        ['VS 爆号', run.fail, book.fundedFloor],
+        ['首次分成到账', run.pass, candidate.targetEquity]
+      ]
+    : [
+        ['VS 通过', run.pass, book.challengeTarget],
+        ['VS 失败', run.fail, book.challengeFloor]
+      ];
+  for (const [label, closing, threshold] of cases) {
+    let cash = closing.cash;
+    let payout;
+    if (closing.state.status === 'PAYOUT_PENDING') {
+      const pending = closing.state;
+      payout = pending.payouts[pending.pendingPayout];
+      const received = applyLedgerEvent(pending, {
+        id: book.attemptId + '/first-receipt',
+        type: 'receipt',
+        source: book.mode,
+        occurredAt: at,
+        receivedAt: at,
+        payload: { payoutId: pending.pendingPayout, destination: 'external' }
+      });
+      cash = balances(received).total;
+    }
+    const pnl = dec(cash).minus(book.B);
     const outcome = resultCard(
       label + ' · 净值 ' + units(threshold),
-      '剩 ' + units(closing.cash),
+      '剩 ' + units(cash),
       '比最初 ' + units(book.B) + (pnl.isZero() ? ' 持平' : (pnl.gt(0) ? ' 赚 ' : ' 亏 ') + units(pnl.abs()))
     );
+    if (payout)
+      outcome.append(
+        make(
+          'p',
+          '分成到账前 ' +
+            units(closing.cash) +
+            '，外部账户收到 ' +
+            units(payout.user) +
+            '。VS 扣除毛利润 ' +
+            units(payout.gross) +
+            '，平台分得 ' +
+            units(payout.platform) +
+            '，分配后净值 ' +
+            units(closing.state.pf) +
+            '。'
+        )
+      );
     outcome.append(
       make(
         'p',
-        '开平仓手续费合计：VS ' +
-          units(closing.state.fees.pf) +
+        '本阶段开平仓手续费合计：VS ' +
+          units(dec(closing.state.fees.pf).minus(book.fees.pf)) +
           '，Hype ' +
-          units(closing.state.fees.hl) +
+          units(dec(closing.state.fees.hl).minus(book.fees.hl)) +
           '。',
         'observation-meta'
       )
@@ -233,22 +308,25 @@ export function showChallengeSimulation() {
     outcomes,
     make(
       'p',
-      '通过考核后取得 Funded 账户，考核盈利不可提款。两种结果均已计入一次报名费及各自的开平仓手续费。'
+      funded
+        ? '盈亏均按最初个人本金 ' + units(book.B) + ' 计算，已包含报名费及两个阶段的实际模拟成交费用。'
+        : '通过考核后取得 Funded 账户，考核盈利不可提款。两种结果均已计入一次报名费及各自的开平仓手续费。'
     )
   );
   const feeRate = (leg) => dec(leg.rate).times(100).toString() + '%';
   main.append(
     make(
       'p',
-      '本次按 BTC 模拟开仓价 ' +
+      (funded ? '本次沿用考核通过时的 BTC 模拟价格 ' : '本次按 BTC 模拟开仓价 ') +
         units(market.pf.mark) +
         '/BTC，VS 单边费率 ' +
         feeRate(market.pf) +
         '、Hype 单边费率 ' +
         feeRate(market.hl) +
-        '。假设零点差、零滑点、零资金费，且在 ' +
-        defaults.hours +
-        ' 小时内先触及相应边界。',
+        '。假设零点差、零滑点、零资金费' +
+        (funded
+          ? '，按先触及的出金户边界分别结算。'
+          : '，且在 ' + defaults.hours + ' 小时内先触及相应边界。'),
       'observation-meta'
     )
   );
@@ -259,18 +337,22 @@ export function showChallengeSimulation() {
       'p',
       'VS 候选名义额为 ' +
         parameters.sizes.map(units).join('、') +
-        '。在失败端回本且通过端 Hype 至少保留 ' +
+        '。在失败端回本且' +
+        (funded ? '分成到账前' : '通过端') +
+        ' Hype 至少保留 ' +
         units(parameters.R) +
-        ' 的候选中，按通过后的剩余现金排序。本次对冲比例 ' +
+        (funded
+          ? '、本阶段至少增益 ' + units(parameters.g) + ' 的候选中，按到账后剩余现金排序。本次对冲比例 '
+          : ' 的候选中，按通过后的剩余现金排序。本次对冲比例 ') +
         dec(candidate.actualRatio).times(100).toFixed(2) +
         '%。'
     ),
     make(
       'p',
-      'BTC 模拟通过价约 ' +
-        units(atPrice(market, candidate.lines.pass).pf.mark) +
+      (funded ? '首次分成参考点对应 BTC 模拟价格约 ' : 'BTC 模拟通过价约 ') +
+        units(run.pass.market.pf.mark) +
         '/BTC，失败价约 ' +
-        units(atPrice(market, candidate.lines.fail).pf.mark) +
+        units(run.fail.market.pf.mark) +
         '/BTC。'
     )
   );
