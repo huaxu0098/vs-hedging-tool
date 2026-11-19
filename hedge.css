@@ -430,3 +430,46 @@ label input[type='checkbox'] {
 .desk-ratios div { font-size:13px; color:#c7dfde; }
 .desk-ratios strong { padding-inline-start:8px; font-size:16px; color:white; }
 .desk-summary #verified-range { padding:0 0 6px; border:0; font-weight:500; }
+
+.intake,
+.flat-entry {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+}
+.intake {
+  justify-content: space-between;
+  background: #e7f2f1;
+  border-left: 4px solid #207169;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-bottom: 14px;
+}
+.intake > div {
+  flex: 1 1 340px;
+}
+.intake p,
+.flat-entry span {
+  font-size: 13px;
+}
+.flat-entry {
+  margin: 10px 0;
+}
+#quick-margin {
+  grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr));
+}
+#best-two {
+  font-weight: 650;
+}
+
+[hidden] {
+  display: none !important;
+}
+.plan-form {
+  grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
+}
+#plan-basis {
+  margin-top: 10px;
+  color: var(--muted);
+}

@@ -31,6 +31,41 @@ const row = () => run("Array.from(document.querySelector('#legs').rows[1].cells,
 try {
   await send('Page.navigate', { url: desk + '/' });
   await wait("document.querySelector('#calc-status')?.textContent");
+  assert.equal(await val('funding-view'), 'plan');
+  const hasPlan = "document.querySelector('#best-two').textContent.includes('第二优 PF')";
+  await wait(hasPlan, 40000);
+  assert.match(await text('#plan-basis'), /500.00 U.*91.00 U.*409.00 U/);
+  assert.match(await text('#summary-status'), /预设规划/);
+  assert.match(await text('#stress-assumptions'), /压力未配置/);
+  console.log(
+    'PLAN_LIVE',
+    JSON.stringify(
+      await run(
+        "Object.fromEntries(['pf-quote','hl-quote','best-two','legs','range','target-h','fail-summary','fail-change','pass-summary','pass-change','times'].map(k=>[k,document.getElementById(k).textContent]))"
+      )
+    )
+  );
+  await set('jumpBps', '0');
+  await wait(hasPlan);
+  assert.match(await text('#stress-assumptions'), /零压力假设.*跳价/);
+  await set('stage', 'funded');
+  await wait(
+    "document.querySelector('#range').textContent.includes('无交集') && document.querySelector('#auto-search').textContent.includes('AUTO_INFEASIBLE')",
+    30000
+  );
+  assert.equal(await text('#pf-summary'), '—');
+  console.log('FUNDED_DEFAULT', await text('#bounds-detail'));
+  await set('R', '40');
+  await wait(hasPlan, 30000);
+  assert.match(await text('#plan-basis'), /101.50 U/);
+  assert.match(await text('#pass-heading'), /到账/);
+  console.log(
+    'FUNDED_PLAN_LIVE',
+    await text('#best-two'),
+    await text('#fail-summary'),
+    await text('#pass-summary')
+  );
+  await b.set('#funding-view', 'account');
   assert.equal(await val('pf-equity'), '');
   assert.equal(await val('hl-qty'), '');
   assert.equal(await val('mode'), 'auto');
@@ -41,6 +76,19 @@ try {
   assert.match(await text('#range'), /15.167% – 15.450%/);
   assert.match(await text('#legs'), /未知/);
   done('R02', await text('#bounds-detail'));
+  await set('pf-free', '10000');
+  await set('hl-free', '409');
+  assert.equal(await val('pf-qty'), '');
+  assert.equal(await val('hl-qty'), '');
+  await click('#confirm-flat');
+  await wait(hasPlan, 30000);
+  assert.match(await text('#best-two'), /实际杠杆未录入/);
+  assert.equal(await val('pf-qty'), '0');
+  assert.equal(await val('hl-qty'), '0');
+  assert.match(await text('#top-auto'), /淘汰/);
+  console.log('QUICK_ACCOUNT', await text('#best-two'), await text('#calc-status'));
+  // Fixed-position tests below deliberately start without verified margin settings.
+  for (const id of ['pf-marginMode', 'hl-marginMode', 'pf-otherHold', 'hl-otherHold']) await set(id, '');
   await set('mode', 'keepPF');
   await position('0.08', '-0.005');
   await wait(candidate, 35000);
@@ -98,7 +146,7 @@ try {
     downloadThroughput: 0,
     uploadThroughput: 0
   });
-  await wait("document.querySelector('#calc-status').textContent.includes('过期')", 18000);
+  await wait("/过期|断开/.test(document.querySelector('#calc-status').textContent)", 18000);
   assert.match(await text('#quotes'), /标记/);
   assert.match(await text('#previous'), /过期前最后一次/);
   assert.equal((await row())[4], '—');
@@ -202,7 +250,7 @@ try {
     R: '100'
   }))
     await set(id, value);
-  const recommended = "document.querySelector('#target-h').textContent.includes('推荐')";
+  const recommended = "/推荐|基础候选|已验候选/.test(document.querySelector('#target-h').textContent)";
   await wait(recommended, 30000);
   await wait("document.querySelector('#hl-quote').textContent.includes('WebSocket')", 30000);
   assert.match(await text('#verified-range'), /个可行比例/);
@@ -323,6 +371,7 @@ try {
   await wait(
     "document.querySelector('#bridge-pair')?.onclick && document.querySelector('#order-detail').textContent"
   );
+  await b.set('#funding-view', 'account');
   await click('#bridge-pair');
   await wait("document.querySelector('#bridge-script').value.length > 0");
   const script = await val('bridge-script');

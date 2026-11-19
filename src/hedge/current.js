@@ -48,14 +48,43 @@ export const rules = {
   pfUtil: '100',
   hlUtil: '100',
   externalCurrency: 'USDC',
-  adverseBps: '0',
-  jumpBps: '0',
-  delayBps: '0',
-  fundingDebit: '0',
+  adverseBps: '',
+  jumpBps: '',
+  delayBps: '',
+  fundingDebit: '',
   quoteSecs: '5',
   accountSecs: '300'
 };
 
+export const stressFields = {
+  adverseBps: '基差及汇率',
+  jumpBps: '跳价',
+  delayBps: '调仓延迟',
+  fundingDebit: '资金费'
+};
+export function stressCoverage(r) {
+  const missing = [],
+    zero = [],
+    positive = [];
+  for (const [field, label] of Object.entries(stressFields)) {
+    if (!specified(r[field])) missing.push(label);
+    else (nonnegative(r[field]).isZero() ? zero : positive).push(label);
+  }
+  const label = missing.length ? '压力未配置：' + missing.join('、') : '';
+  const zeros = zero.length ? '零压力假设：' + zero.join('、') : '';
+  return {
+    missing,
+    zero,
+    positive,
+    label: [label, zeros].filter(Boolean).join('；') || '四项非零压力参数已设置'
+  };
+}
+
+// A whole API snapshot has one timestamp. Manual values retain individual confirmation times.
+export function fieldTime(account, field) {
+  const key = field + 'At';
+  return Object.hasOwn(account, key) ? account[key] : (account.origins?.[field]?.at ?? account.at);
+}
 export function remainingOrder(delta, current, orders) {
   if (!Array.isArray(orders)) return { text: '未确认挂单，待核对', remaining: null };
   const d = dec(delta);
@@ -264,14 +293,42 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
   if (pending) result.notices.push('有分成待到账 ' + r.receivable + ' U，核对平台回执');
   const expired = !funded && r.deadline && Date.parse(r.deadline) <= now;
   if (expired) result.notices.push('考核已到期，待核对实际退出');
+  const planning = a.pf.sourceKind === 'plan' && a.hl.sourceKind === 'plan';
+  const ttl = positive(r.accountSecs).toNumber() * 1000;
+  const ages = positive(r.quoteSecs).toNumber() * 1000;
+  const quoteOK = (k) =>
+    fresh(data[k]?.asOf, now, ages) &&
+    (!data[k]?.markAt || fresh(data[k].markAt, now, ages)) &&
+    !data.errors?.[k];
+  const usable = (k, field) => !a[k].error && (planning || fresh(fieldTime(a[k], field), now, ttl));
+  result.inputGaps = [];
+  result.stress = stressCoverage(r);
   for (const k of ['pf', 'hl']) {
-    const q = (result.qty[k] = optional(a[k].qty));
+    const name = k === 'pf' ? 'VS' : 'Hype';
+    for (const [field, label] of [
+      ['equity', '权益'],
+      ['qty', '持仓'],
+      ['free', '可用保证金']
+    ]) {
+      const raw = field === 'free' ? (a[k].directionalFree ?? a[k].free) : a[k][field];
+      const stamp = fieldTime(a[k], field);
+      if (!specified(raw) || !usable(k, field))
+        result.inputGaps.push({
+          id: k + '-' + field,
+          text:
+            name +
+            ' ' +
+            label +
+            (a[k].error ? '来源不可用' : !specified(raw) ? '未录入' : !stamp ? '缺少确认时间' : '已过期')
+        });
+    }
+    const q = (result.qty[k] = usable(k, 'qty') ? optional(a[k].qty) : null);
     const spec = k === 'pf' ? data.spec : data.hl;
     const unit = positive(String(spec?.contractMultiplier ?? '1')).times(
       positive(String(spec?.settlementToUSDC ?? '1'))
     );
-    result.cash[k] = equityAt(a[k], q, data[k]?.mark, unit);
-    if (q != null && data[k]?.mark)
+    result.cash[k] = usable(k, 'equity') ? equityAt(a[k], q, quoteOK(k) ? data[k]?.mark : null, unit) : null;
+    if (q != null && quoteOK(k) && data[k]?.mark)
       result.currentNotional[k] = out(dec(q).abs().times(unit).times(String(data[k].mark)));
   }
   const protection = out(nonnegative(r.B).plus(nonnegative(r.outsideCosts ?? '0')));
@@ -295,7 +352,10 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
     conversion = out(
       positive(String(currency === 'USD' ? '1' : fxData.USDT.rate)).div(positive(String(fxData.USDC.rate)))
     );
-  const external = conversion ? out(externalAmount.times(conversion)) : '0';
+  const externalFresh = planning || externalAmount.isZero() || fresh(r.externalAt, now, ttl);
+  const external = conversion && externalFresh ? out(externalAmount.times(conversion)) : '0';
+  if (!externalFresh) issues.push('外部已到账金额缺少当前确认，请核对资金来源');
+
   result.externalValue = external;
   result.externalRate = conversion;
   result.externalSource = !conversion
@@ -306,8 +366,9 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
         ? '手工估值 ' + r.externalFxAt
         : '公开现货汇率 ' +
           [fxData.USDC?.asOf, currency === 'USDT' ? fxData.USDT?.asOf : null].filter(Boolean).join(' / ');
-  result.marginHL = a.hl.directionalFree ?? optional(a.hl.free);
-  result.protect = result.cash.hl == null ? null : out(dec(result.cash.hl).plus(external));
+  result.marginHL =
+    !a.hl.unsupported && usable('hl', 'free') ? (a.hl.directionalFree ?? optional(a.hl.free)) : null;
+  result.protect = result.cash.hl == null || !externalFresh ? null : out(dec(result.cash.hl).plus(external));
   if (!conversion && !externalAmount.isZero())
     result.notices.push('外部资金 ' + externalAmount + ' ' + currency + ' 估值未确认，暂未计入保护资金');
   const p = {
@@ -331,17 +392,37 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
   let terminal;
   if (p.E != null && p.C_hl != null) {
     result.range = solveBudgetBounds(p);
-    if (!result.range.min) terminal = reason(result.range.code);
+    if (result.range.min == null) result.range = null; // Terminal events need fresh positions and executable quotes below.
   }
-  const ages = positive(r.quoteSecs).toNumber() * 1000;
   let fx = null;
   if (specified(r.fx) && fresh(r.fxAt, now, positive(r.accountSecs).toNumber() * 1000))
     fx = out(positive(r.fx));
   else if (fxData.USDC && fxData.USDT && [fxData.USDC, fxData.USDT].every((x) => fresh(x.asOf, now, 60000)))
     fx = out(positive(String(fxData.USDC.rate)).div(positive(String(fxData.USDT.rate))));
+  // Invalidate risk fields independently. Editing a quantity must never renew available collateral.
+  a = Object.fromEntries(
+    ['pf', 'hl'].map((k) => {
+      const leg = { ...a[k] };
+      for (const field of [
+        'free',
+        'leverage',
+        'otherHold',
+        'orders',
+        'marginMode',
+        'maxQty',
+        'liquidation',
+        'capacity',
+        'fee'
+      ]) {
+        if (!usable(k, field)) leg[field] = null;
+      }
+      if (!usable(k, 'free')) leg.directionalFree = null;
+      return [k, leg];
+    })
+  );
   const market = fx && buildMarket(data, r, a, fx);
   const { pf, hl } = result.qty;
-  if (market && pf !== null && hl !== null && !dec(pf).isZero()) {
+  if (market && quoteOK('pf') && quoteOK('hl') && pf !== null && hl !== null && !dec(pf).isZero()) {
     const v = dec(normalizeExposure(pf, market.pf)),
       h = dec(normalizeExposure(hl, market.hl));
     result.currentH = out(h.abs().div(v.abs()));
@@ -358,9 +439,19 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
       result.marginMax = out(dec(normalizeExposure(out(qtyCap), leg)).div(v.abs()));
     }
   }
-  if (!funded && !r.deadline) result.notices.push('截止时间未录入');
+  if (!planning && !funded && !r.deadline) result.notices.push('截止时间未录入');
   if (funded && p.C_ref == null) result.notices.push('缺少本轮起点，整轮收益及其比例上限未验证');
-  if (!p.E || !p.C_hl) issues.push('请录入两边当前权益');
+  for (const gap of result.inputGaps)
+    if (!gap.id.endsWith('-free') || r.mode === 'auto') issues.push(gap.text);
+  if (data.errors?.pf || data.errors?.hl || a.pf.error || a.hl.error)
+    result.dataState = '接口或账户来源不可用';
+  else if (
+    result.inputGaps.some((g) => g.text.includes('过期')) ||
+    ['pf', 'hl'].some((k) => data[k] && !quoteOK(k))
+  )
+    result.dataState = '数据过期';
+  else if (result.inputGaps.some((g) => !g.id.endsWith('-free') || r.mode === 'auto') || !market)
+    result.dataState = '等待数据';
   if (pf === null || hl === null) issues.push('持仓数量未录入，空仓请填 0');
   if (!fx) issues.push('缺少有效 USDC/USDT 折算，可在规则中确认汇率');
   if (!market) issues.push('等待已核实的双边合约与盘口');
@@ -370,12 +461,11 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
       (data[k]?.markAt && !fresh(data[k].markAt, now, ages)) ||
       data.errors?.[k]
     )
-      issues.push((k === 'pf' ? 'VS' : 'Hype') + ' 行情缺失或过期');
+      issues.push(
+        (k === 'pf' ? 'VS' : 'Hype') +
+          (data.errors?.[k] ? ' 行情接口断开：' + data.errors[k] : ' 行情缺失或过期')
+      );
     if (a[k].error) issues.push(a[k].error);
-    if (r.mode === 'auto' && a[k].qty != null && a[k].equity != null && !a[k].at)
-      issues.push((k === 'pf' ? 'VS' : 'Hype') + ' 账户快照缺少确认时间');
-    if (a[k].at && !fresh(a[k].at, now, positive(r.accountSecs).toNumber() * 1000))
-      issues.push((k === 'pf' ? 'VS' : 'Hype') + ' 账户快照过期');
     if (result.qty[k] != null && !dec(result.qty[k]).isZero() && !a[k].anchor)
       result.notices.push((k === 'pf' ? 'VS' : 'Hype') + ' 缺少快照标记价，沿用已确认权益');
     if (a[k].otherPositions)
@@ -386,7 +476,17 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
   if (data.errors?.spec) issues.push(data.errors.spec);
   if (market && !market.pf.open) issues.push('VS 合约休市');
   if (a.hl.unsupported) issues.push('Hype 资金池模式未验证');
-  if (market && pf != null && p.E != null) {
+  if (
+    market &&
+    quoteOK('pf') &&
+    quoteOK('hl') &&
+    !data.errors?.spec &&
+    pf != null &&
+    hl != null &&
+    p.E != null &&
+    p.C_hl != null &&
+    !a.hl.unsupported
+  ) {
     // The account value already includes the open position. Only the exit execution and fee remain.
     let f;
     try {
@@ -409,7 +509,10 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
       terminal = netRange.min == null ? reason(netRange.code) : null;
     }
   }
-  if (terminal) result.notices.push(terminal + (result.settlePF == null ? '（仅按快照权益预警）' : ''));
+  if (terminal) {
+    result.notices.push(terminal);
+    if (r.mode === 'auto') result.dataState = terminal;
+  }
   if (r.mode === 'keepPF' && pf !== null && dec(pf).isZero())
     issues.push('PF 已确认空仓，保持 PF 时没有对冲基准');
   if (
@@ -496,21 +599,21 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
     g: r.g,
     k: r.k,
     objective: r.objective,
-    movePct: specified(r.movePct) ? out(positive(r.movePct)) : null
+    movePct: specified(r.movePct) ? out(nonnegative(r.movePct)) : null
   };
   const checks = {
     currentSnapshot: true,
     liveLimits: true,
-    adverseBps: out(nonnegative(r.adverseBps ?? '0')),
+    adverseBps: out(nonnegative(r.adverseBps || '0')),
     minPriceBuffer: out(nonnegative(r.minBuffer ?? '0')),
     now: new Date(now).toISOString()
   };
-  if ([r.jumpBps, r.delayBps, r.fundingDebit].some((x) => nonnegative(x ?? '0').gt(0)))
+  if ([r.jumpBps, r.delayBps, r.fundingDebit].some((x) => nonnegative(x || '0').gt(0)))
     checks.stress = {
-      jumpBps: r.jumpBps ?? '0',
-      basisBps: r.adverseBps ?? '0',
-      delayBps: r.delayBps ?? '0',
-      fundingDebit: r.fundingDebit ?? '0'
+      jumpBps: r.jumpBps || '0',
+      basisBps: r.adverseBps || '0',
+      delayBps: r.delayBps || '0',
+      fundingDebit: r.fundingDebit || '0'
     };
   if (r.mode === 'auto') {
     const missing = [];
@@ -526,6 +629,22 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
       )
         missing.push(label + ' 条件、只减仓或双向挂单成交顺序');
       else l.pendingQty = out(a[key].orders.reduce((sum, o) => sum.plus(o.qty), dec('0')));
+      if (
+        dec(result.qty[key]).isZero() &&
+        a[key].flatConfirmedAt &&
+        fresh(a[key].flatConfirmedAt, now, ttl) &&
+        !a[key].otherPositions &&
+        a[key].orders?.length === 0 &&
+        l.marginMode === 'cross' &&
+        l.free != null
+      ) {
+        const locked = dec(result.cash[key]).minus(l.free);
+        if (l.hold == null || locked.gt(l.hold)) l.hold = out(locked.gt(0) ? locked : dec('0'));
+        if (key === 'hl' && !l.leverage) {
+          l.leverage = '1';
+          result.sizingAssumption = 'Hype 实际杠杆未录入，按每 1 U 名义仓位占用 1 U 初始保证金计算条件仓位';
+        }
+      }
       if (l.marginMode !== 'cross') missing.push(label + ' 已支持的全仓模式');
       if (!l.leverage || !l.tiers?.length) missing.push(label + ' 杠杆或维持保证金档位');
       if (l.hold == null) missing.push(label + ' 其他仓位及挂单占用');
@@ -548,17 +667,33 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
     result.autoStatus = solved.code;
     result.search = { complete: solved.searchComplete, evaluations: solved.evaluations, nodes: solved.nodes };
     result.top = solved.candidates;
+    result.rejections = solved.rejected.map((c) => ({
+      pf: c.vsTargetQuantity,
+      hl: c.hlTargetQuantity,
+      why: reason(c.constraints?.find((x) => x.status === 'fail')?.code ?? c.code),
+      check: c.constraints?.find((x) => x.status === 'fail')
+    }));
     result.waiting = solved.hold;
     result.pressure = solved.pressure;
-    if (params.movePct && !funded) {
+    if (params.objective === 'cash' || (params.movePct && !funded)) {
       const maxSize =
         params.objective === 'cash'
           ? solveAuto(book, market, { ...params, objective: 'size', movePct: null }, checks)
           : solved;
-      result.maximum = { amount: maxSize.selected?.vsNotional ?? null, complete: maxSize.searchComplete };
+      result.maximum = {
+        amount: maxSize.selected?.vsNotional ?? null,
+        complete: maxSize.searchComplete,
+        candidate: maxSize.selected
+      };
     }
+    result.maximum ??= {
+      amount: solved.selected?.vsNotional,
+      complete: solved.searchComplete,
+      candidate: solved.selected
+    };
+    if (result.sizingAssumption && solved.selected) result.autoStatus = 'AUTO_PARTIAL';
     if (solved.code === 'AUTO_HOLD' && !solved.selected) result.flatHold = true;
-    if (!funded && !r.deadline && solved.selected) {
+    if (!planning && !funded && !r.deadline && solved.selected) {
       result.autoStatus = 'AUTO_PARTIAL';
       result.notices.push('仓位按考核仍有效计算，实际截止时间待确认');
     }

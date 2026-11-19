@@ -23,6 +23,12 @@
         <h1>实时双平台动态对冲计算</h1>
         <div class="selectors">
           <label
+            >资金来源<select id="funding-view">
+              <option value="plan">预设资金规划</option>
+              <option value="account">当前账户快照</option>
+            </select></label
+          >
+          <label
             >当前合约<select id="asset">
               <option>BTC</option>
               <option>ETH</option>
@@ -46,6 +52,18 @@
           >
         </div>
       </div>
+      <section class="card" id="plan-settings">
+        <h2 id="plan-heading">开考前资金规划</h2>
+        <div class="form plan-form" id="plan-fields"></div>
+        <p id="plan-basis"></p>
+      </section>
+      <section class="intake" aria-label="数据检查">
+        <div>
+          <h2>当前数据检查</h2>
+          <p id="quick-status" role="status"></p>
+        </div>
+        <button id="quick-entry" type="button">快速录入当前账户</button>
+      </section>
       <section class="desk-summary" aria-label="当前仓位调整摘要">
         <article>
           <h2>VS 目标仓位</h2>
@@ -64,12 +82,12 @@
           <strong id="pass-summary">—</strong><span id="pass-change"></span>
         </article>
         <article>
-          <h2>已确认个人保护资金</h2>
-          <strong id="protect-funds">—</strong><span>Hype 权益＋其他账户已到账资金</span>
+          <h2 id="protection-label">已确认个人保护资金</h2>
+          <strong id="protect-funds">—</strong><span id="fund-source"></span>
         </article>
         <article>
-          <h2>Hype 可用抵押品</h2>
-          <strong id="margin-funds">—</strong><span>账户可开仓保证金</span>
+          <h2 id="margin-label">Hype 可用抵押品</h2>
+          <strong id="margin-funds">—</strong><span id="collateral-source"></span>
         </article>
         <article>
           <h2>成功端到账前 Hype 现金</h2>
@@ -88,7 +106,12 @@
         <p id="summary-status" role="status"></p>
       </section>
       <section class="card" id="snapshot">
-        <h2>当前账户与持仓</h2>
+        <h2 id="account-heading">当前账户与持仓</h2>
+        <div class="flat-entry" id="flat-entry">
+          <button type="button" id="confirm-flat">确认双方全账户空仓、无挂单，均使用全仓</button>
+          <span>仅当前合约空仓时，可单独填写数量 0。权益与可用保证金须来自对应账户。</span
+          ><span id="flat-feedback" role="status"></span>
+        </div>
         <div class="accounts">
           <div>
             <h3>VS / PF</h3>
@@ -141,6 +164,8 @@
             ><label>成功时 Hype 至少留存 R（U）<input id="R" inputmode="decimal" /></label>
           </div>
         </div>
+        <div id="quick-margin" class="form"></div>
+        <button type="button" id="confirm-balances">已核对平台，重新确认表内权益与可用保证金</button>
       </section>
       <section class="card" aria-labelledby="result-heading">
         <h2 id="result-heading">持仓比例与本次调整</h2>
@@ -151,7 +176,8 @@
         </details>
         <p id="auto-search"></p>
         <p id="two-day"></p>
-        <details id="alternatives">
+        <p id="best-two"></p>
+        <details id="alternatives" open>
           <summary>候选仓位与淘汰原因</summary>
           <div class="table-wrap">
             <table>
@@ -163,6 +189,7 @@
                   <th>最差压力现金</th>
                   <th>强平距离</th>
                   <th>保证金占用</th>
+                  <th>核验结果</th>
                 </tr>
               </thead>
               <tbody id="top-auto"></tbody>
@@ -173,6 +200,10 @@
         </details>
         <p id="basis"></p>
         <p id="bounds-detail"></p>
+        <details>
+          <summary>查看比例上下限的计算公式</summary>
+          <p id="bound-formula"></p>
+        </details>
         <div class="table-wrap">
           <table>
             <thead>

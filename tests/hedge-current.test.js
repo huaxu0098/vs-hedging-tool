@@ -25,7 +25,7 @@ const market = {
 const r = { ...rules, mode: 'keepPF', fx: '1', fxAt: at };
 const calc = (profile = r, a = accounts, m = market, time = t) => calculateCurrent(profile, a, m, {}, time);
 test('当前权益独立给出区间，仓位留空与显式零有不同语义', () => {
-  const x = calc(r, { pf: { equity: '10000' }, hl: { equity: '409' } }, {});
+  const x = calc(r, { pf: { at, equity: '10000' }, hl: { at, equity: '409' } }, {});
   assert.ok(dec(x.range.min).times(100).toFixed(3) === '15.167');
   assert.equal(x.qty.pf, null);
   assert.equal(x.candidate, undefined);
@@ -164,4 +164,26 @@ test('无可调组合仍展示现仓真实数量的条件现金，已知提前�
   assert.ok(blocked.heldCash.failureCash);
   assert.equal(blocked.heldCash.pressureCashAfter, undefined);
   assert.match(blocked.notices.join(' '), /成功线之前触及强平/);
+});
+
+test('跨品种读取共享权益时，金额、来源及时间必须来自同一快照', async () => {
+  const { manualAccount } = await import('../src/hedge/current-account.js');
+  const st = {
+    shared: { hl: { asset: 'ETH', equity: '400', at: '2020-01-01', source: 'ETH账户快照' } },
+    assets: {
+      BTC: {
+        hl: { equity: '409', equityAt: at, qty: '0', qtyAt: at, anchor: '63000', origins: { free: { at } } }
+      },
+      ETH: { hl: { equity: '400', equityAt: '2020-01-01' } }
+    }
+  };
+  let a = manualAccount(st, 'BTC', 'hl');
+  assert.equal(a.equity, '400');
+  assert.equal(a.equityAt, '2020-01-01');
+  assert.equal(a.source, 'ETH账户快照');
+  assert.equal(a.anchor, null);
+  assert.equal(calc(r, { pf: accounts.pf, hl: a }).protect, null);
+  st.shared.hl.equity = '';
+  a = manualAccount(st, 'BTC', 'hl');
+  assert.equal(a.equity, '');
 });

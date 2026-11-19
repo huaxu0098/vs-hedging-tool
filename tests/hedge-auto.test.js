@@ -63,7 +63,7 @@ test('AUTO01 auto 默认联合搜索两边空仓的最大 PF 名义额', () => {
 });
 test('AUTO02 外部已到账 100U 只增加个人保护资金', () => {
   const x = calc(),
-    y = calc({ external: '100' });
+    y = calc({ externalAt: at, external: '100' });
   assert.equal(y.protect, '220');
   assert.equal(y.marginHL, x.marginHL);
   assert.ok(dec(y.range.min).lt(x.range.min));
@@ -142,6 +142,7 @@ test('AUTO10 全部候选不符时给出实际缺口', () => {
 });
 test('AUTO11 已到账外币折算、未知估值、在途和分成分开', () => {
   const x = calc({
+    externalAt: at,
     external: '100',
     externalCurrency: 'OTHER',
     externalFx: '0.8',
@@ -151,7 +152,7 @@ test('AUTO11 已到账外币折算、未知估值、在途和分成分开', () =
   assert.equal(x.protect, '200');
   assert.equal(x.marginHL, '120');
   assert.equal(x.candidate.pressureCashAfter, out(dec(x.candidate.hlBeforePayout).plus(80)));
-  const y = calc({ external: '100', externalCurrency: 'OTHER' });
+  const y = calc({ externalAt: at, external: '100', externalCurrency: 'OTHER' });
   assert.equal(y.protect, '120');
   assert.match(y.notices.join(' '), /估值未确认/);
 });
@@ -231,8 +232,115 @@ test('未知条件单与未估值资金不能生成可执行目标，近零真�
   const f = fixture();
   f.a.pf.free = '0';
   f.a.hl.free = '1';
-  const x = calc({ externalCurrency: 'OTHER', external: '5000', inTransit: '5000' }, f);
+  const x = calc({ externalCurrency: 'OTHER', externalAt: at, external: '5000', inTransit: '5000' }, f);
   assert.equal(x.autoStatus, 'AUTO_INFEASIBLE');
   assert.equal(x.protect, '120');
   assert.equal(x.marginHL, '1');
+});
+
+test('两边权益独立过期时均不判定失败、通过、提款或退出现金；新改数量不会续期', () => {
+  for (const side of ['pf', 'hl'])
+    for (const equity of ['899', '1101']) {
+      const f = fixture();
+      f.a.pf.equity = equity;
+      f.a[side].equityAt = '2020-01-01T00:00:00Z';
+      f.a[side].qtyAt = at;
+      const x = calc({}, f);
+      assert.equal(x.cash[side], null);
+      assert.equal(x.range, undefined);
+      assert.equal(x.settlePF, undefined);
+      assert.equal(x.candidate, undefined);
+      assert.equal(x.dataState, '数据过期');
+      assert.doesNotMatch(x.notices.join(' '), /已触及|目标已到|已到提款/);
+      const funded = calc({ stage: 'funded', fundedFloor: '900', fundedTarget: '1100' }, f);
+      assert.equal(funded.claim, undefined);
+      const due = calc({ deadline: at }, f);
+      assert.equal(due.deadlineExit, undefined);
+    }
+});
+
+test('保护金不复用旧 Hype 权益，保证金与外部现金独立确认', () => {
+  const f = fixture();
+  Object.assign(f.a.hl, { equity: '400', free: '12', equityAt: '2020-01-01' });
+  let x = calc({ external: '10', externalAt: at }, f);
+  assert.equal(x.protect, null);
+  assert.equal(x.marginHL, '12');
+  assert.equal(x.externalValue, '10');
+  f.a.hl.equityAt = at;
+  f.a.hl.freeAt = '2020-01-01';
+  x = calc({ external: '10', externalAt: at }, f);
+  assert.equal(x.protect, '410');
+  assert.equal(x.marginHL, null);
+  assert.equal(x.candidate, undefined);
+  f.a.hl.freeAt = at;
+  x = calc({ external: '10', externalAt: '2020-01-01' }, f);
+  assert.equal(x.protect, null);
+  assert.equal(x.externalValue, '0');
+  assert.equal(x.marginHL, '12');
+});
+
+test('未知数量、明确空仓及缺实际杠杆的全额抵押条件求解严格区分', () => {
+  const f = fixture();
+  f.a.hl.qty = '';
+  assert.equal(calc({}, f).qty.hl, null);
+  f.a.hl.qty = '0';
+  delete f.a.hl.leverage;
+  assert.equal(calc({}, f).candidate, undefined);
+  f.a.hl.flatConfirmedAt = at;
+  const x = calc({ B: '120', R: '10' }, f);
+  assert.ok(x.candidate, x.issues.join(' '));
+  assert.equal(x.autoStatus, 'AUTO_PARTIAL');
+  assert.match(x.sizingAssumption, /实际杠杆未录入/);
+  assert.ok(dec(x.candidate.hlNotional).lte(f.a.hl.free));
+  f.a.hl.marginMode = 'isolated';
+  assert.equal(calc({}, f).candidate, undefined);
+});
+
+test('空白、显式零、部分和非零压力；零两日波幅可计算', () => {
+  const unspecified = calc();
+  assert.equal(unspecified.stress.missing.length, 4);
+  assert.ok(unspecified.candidate);
+  const zero = calc({ movePct: '0', adverseBps: '0', delayBps: '0', jumpBps: '0', fundingDebit: '0' });
+  assert.equal(zero.stress.zero.length, 4);
+  assert.equal(zero.stress.missing.length, 0);
+  assert.equal(zero.stressedEquity, '1000');
+  assert.ok(zero.candidate);
+  const partial = calc({ jumpBps: '1', fundingDebit: '0' });
+  assert.equal(partial.stress.missing.length, 2);
+  const configured = calc({ jumpBps: '1', delayBps: '1', adverseBps: '1', fundingDebit: '0.01' });
+  assert.equal(configured.stress.positive.length, 4);
+});
+
+test('首选、第二优与淘汰行都来自当次枚举和约束，不足两个候选时不补造', () => {
+  const x = calc();
+  assert.equal(x.maximum.amount, x.top[0].vsNotional);
+  assert.notDeepEqual(x.top[0], x.top[1]);
+  assert.ok(x.top.every((c) => c.constraints.length && c.constraints.every((v) => v.status === 'pass')));
+  assert.ok(x.rejections.some((c) => c.why && dec(c.check.shortfall).gt(0)));
+  assert.deepEqual(calc({ B: '90000' }).top, []);
+});
+
+test('预设按本金扣一次报名费，隔离账户来源；未开户也能继续实时计算', async () => {
+  const { presetAccount } = await import('../src/hedge/current-account.js');
+  const r = {
+    ...inputs,
+    planPF: '1000',
+    planCapital: '211',
+    registration: '91',
+    planLeverage: '5',
+    planFundedCash: '101.50'
+  };
+  const accounts = { pf: presetAccount(r, 'pf'), hl: presetAccount(r, 'hl') };
+  assert.equal(accounts.hl.equity, '120');
+  assert.equal(accounts.hl.free, '120');
+  assert.equal(accounts.hl.at, undefined);
+  const live = calculateCurrent(r, accounts, fixture().m, {}, t);
+  assert.equal(live.autoStatus, 'AUTO_FEASIBLE');
+  assert.ok(live.top[1]);
+  assert.equal(presetAccount({ ...r, stage: 'funded' }, 'hl').equity, '101.5');
+  assert.ok(presetAccount({ ...r, planCapital: '90' }, 'hl').error);
+  const broken = fixture().m;
+  broken.errors = { hl: '接口断开' };
+  assert.equal(calculateCurrent(r, accounts, broken, {}, t).candidate, undefined);
+  assert.equal(accounts.hl.equity, '120');
 });

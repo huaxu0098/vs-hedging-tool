@@ -74,3 +74,61 @@ export async function accountSnapshot(user, asset, query) {
     withdrawable: account.withdrawable
   };
 }
+
+export function manualAccount(state, asset, side) {
+  const leg = state.assets[asset]?.[side] ?? {},
+    shared = state.shared[side];
+  const equity = shared ? shared.equity : leg.equity;
+  const equityAt = (shared ? shared.at : leg.equityAt) ?? null;
+  const equitySource = shared
+    ? (shared.source ?? state.assets[shared.asset]?.[side]?.origins?.equity?.source)
+    : leg.origins?.equity?.source;
+  const timestamps = [equityAt, leg.qtyAt].filter(Boolean).sort();
+  return {
+    ...leg,
+    equity,
+    equityAt,
+    qtyAt: leg.qtyAt ?? null,
+    freeAt: leg.origins?.free?.at ?? null,
+    anchor: (!shared || shared.asset === asset) && equityAt === leg.equityAt ? leg.anchor : null,
+    at: timestamps[0],
+    source: equitySource || '本机手工快照',
+    equityAsset: shared?.asset ?? asset,
+    otherPositions:
+      leg.otherPositions ||
+      Object.entries(state.assets).some(
+        ([sym, s]) => sym !== asset && s[side]?.qty && Number(s[side].qty) !== 0
+      )
+  };
+}
+
+// Planned starting balances belong to the formula worksheet, never to the live account store.
+export function presetAccount(r, side) {
+  const common = {
+    sourceKind: 'plan',
+    source: '预设资金规划',
+    qty: '0',
+    orders: [],
+    otherHold: '0',
+    marginMode: 'cross'
+  };
+  try {
+    const capital = nonnegative(r.planCapital);
+    const paid = nonnegative(r.registration);
+    if (paid.gt(capital)) throw Error('报名费超过预设个人本金');
+    const equity =
+      side === 'pf'
+        ? out(positive(r.planPF))
+        : r.stage === 'funded'
+          ? out(nonnegative(r.planFundedCash))
+          : out(capital.minus(paid));
+    return {
+      ...common,
+      equity,
+      free: equity,
+      leverage: side === 'hl' ? out(positive(r.planLeverage)) : null
+    };
+  } catch (e) {
+    return { ...common, error: '请核对预设参数：' + e.message };
+  }
+}
