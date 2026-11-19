@@ -9,7 +9,7 @@ import {
   adjacentScale
 } from '../src/hedge/ratio-scan.js';
 import { displayHistory } from '../src/hedge/display-history.js';
-import { pagePoints, planRecord, pointKey } from '../src/hedge/position-plans.js';
+import { pagePoints, planRecord, pointKey, segmentPage } from '../src/hedge/position-plans.js';
 import { ratioChanges } from '../src/hedge/ratio-analysis.js';
 import { exactRatio, ratioBin } from '../src/hedge/ratio-scan.js';
 import { MarketRevaluation } from '../src/hedge/scan-refresh.js';
@@ -1614,7 +1614,7 @@ test('PATH03 先强平的路径标出中断，分开另一端的结算', () => {
   assert.ok(!row.both && !row.profitable);
 });
 
-test('AUTOSEL02/04 自动代表来自同一资金门槛交集，安全缓冲只调整求解条件', () => {
+test('AUTOSEL02/04 自动代表与交集采用同一额外回本缓冲，单端回本仍可独立核对', () => {
   const original = scanFixture(),
     guarded = scanFixture({ recoveryBuffer: '6' }),
     unreachable = scanFixture({ recoveryBuffer: '1000' });
@@ -1625,7 +1625,9 @@ test('AUTOSEL02/04 自动代表来自同一资金门槛交集，安全缓冲只�
     assert.ok(rep.row.both && dec(rep.row.failureVsProtection).gte(rep.buffer));
     assert.ok(dec(rep.row.fail).gte(sets.both.range.failure[0]));
   }
-  assert.deepEqual(original.ratioScan.sets.both, guarded.ratioScan.sets.both);
+  assert.deepEqual(original.ratioScan.sets.protect, guarded.ratioScan.sets.protect);
+  assert.ok(original.ratioScan.sets.both.count > guarded.ratioScan.sets.both.count);
+  assert.equal(unreachable.ratioScan.sets.both.count, 0);
   assert.equal(unreachable.ratioScan.representative.objective, 'diagnostic');
 });
 test('AUTOSEL05 500.0018U 仅高出 0.0018U，缓冲率 0.00036%', async () => {
@@ -1874,4 +1876,47 @@ test('断线重载保留三目标与同规模对照的原始记录，资金来�
   assert.equal(legacy.plans.rows[0].fail, legacy.representative.row.fail);
   assert.equal(legacy.plans.rows[0].success, legacy.representative.row.success);
   assert.equal(legacy.plans.legacy,true);
+});
+
+test('比例分段的分页、全量交集及三种优先目标与逐仓复算一致', () => {
+  for (const buffer of ['0','6','1000']) {
+    const scan = scanFixture({recoveryBuffer:buffer}).ratioScan;
+    const all = pagePoints(scan,scan.plans.index,null,10000).rows;
+    assert.equal(all.length,scan.sets.legal.count);
+    const records = all.map(point=>({point, row:inspectRatio(scan.ctx,point)}));
+    const floor=dec(scan.ctx.book.B).plus(buffer);
+    const qualifies=({row})=>row.physical && !row.failStop && !row.passStop &&
+      dec(row.fail).gte(floor) && dec(row.success).gte(scan.ctx.params.R);
+    const winners=records.filter(qualifies);
+    assert.equal(scan.sets.both.count,winners.length);
+    for(const record of records) assert.equal(record.row.both,qualifies(record));
+    for(const [n,bin] of scan.buckets.entries()) {
+      for(const kind of ['legal','both']) {
+        const oracle=(kind==='both'?winners:records).filter(({point})=>ratioBin(scan.buckets,point)===n);
+        assert.equal(bin[kind],oracle.length);
+        const keys=[];
+        for(let p=1;p<=Math.ceil(oracle.length/3);p++) {
+          const page=segmentPage(scan,n,kind,p,3);
+          assert.equal(page.total,oracle.length);
+          keys.push(...page.points.map(pointKey));
+        }
+        assert.deepEqual(keys,oracle.map(({point})=>pointKey(point)));
+        const last=segmentPage(scan,n,kind,1e12,3);
+        assert.equal(last.page,last.pages||1);
+        if(kind==='both' && oracle.length) {
+          assert.ok(dec(bin.ranges.both.failure[0]).gte(floor));
+          assert.ok(dec(bin.ranges.both.successHype[0]).gte(scan.ctx.params.R));
+        }
+      }
+    }
+  }
+});
+test('额外保护缓冲在等号处入交集，多一个最小现金单位即排除', () => {
+  const f=scanFixture().ratioScan, point=f.sets.both.largest;
+  const margin=inspectRatio(f.ctx,point).failureVsProtection;
+  for(const [value,expected] of [[margin,true],[out(dec(margin).plus('0.00000001')),false]]) {
+    const s=scanFixture({recoveryBuffer:value}).ratioScan;
+    assert.equal(inspectRatio(s.ctx,point).both,expected);
+    assert.equal(ratioSlice(s,point.sign,point.i,'both').some(([lo,hi])=>lo<=point.j && point.j<=hi),expected);
+  }
 });

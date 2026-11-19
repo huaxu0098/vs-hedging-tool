@@ -1,4 +1,5 @@
 import { recordFromInspection } from './position-plans.js';
+import { dec, out } from './math.js';
 import { modelVersion } from './trace.js';
 
 // Read only by the renderer. The worker always starts from current inputs.
@@ -25,6 +26,23 @@ export function displayHistory(storage) {
           saved.view.ratioScan.sets?.legal
         ) {
           const scan = saved.view.ratioScan;
+          // Older reports kept the buffered subset separately. Preserve their
+          // prices and actual cash rows while restoring only qualified members.
+          const buffer = scan.analysis?.recoveryBuffer ?? scan.representative?.buffer ?? '0';
+          if (scan.recoveryFloor == null && dec(buffer).gt(0)) {
+            scan.recoveryFloor = out(dec(scan.ctx.book.B).plus(buffer));
+            scan.sets.both = scan.sets.eligible ?? {count:0, min:null, max:null};
+            for (const bin of scan.buckets) {
+              bin.both = bin.eligible ?? 0;
+              bin.ranges.both = bin.ranges.eligible ?? null;
+            }
+            scan.historicalIntersection = true;
+            scan.analysis = null;
+            for (const row of [scan.representative?.row, ...(scan.plans?.rows ?? [])].filter(Boolean)) {
+              row.coversWithBuffer = row.fail != null && dec(row.fail).gte(scan.recoveryFloor);
+              row.both = row.both && row.coversWithBuffer;
+            }
+          }
           if (!scan.plans && scan.representative?.row) {
             const row = recordFromInspection(scan.ctx, scan.representative.row);
             scan.plans = { legacy: true, rows: [{ ...row, labels: ['上次计算仓位'] }],
@@ -65,10 +83,12 @@ export function displayHistory(storage) {
           })
         ),
         trace: { id, at, model },
+        finishedAt: result.finishedAt,
         stress: result.stress,
         autoStatus: result.autoStatus,
         ratioScan: {
           sets,
+          recoveryFloor: scan.recoveryFloor,
           buckets,
           representative,
           analysis,

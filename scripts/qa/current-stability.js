@@ -97,7 +97,7 @@ try {
     ['pf','hl'].every(k=>['bid','ask','price'].every(s=>Number(document.getElementById('scan-'+k+'-'+s).textContent)>0))`));
   const frames = await run('window.scanTest.commits');
   for (const f of frames) {
-    assert.ok(f.status.includes('结果时间'));
+    assert.ok(f.status.includes('最近成功计算'));
     assert.equal(f.rows.length, f.bins.length);
     assert.deepEqual(f.cash, [cash(f.rep.fail), cash(f.rep.success)]);
     assert.equal(f.shown.length, f.plans.length);
@@ -156,14 +156,16 @@ try {
     evidence.viewports.push(layout);
   }
   await b.click('#plan-view');
-  await wait("document.querySelector('#plan-caption').textContent.includes('第 1 页')");
-  const first=await run("document.querySelector('#plan-rows tr').dataset.point");
+  await wait("document.querySelector('#grid-caption').textContent.includes('第 1 页')");
+  const first=await run("document.querySelector('#grid-rows tr').dataset.point");
   await b.click('#plan-next');
-  assert.match(await b.text('#plan-caption'), /第 2 页/);
-  assert.notEqual(await run("document.querySelector('#plan-rows tr').dataset.point"),first);
+  assert.match(await b.text('#grid-caption'), /第 2 页/);
+  assert.notEqual(await run("document.querySelector('#grid-rows tr').dataset.point"),first);
   await b.click('#plan-prev');
-  assert.match(await b.text('#plan-caption'), /第 1 页/);
-  await b.click('#plan-view');
+  assert.match(await b.text('#grid-caption'), /第 1 页/);
+  await b.click('#plan-last');
+  assert.ok(await run("document.getElementById('plan-next').disabled && document.getElementById('grid-rows').rows.length>0"));
+  await b.click('#plan-close');
   assert.match(await b.text('#plan-rows'), /失败回收优先/);
   // Hold one legitimate request, supersede it with a new rule, then deliver
   // the old response after dispatch. It must never become visible.

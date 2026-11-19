@@ -22,7 +22,7 @@ const comparisonFields = [
   'buffer',
   'physical',
   'both',
-  'covers',
+  'covers', 'coversWithBuffer',
   'survives',
   'shortfall',
   'reserveHeadroom'

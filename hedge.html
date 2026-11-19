@@ -17,7 +17,7 @@
     <main id="current" class="live-desk">
       <div class="desk-title">
         <h1>对冲比例与仓位</h1>
-        <span id="scan-source"></span><small id="desk-state" role="status"></small>
+        <span id="scan-source"></span><small id="desk-state" role="status"><span id="scan-status">连接行情</span></small>
       </div>
       <div id="scan-desk">
         <section class="scan-quotes" aria-labelledby="book-heading">
@@ -45,19 +45,24 @@
           <dl class="scan-sets">
             <div><dt>失败端本金回收<span id="capital-threshold"></span></dt><dd id="scan-protect">—</dd></div>
             <div><dt>成功端最低留存<span id="reserve-threshold"></span></dt><dd id="scan-survive">—</dd></div>
-            <div><dt>双路径保护交集</dt><dd id="scan-both">—</dd></div>
+            <div><dt>双路径保护交集<span id="joint-threshold"></span></dt><dd id="scan-both">—</dd></div>
             <div id="profit-panel"><dt>双路径净盈利</dt><dd id="scan-profit">—</dd></div>
           </dl>
         </section>
         <section id="scan-results" aria-labelledby="bands-heading">
-          <div class="bands-heading"><h2 id="bands-heading">比例与实际仓位</h2>
-            <nav aria-label="浏览实际仓位"><button type="button" id="plan-view" disabled>浏览全部仓位</button><button type="button" id="plan-prev" hidden>上一页</button><button type="button" id="plan-next" hidden>下一页</button></nav>
-          </div>
-          <p class="plan-caption" id="plan-caption"></p>
-          <div class="table-wrap" tabindex="0" role="region" aria-label="按比例和规模排列的实际仓位"><table class="bands-table exact-plans">
-            <thead><tr><th scope="col">方案 / 实际比例</th><th scope="col">PF 目标仓位</th><th scope="col">Hype 目标仓位</th><th scope="col">失败 · 个人回收</th><th scope="col">成功 · Hype 剩余</th><th scope="col">风险与成交成本</th></tr></thead>
+          <div class="bands-heading"><h2 id="bands-heading">自动方案与实际仓位</h2><small id="plan-caption"></small></div>
+          <div class="table-wrap" tabindex="0" role="region" aria-label="自动方案和同一比例的规模对照"><table class="bands-table exact-plans">
+            <thead id="plan-columns"><tr><th scope="col">实际比例 / 目标</th><th scope="col">PF 方向与仓位</th><th scope="col">Hype 方向与仓位</th><th scope="col">失败回收 / 本金差额</th><th scope="col">成功剩余 / 本金差额</th><th scope="col">保护结果 / Hype 风险</th></tr></thead>
             <tbody id="plan-rows"></tbody></table></div>
-          <p id="bands-empty">等待有效盘口和资金规则</p>
+          <div id="segment-report" hidden>
+            <div class="bands-heading"><h3>合法数量网格分段</h3><button type="button" id="plan-view" disabled>全部仓位明细</button></div>
+            <div id="segment-list" aria-label="各比例段的全部仓位与合格交集"></div>
+          </div>
+          <div id="grid-detail" hidden>
+            <nav aria-label="仓位明细分页"><strong id="grid-caption"></strong><button type="button" id="plan-first">首页</button><button type="button" id="plan-prev">上一页</button><button type="button" id="plan-next">下一页</button><button type="button" id="plan-last">末页</button><button type="button" id="plan-close">收起明细</button></nav>
+            <div class="table-wrap" tabindex="0" role="region" aria-label="当前比例分段的逐仓明细"><table class="bands-table exact-plans"><thead id="grid-columns"></thead><tbody id="grid-rows"></tbody></table></div>
+          </div>
+          <p id="bands-empty" hidden></p>
         </section>
       </div>
       <details id="desk-details"><summary id="scan-config">高级详情</summary>
@@ -456,7 +461,7 @@
       </details>
       <details class="desk-group" id="audit-details"><summary>区间统计、现金流水与原始输入</summary>
         <h3>当前表内仓位的保证金与清算风险</h3>
-        <div class="table-wrap"><table><thead><tr><th>实际比例 / PF 数量</th><th>Hype 数量</th><th>Hype 初始保证金</th><th>路径最低维持余量</th><th>Hype 清算标记价</th><th>成功线至清算距离</th></tr></thead><tbody id="plan-risk-rows"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>实际比例 / PF 数量</th><th>Hype 数量</th><th>Hype 初始保证金</th><th>路径最低维持余量</th><th>Hype 清算标记价</th><th>成功线至清算距离</th><th>失败 / 成功手续费</th><th>失败 / 成功深度滑点</th></tr></thead><tbody id="plan-risk-rows"></tbody></table></div>
         <section id="ratio-analysis" hidden aria-label="分段对账与相邻仓位">
           <p id="ratio-counts"></p><p id="ratio-boundary"></p>
           <h2>代表方案与相邻仓位</h2>
@@ -467,7 +472,7 @@
           </table></div>
           <p id="ratio-theory"></p><p id="ratio-change"></p>
         </section>
-        <small id="advanced-frame"></small><p id="scan-status"></p>
+
         <p>Vest <span id="scan-pf-quote"></span> · Hyperliquid <span id="scan-hl-quote"></span></p>
       <p id="scan-capital"></p><p id="scan-intersection"></p>
       <p id="scan-fail-net"></p><p id="scan-pass-net"></p><p id="scan-risk"></p>

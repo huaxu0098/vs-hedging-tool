@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { calculateCurrent } from '../../src/hedge/current.js';
 import { dec } from '../../src/hedge/math.js';
+import { planRecord, segmentPage, pointKey } from '../../src/hedge/position-plans.js';
 import { openTestBrowser } from './chrome.js';
 const b = await openTestBrowser({ current: true });
 const { run, wait, click, set, send, text } = b;
@@ -183,6 +184,53 @@ try {
   const phr = await text('#scan-position');
   if (!phr.includes('仅作路径对照')) assert.ok(parseFloat(await text('#scan-fail-cash')) >= 501);
   await record('安全缓冲改为 1 U 后重新求解');
+  // Capture the trusted input, native grid coordinates and clicked rows within
+  // one UI event so that new ticks cannot mix versions during the comparison.
+  const guarded = await run(`(() => {
+    const el = id => document.getElementById(id);
+    const box = el('trace-inputs').parentElement;
+    box.open = true; box.ontoggle();
+    const sections = [];
+    for (const button of el('segment-list').querySelectorAll('button[data-kind="both"]:enabled')) {
+      const readRows = () => [...el('grid-rows').rows].map(row => ({
+        key:row.dataset.point, fraction:row.dataset.ratio, size:row.dataset.pfSize,
+        fail:row.cells[3].firstChild.nodeValue, success:row.cells[4].firstChild.nodeValue,
+        qualified:row.classList.contains('qualified')
+      }));
+      button.click();
+      const first = readRows();
+      el('plan-last').click();
+      sections.push({edge:button.parentNode.dataset.edge, first, last:readRows()});
+    }
+    el('plan-close').click();
+    return {sections, threshold:el('joint-threshold').textContent, id:el('trace-id').textContent,
+      input:JSON.parse(el('trace-inputs').textContent), at:el('trace-sources').textContent.match(/计算于 (\\S+)/)[1]};
+  })()`);
+  assert.match(guarded.threshold,/501(?:\.0+)? \/ ≥100/);
+  const g = guarded.input;
+  const current = calculateCurrent(g.rules,g.accounts,g.market,g.rates,Date.parse(guarded.at),g.options);
+  assert.ok(guarded.id.endsWith(current.trace.id));
+  const scan = current.ratioScan;
+  assert.equal(guarded.sections.length,scan.buckets.filter(bin => bin.both > 0).length);
+  for (const section of guarded.sections) {
+    const n = scan.buckets.findIndex(bin => bin.edgeKey === section.edge);
+    const range = scan.buckets[n].ranges.both;
+    assert.ok(dec(range.failure[0]).gte(501) && dec(range.successHype[0]).gte(100));
+    for (const [side, pageNum] of [['first',1],['last',Number.MAX_SAFE_INTEGER]]) {
+      const points = segmentPage(scan,n,'both',pageNum,5).points;
+      assert.deepEqual(section[side].map(row => row.key), points.map(pointKey));
+      for (const [i, point] of points.entries()) {
+        const r = planRecord(scan,point), row = section[side][i];
+        assert.ok(row.qualified && r.both);
+        assert.equal(row.fraction,r.fraction);
+        assert.equal(row.size,dec(r.pf).abs().toString());
+        assert.equal(row.fail,dec(r.fail).toFixed(4)+' U');
+        assert.equal(row.success,dec(r.success).toFixed(4)+' U');
+      }
+    }
+  }
+  console.log('BUFFER_GRID_OK',JSON.stringify({sections:guarded.sections.length, count:scan.sets.both.count,
+    failure:scan.sets.both.range?.failure, success:scan.sets.both.range?.successHype}));
   await set('#recoveryBuffer', '', 'input');
   await ready();
   await set('#R_success', '106', 'input');
@@ -207,7 +255,7 @@ try {
  window.timeoutSeen=false;new MutationObserver(()=>{if(document.getElementById('scan-status').textContent.includes('超过 10 秒'))window.timeoutSeen=true}).observe(document.getElementById('scan-status'),{subtree:true,childList:true,characterData:true});})()`);
   await set('#R_free', '5', 'input');
   await wait(
-    "document.getElementById('scan-status').textContent.includes('更新中') && document.getElementById('scan-status').textContent.includes('上次完成')",
+    "document.getElementById('scan-status').textContent.includes('输入已变更') && document.getElementById('scan-status').textContent.includes('最近成功计算')",
     1000
   );
   await wait('window.timeoutSeen', 18000).catch(async error => {
@@ -237,7 +285,7 @@ try {
   await set('#funding-view', 'account');
   assert.ok(
     await run(
-      "!document.querySelector('#bands-empty').hidden && document.querySelector('#scan-buckets').rows.length===0 && document.querySelector('#scan-fail-cash').textContent==='—' && document.querySelector('#scan-pass-cash').textContent==='—' && document.querySelector('#hl-equity').value===''"
+      "document.querySelector('#scan-status').textContent.includes('计算暂停') && document.querySelector('#scan-buckets').rows.length===0 && document.querySelector('#scan-fail-cash').textContent==='—' && document.querySelector('#scan-pass-cash').textContent==='—' && document.querySelector('#hl-equity').value===''"
     )
   );
   await record('切换到未接入的真实账户');

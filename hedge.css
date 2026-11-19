@@ -622,3 +622,21 @@ main.live-desk {padding-block:14px}
   #scan-results .exact-plans th:nth-child(2),#scan-results .exact-plans th:nth-child(3) {width:121px}
   .plan-caption::after {content:' · 左右滑动查看各仓位资金与风险'}
 }
+
+#scan-status {font:inherit;color:inherit}
+#scan-desk #segment-report {border-top:1px solid #b8c7be;margin-top:7px;padding-top:4px}
+#segment-report h3 {font-size:13px;margin:1px 0}
+#segment-list {display:flex;gap:0;overflow:auto;padding:2px 0}
+#segment-list>div {flex:1 0 auto;border-left:1px solid #d1dcd4;padding:0 7px}
+#segment-list>div:first-child {border:0;padding-left:0}
+#segment-list b,#segment-list small {display:block;font-variant-numeric:tabular-nums;font-size:12px}
+#segment-list small {color:#52665f}
+#segment-list button,#segment-report button,#grid-detail button {width:auto;min-height:20px;font:inherit;font-size:12px;padding:1px 5px;cursor:pointer}
+#segment-list button {border:0;background:transparent;color:#16614c;text-decoration:underline}
+#segment-list button:disabled {cursor:default;text-decoration:none;color:#66726c}
+#segment-list button[aria-pressed=true] {background:#e0eee4;font-weight:bold}
+#grid-detail nav {width:auto;display:flex;gap:5px;align-items:center;justify-content:flex-end;flex-wrap:wrap;margin:7px 0 4px}
+#grid-caption {margin-right:auto;font-size:12px}
+#scan-results .exact-plans td,#scan-results .exact-plans th {padding-block:3px}
+#grid-detail[hidden],#segment-report[hidden] {display:none}
+@media(max-width:780px){#segment-list>div {flex:0 0 auto} #grid-caption {width:100%}}

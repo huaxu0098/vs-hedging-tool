@@ -939,7 +939,6 @@ function render() {
   const retained = result.retained ?? (!result.ratioScan && history.read(scanScope()));
   renderScan(retained ? {...result, retained} : result, live, r, plan, status);
   if ($('vest-spec-details').open) showVestSpec(live);
-  put('advanced-frame', $('scan-status').textContent);
   if (result.refreshPending && !result.ratioScan) $('trace-download').disabled = true;
   if (!$('desk-details').open) return;
   if (result.retained && result.frameState === 'updating' &&

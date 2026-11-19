@@ -191,7 +191,7 @@ function cell(ctx, p, pfSegment, hypeSegment, common) {
   const payout = p.stage === 'funded' ? profitSplit(p.target, p.baseline, p.share).user : null;
   const threshold = decimal(p.B).minus(book.external);
   const extraBuffer = decimal(ctx.params.recoveryBuffer ?? 0);
-  const buffered = [];
+  const buffered = [], fundedGuard = [];
   const roundFloor = payout != null && p.C_ref != null
     ? decimal(p.C_ref).plus(p.contributions).minus(p.withdrawals).plus(p.g).minus(payout).minus(book.external)
     : null;
@@ -203,7 +203,7 @@ function cell(ctx, p, pfSegment, hypeSegment, common) {
       const line = feesLine.map((v, j) => (stressed ? v.minus(debit[j]) : v));
       const cash = (floor, strict = false) => project(line, hypeSegment.slope.div(factor), s, floor, strict);
       (k === 0 ? protect : survive).push(cash(k === 0 ? threshold : p.R));
-      if (k === 1 && roundFloor != null) buffered.push(cash(stressed ? roundFloor : roundFloor.minus(p.inTransit)));
+      if (k === 1 && roundFloor != null) fundedGuard.push(cash(stressed ? roundFloor : roundFloor.minus(p.inTransit)));
       if (k === 0 && extraBuffer.gt(0)) buffered.push(cash(threshold.plus(extraBuffer)));
       if (k === 1 && stressed && costBasis != null) {
         const n = cash(costBasis);
@@ -263,6 +263,7 @@ function cell(ctx, p, pfSegment, hypeSegment, common) {
     )
   );
   return {
+    fundedGuard: fundedGuard.length ? compact(fundedGuard, pfSegment, hypeSegment) : null,
     buffered: buffered.length ? compact(buffered, pfSegment, hypeSegment) : null,
     metrics: pathMetrics(ctx, pfSegment, hypeSegment, common, feesLine, debit, nonflat ? shock : decimal(0)),
     sign: pfSegment.sign,
@@ -285,11 +286,12 @@ function slices(c, i) {
       : null;
   const failProfit = applyBands(risk, c.failProfit, n),
     passProfit = applyBands(risk, c.passProfit, n);
-  const both = intersect(protect, survive);
+  const joint = intersect(protect, survive);
+  const both = c.buffered ? applyBands(joint, c.buffered, n) : joint;
   return {
     legal,
     risk,
-    eligible: c.buffered ? applyBands(both, c.buffered, n) : both,
+    eligible: c.fundedGuard ? applyBands(both, c.fundedGuard, n) : both,
     protect,
     survive,
     both,
@@ -392,6 +394,7 @@ export function inspectRatio(ctx, point) {
   const physical = c.code === 'FEASIBLE';
   const covers = fail.gte(p.B),
     survives = success.gte(p.R);
+  const coversWithBuffer = fail.gte(decimal(p.B).plus(params.recoveryBuffer ?? 0));
   const successPersonal = success.plus(book.external);
   const funded =
     p.stage === 'funded'
@@ -440,7 +443,8 @@ export function inspectRatio(ctx, point) {
     physical,
     covers,
     survives,
-    both: physical && covers && survives,
+    coversWithBuffer,
+    both: physical && coversWithBuffer && survives,
     failProfitable: physical && failNet != null && failNet.gt(0),
     passProfitable: physical && successNet != null && successNet.gt(0),
     profitable: physical && failNet != null && failNet.gt(0) && successNet.gt(0),
@@ -495,7 +499,7 @@ function scanLotRanges(ctx, maxVisits, legs, cache) {
   const constant = decimal(normalizeExposure(ctx.market.hl.step, ctx.market.hl)).div(
     normalizeExposure(ctx.market.pf.step, ctx.market.pf)
   );
-  const guarded = decimal(ctx.params.recoveryBuffer ?? 0).gt(0) || (p.stage === 'funded' && p.C_ref != null);
+  const guarded = p.stage === 'funded' && p.C_ref != null;
   const groups = guarded ? [...keys, 'eligible'] : keys;
   const sets = Object.fromEntries([...groups, 'high'].map((k) => [k, empty()])),
     cells = [];
@@ -548,9 +552,10 @@ function scanLotRanges(ctx, maxVisits, legs, cache) {
     for (const side of ['min', 'max'])
       if (set[side]) set[side].h = out(constant.times(set[side].j).div(set[side].i));
   }
-  const buckets = reportBuckets(ctx, p, sets, cells, cache);
+  const { buckets, pageIndex } = reportBuckets(ctx, p, sets, cells, cache);
   return {
-    buckets,
+    buckets, pageIndex,
+    recoveryFloor: out(decimal(p.B).plus(ctx.params.recoveryBuffer ?? 0)),
     constant: out(constant),
     sets,
     cells,
@@ -562,6 +567,11 @@ function scanLotRanges(ctx, maxVisits, legs, cache) {
 }
 // Actual executable fractions, including zero, partition the already scanned domain.
 // Boundaries are compared as lot-index fractions, without rounding to the displayed %.
+export const scalesPerBlock = 128;
+
+// Integer division is the inclusive upper boundary of the discrete ratio bin.
+export const lastLotAtRatio = (edge, i) => Number(BigInt(edge.j) * BigInt(i) / BigInt(edge.i));
+
 function reportBuckets(ctx, p, sets, cells, cache) {
   const edges = [
     { i: 1, j: 0, h: '0' },
@@ -577,15 +587,25 @@ function reportBuckets(ctx, p, sets, cells, cache) {
     above: cuts[n - 1]?.h ?? null,
     through: edge?.h ?? null,
     throughLots: edge ? { i: edge.i, j: edge.j } : null,
+    edgeKey: !edge ? 'end' : !edge.j ? 'zero' :
+      reportGroups.flatMap(key => ['min','max'].filter(side =>
+        sets[key][side] && cmp(edge, sets[key][side]) === 0).map(side => key + '-' + side)).join('/'),
     stats: accumulators()
   }));
-  const ratios = cuts.map((c) => [BigInt(c.j), BigInt(c.i)]);
+  const ratios = cuts.map(({i,j}) => ({i,j}));
+  const blockMaps = Array.from({ length:buckets.length + 1 }, () => new Map());
+  function addBlock(map, id, legal, both) {
+    let block = map.get(id);
+    if (!block) map.set(id, block = {legal:0, both:0});
+    block.legal += legal;
+    block.both += both;
+  }
   function summarizeCell(cell) {
     const parts = new Map();
     for (let i = cell.from; i <= cell.scannedTo; i++) {
       const bands = slices(cell, i);
       if (!bands.legal) continue;
-      const limits = ratios.map(([a, b]) => Number((a * BigInt(i)) / b));
+      const limits = ratios.map(edge => lastLotAtRatio(edge, i));
       const row = metricRow(cell.metrics, i);
       for (const key of counted) {
         if (!bands[key]) continue;
@@ -596,6 +616,10 @@ function reportBuckets(ctx, p, sets, cells, cache) {
           if (end < start) continue;
           if (!parts.has(n)) parts.set(n, {});
           const part = parts.get(n);
+          if (key === 'legal' || key === 'both') {
+            const block = (1 + Math.floor((i - 1) / scalesPerBlock)) * cell.sign;
+            addBlock(part.blocks ??= new Map(), block, key === 'legal' ? end-start+1 : 0, key === 'both' ? end-start+1 : 0);
+          }
           includeBand((part[key] ??= newReport()), row, i, start, end, cell.sign);
           start = end + 1;
         }
@@ -616,8 +640,13 @@ function reportBuckets(ctx, p, sets, cells, cache) {
       subtotal ??= summarizeCell(cell);
       nextCells.set(signature, subtotal);
     } else subtotal = summarizeCell(cell);
-    for (const [n, part] of subtotal)
-      for (const [key, stats] of Object.entries(part)) mergeReport(buckets[n].stats[key], stats);
+    for (const [n, part] of subtotal) {
+      for (const key of counted) if (part[key]) mergeReport(buckets[n].stats[key], part[key]);
+      for (const [id, {legal, both}] of part.blocks ?? []) {
+        addBlock(blockMaps[n + 1], id, legal, both);
+        addBlock(blockMaps[0], id, legal, both);
+      }
+    }
     delete cell.metrics;
   }
   if (cache) cache.cells = nextCells;
@@ -634,7 +663,17 @@ function reportBuckets(ctx, p, sets, cells, cache) {
     if (totals[key].count !== sets[key].count) throw Error('分段与总计不一致 · ' + key);
     sets[key].range = finishReport(totals[key], ctx, p);
   }
-  return result;
+  const pageIndex = blockMaps.map((map, n) => {
+    const blocks = Array.from(map, ([id, counts]) => ({
+      sign:Math.sign(id), first:1 + (Math.abs(id)-1)*scalesPerBlock, ...counts
+    })).sort((a,b) => b.sign - a.sign || a.first - b.first);
+    for (const kind of ['legal','both']) {
+      const expected = n ? result[n-1][kind] : sets[kind].count;
+      if (blocks.reduce((sum, block) => sum+block[kind], 0) !== expected) throw Error('仓位分段索引未对账');
+    }
+    return blocks;
+  });
+  return { buckets:result, pageIndex };
 }
 export function ratioSlice(scan, sign, i, kind = 'legal') {
   const bands = [];

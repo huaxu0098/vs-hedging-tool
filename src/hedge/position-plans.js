@@ -1,7 +1,7 @@
 import { sumPostings } from './settlement-ledger.js';
 import { executionDetail } from './solver.js';
 import { dec, out } from './math.js';
-import { exactRatio, inspectRatio, ratioSlice } from './ratio-scan.js';
+import { exactRatio, inspectRatio, ratioSlice, scalesPerBlock, lastLotAtRatio } from './ratio-scan.js';
 
 export const pointKey = ({sign, i, j}) => [sign, i, j].join('/');
 
@@ -37,6 +37,39 @@ export function pagePoints(scan, index, start, limit = 5) {
     }
   }
   return { rows, next: null };
+}
+
+// Index 0 covers the whole grid; segment n uses index n+1. Both aggregates
+// and drilldown use (previous edge, current edge] on the unrounded lot ratio.
+export function segmentPage(scan, segment, kind, requestedPage, size = 5) {
+  if (!['both','legal'].includes(kind) || !Number.isSafeInteger(size) || size < 1)
+    throw Error('无效的仓位分段查询');
+  const bin = segment == null ? null : scan.buckets[segment];
+  if (segment != null && !bin) throw Error('仓位分段不存在');
+  const total = bin ? bin[kind] : scan.sets[kind].count;
+  const pages = Math.ceil(total / size);
+  const page = Math.min(Math.max(1, Math.trunc(requestedPage) || 1), pages || 1);
+  const points = [];
+  let skip = (page - 1) * size;
+  const lower = bin && segment > 0 ? scan.buckets[segment-1].throughLots : null;
+  for (const block of scan.pageIndex[bin ? segment+1 : 0]) {
+    if (skip >= block[kind]) { skip -= block[kind]; continue; }
+    for (let i=block.first; i<block.first+scalesPerBlock; i++) {
+      const minJ = lower ? lastLotAtRatio(lower,i)+1 : 0;
+      const maxJ = bin?.throughLots ? lastLotAtRatio(bin.throughLots,i) : Infinity;
+      for (const [a,b] of ratioSlice(scan,block.sign,i,kind)) {
+        const lo = Math.max(a,minJ), hi = Math.min(b,maxJ);
+        if (hi < lo) continue;
+        if (skip > hi-lo) { skip -= hi-lo+1; continue; }
+        for (let j=lo+skip; j<=hi; j++) {
+          points.push({sign:block.sign,i,j});
+          if (points.length === size) return {page,pages,total,points};
+        }
+        skip = 0;
+      }
+    }
+  }
+  return {page,pages,total,points};
 }
 
 function execution(leg) {
@@ -81,7 +114,7 @@ export function recordFromInspection(ctx, row) {
     failCost: row.failStop ? null : costs(row.paths?.fail, row, 'fail', ctx.market.hl),
     passCost: row.passStop ? null : costs(row.paths?.pass, row, 'pass', ctx.market.hl),
     initial: row.initial, marginRate: row.imRate, liquidation: row.liquidation, distance: row.buffer, distanceRate: row.bufferRate,
-    surplus: row.surplus, physical: row.physical, covers: row.covers, survives: row.survives,
+    surplus: row.surplus, physical: row.physical, covers: row.covers, coversWithBuffer: row.coversWithBuffer, survives: row.survives,
     both: row.both, profitable: ctx.params.externalPriced !== false && row.profitable,
     reason: row.physical ? null : (row.reason?.label ?? row.reason?.code ?? '途经保证金约束')
   };

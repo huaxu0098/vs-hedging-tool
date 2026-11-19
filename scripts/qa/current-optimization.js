@@ -65,10 +65,10 @@ try {
     reserve.value='98';
     reserve.dispatchEvent(new Event('input',{bubbles:true}));
     return {before,after:[desk.dataset.resultId,document.querySelector('#scan-fail-cash').textContent],
-      state:desk.dataset.state, label:document.querySelector('#advanced-frame').textContent};
+      state:desk.dataset.state, label:document.querySelector('#scan-status').textContent};
   })()`);
   assert.equal(pending.state, 'updating');
-  assert.match(pending.label, /更新中.*上次完成/);
+  assert.match(pending.label, /输入已变更.*最近成功计算/);
   assert.deepEqual(pending.after, pending.before);
   await wait(ready + " && document.querySelector('#reserve-threshold').textContent.includes('98')",40000);
   assert.equal(await run("!!document.querySelector('#riskPreference')"),false);
