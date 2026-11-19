@@ -26,7 +26,7 @@ function topPrice(side, best) {
 }
 
 // Depth and mark have independent venue timestamps. Neither stream can renew the other.
-export function vestQuoteReader(symbol) {
+export function vestQuoteReader(symbol, includeDepth = false) {
   let book, ticker;
   return (message, now = Date.now()) => {
     const { channel, data, tsMs } = message ?? {};
@@ -39,6 +39,11 @@ export function vestQuoteReader(symbol) {
         ask = topPrice(data.asks, Math.min);
       if (!(bid > 0 && ask >= bid)) throw Error('Vest 盘口暂不完整或买卖价倒挂。');
       book = { bid, ask, time: tsMs };
+      if (includeDepth) {
+        const levels = (rows, sign) => rows.slice().sort((a, b) => sign * (Number(a[0]) - Number(b[0])))
+          .slice(0, 5).map(([px, qty]) => [String(px), String(qty)]);
+        book.levels = [levels(data.bids, -1), levels(data.asks, 1)];
+      }
     } else {
       if (data.symbol !== symbol) throw Error('Vest 返回的合约与当前页面不符。');
       if (ticker && tsMs < ticker.time) return null;
@@ -49,6 +54,7 @@ export function vestQuoteReader(symbol) {
     if (!book || !ticker) return null;
     return {
       symbol,
+      ...(includeDepth ? { levels: book.levels } : {}),
       bid: book.bid,
       ask: book.ask,
       mark: ticker.mark,
@@ -59,7 +65,7 @@ export function vestQuoteReader(symbol) {
   };
 }
 
-export function subscribeVestMarket(symbol, onQuote, onStatus) {
+export function subscribeVestMarket(symbol, onQuote, onStatus, { includeDepth = false } = {}) {
   let socket,
     retryTimer,
     watchdog,
@@ -74,7 +80,7 @@ export function subscribeVestMarket(symbol, onQuote, onStatus) {
   }
   function connect() {
     if (stopped) return;
-    const read = vestQuoteReader(symbol);
+    const read = vestQuoteReader(symbol, includeDepth);
     let deliveredAt = 0,
       lastReason = 'Vest 连接已断开，正在重连。';
     try {

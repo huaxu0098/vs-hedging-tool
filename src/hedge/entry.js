@@ -3,6 +3,9 @@ const stage = params.get('simulation');
 if (stage === 'challenge' || stage === 'funded') {
   const { showStageSimulation } = await import('./account-report.js');
   showStageSimulation(stage);
+} else if (stage === 'paper') {
+  const { showPaper } = await import('./paper-view.js');
+  showPaper();
 } else if (params.get('accounts') === 'last') {
   const { showReport } = await import('./account-report.js');
   showReport();

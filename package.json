@@ -13,6 +13,7 @@
     "build:trade": "node scripts/build-trade-extension.js",
     "trade": "node scripts/open-trade.js",
     "test:trade": "node scripts/qa/trade-ui.js && node scripts/qa/trade-hype.js",
+    "paper": "node scripts/serve.js --paper",
     "hedge": "node scripts/serve.js --hedge",
     "test:hedge": "node --test tests/hedge-*.test.js",
     "test:hedge:browser": "node scripts/qa/hedge-browser.js",

@@ -8,8 +8,10 @@ import { createUsdRatesReader } from './usd-rates.js';
 
 const root = new URL('../', import.meta.url);
 const host = '127.0.0.1';
-const hedge = process.argv.includes('--hedge');
-const port = Number(process.env.PORT || (hedge ? 4180 : 4178));
+const paper = process.argv.includes('--paper');
+const hedge = paper || process.argv.includes('--hedge');
+let paperState = () => ({ message: '正在恢复本地模拟账本' });
+const port = Number(process.env.PORT || (paper ? 4181 : hedge ? 4180 : 4178));
 const types = {
   html: 'text/html',
   css: 'text/css',
@@ -33,6 +35,12 @@ const server = createServer(async (request, response) => {
     url = new URL(request.url, 'http://localhost');
   } catch {
     response.writeHead(400).end();
+    return;
+  }
+  if (paper && url.pathname === '/api/paper-session') {
+    if (request.method !== 'GET') return response.writeHead(405, { Allow: 'GET' }).end();
+    response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+      .end(JSON.stringify(paperState()));
     return;
   }
   if (hedge && url.pathname !== '/api/hype-info') {
@@ -148,11 +156,20 @@ server.on('error', (error) => {
   console.error('本地服务启动失败', error.message);
   process.exitCode = 1;
 });
-server.listen(port, host, () => {
+server.listen(port, host, async () => {
   const url = 'http://' + host + ':' + server.address().port;
-  console.log('本地匹配器 ' + url);
+  if (paper) {
+    try {
+      const { runPaper } = await import('./paper-session.js');
+      paperState = await runPaper(server.address().port);
+    } catch (error) {
+      paperState = () => ({ message: '本地模拟未启动：' + error.message });
+      console.error(paperState().message);
+    }
+  }
+  console.log('本地匹配器 ' + url + (paper ? '/?simulation=paper' : ''));
   if (process.argv.includes('--open') && process.platform === 'darwin') {
-    execFile('/usr/bin/open', [url], (error) => {
+    execFile('/usr/bin/open', [url + (paper ? '/?simulation=paper' : '')], (error) => {
       if (error) console.error('请在浏览器打开上面的本地地址。');
     });
   }

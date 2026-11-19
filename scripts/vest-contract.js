@@ -4,7 +4,7 @@ let symbols;
 let expires = 0;
 
 // Only public contract identities are retained; clients cannot select an upstream URL.
-export async function readVestContract(symbol) {
+export async function readVestSpecs(symbol) {
   if (!/^[A-Z0-9][A-Z0-9._-]{0,48}$/.test(symbol ?? '')) return null;
   if (!symbols || Date.now() >= expires) {
     if (!inflight)
@@ -16,7 +16,7 @@ export async function readVestContract(symbol) {
         const parsed = new Map();
         for (const item of data.symbols) {
           if (typeof item.symbol === 'string' && typeof item.quote === 'string' && item.quote.length > 0)
-            parsed.set(item.symbol, { symbol: item.symbol, quote: item.quote });
+            parsed.set(item.symbol, item);
         }
         symbols = parsed;
         expires = Date.now() + 60000;
@@ -26,4 +26,9 @@ export async function readVestContract(symbol) {
     await inflight;
   }
   return symbols.get(symbol) ?? null;
+}
+
+export async function readVestContract(symbol) {
+  const item = await readVestSpecs(symbol);
+  return item ? { symbol: item.symbol, quote: item.quote } : null;
 }

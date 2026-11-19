@@ -1,9 +1,7 @@
 import { defaults } from './workspace.js';
-import { createBook, applyLedgerEvent, balances } from './book.js';
+import { applyLedgerEvent, balances } from './book.js';
 import { dec } from './math.js';
-import { demoMarket, solve } from './solver.js';
-import { applyTargets, atPrice, settleBoundary } from './replay.js';
-import { sizingParameters, fundedPreviewLimits } from './sizing-parameters.js';
+import { defaultChallenge, fundedParameters, simulateStage } from './stage-preview.js';
 import { observationKey, assessObservation, validateObservation } from './account-observation.js';
 
 const main = document.querySelector('main');
@@ -132,46 +130,16 @@ function units(value) {
   return whole.replace(/\B(?=(?:\d{3})+(?!\d))/g, ',') + '.' + cents + ' U';
 }
 
-function simulateStage(book, market, parameters, at) {
-  const result = solve(book, market, parameters, { now: at });
-  if (!result.selected) return { result, book, market, parameters };
-  const { vsTargetQuantity: pf, hlTargetQuantity: hl, lines } = result.selected;
-  const opened = applyTargets(book, market, { pf, hl }, at, book.stage + '/open');
-  const settle = (event, shift) => {
-    const exitMarket = atPrice(market, shift);
-    return { ...settleBoundary(opened, exitMarket, event, at, book.stage + '/' + event), market: exitMarket };
-  };
-  return {
-    result,
-    book,
-    market,
-    parameters,
-    pass: settle('pass', lines.pass),
-    fail: settle('failure', lines.fail)
-  };
-}
-
 export function showStageSimulation(stage) {
   const funded = stage === 'funded';
-  const challengeParameters = sizingParameters((id) => {
-    const field = document.getElementById(id);
-    if (field instanceof HTMLSelectElement)
-      return (Array.from(field.options).find((option) => option.defaultSelected) ?? field.options[0]).value;
-    return field.defaultValue;
-  });
   const at = new Date().toISOString();
-  const challenge = simulateStage(
-    createBook({ ...defaults, id: 'challenge-preview', pf: defaults.baseline, time: at }),
-    demoMarket('btc'),
-    challengeParameters,
-    at
-  );
+  const challenge = defaultChallenge(at);
   const run =
     funded && challenge.pass
       ? simulateStage(
           challenge.pass.state,
           challenge.pass.market,
-          { ...challengeParameters, ...fundedPreviewLimits },
+          fundedParameters,
           at
         )
       : challenge;
@@ -186,6 +154,11 @@ export function showStageSimulation(stage) {
   const next = make('a', funded ? '查看上一轮考核' : '通过后，继续模拟首次出金');
   next.href = funded ? '/?simulation=challenge' : '/?simulation=funded';
   nav.replaceChildren(back, next);
+  if (funded) {
+    const paper = make('a', '打开实盘行情模拟');
+    paper.href = 'http://127.0.0.1:4181/?simulation=paper';
+    nav.append(paper);
+  }
   if (localStorage.getItem(observationKey)) {
     const latest = make('a', '上次账户识别');
     latest.href = '/?accounts=last';
