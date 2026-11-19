@@ -167,10 +167,14 @@ export function compareAuto(a, b) {
   const turns = (c) => Number(c.vsDeltaQuantity !== '0') + Number(c.hlDeltaQuantity !== '0');
   return (
     buffer(b).cmp(buffer(a)) ||
-    margin(a).cmp(margin(b)) ||
     (a.candidateLeverage ?? 0) - (b.candidateLeverage ?? 0) ||
+    margin(a).cmp(margin(b)) ||
     turns(a) - turns(b)
   );
+}
+
+export function compareConservative(a, b) {
+  return dec(b.worstCash).cmp(a.worstCash) || dec(a.vsNotional).cmp(b.vsNotional) || compareAuto(a, b);
 }
 
 function requiredAtMove(book, m, p, old, sign, percent) {
@@ -247,6 +251,8 @@ export function solveAuto(book, m, params, options = {}) {
       currentMarginCredit: m.hl.currentMarginCredit ?? '0'
     }
   };
+  const cashFirst = params.objective === 'cash';
+  const limit = cashFirst ? 1 : 5;
   const p = profileInputs(book, params, m),
     old = (v) =>
       Object.values(book.positions).find((x) => x.asset === m.id && x.venue === v && x.pool === m[v].pool)
@@ -295,8 +301,8 @@ export function solveAuto(book, m, params, options = {}) {
       c.worstCash = out(min(c.failureCash, c.pressureCashAfter, ...(c.scenarioCash ?? [])));
       ratios.add(c.actualRatio);
       candidates.push(c);
-      candidates.sort(compareAuto);
-      candidates.length = Math.min(candidates.length, 5);
+      candidates.sort(cashFirst ? compareConservative : compareAuto);
+      candidates.length = Math.min(candidates.length, limit);
       best = candidates[0];
     } catch (e) {
       if (['MARGIN_UNVERIFIED', 'LEVERAGE_UNVERIFIED'].includes(e.message)) unknown = true;
@@ -320,20 +326,31 @@ export function solveAuto(book, m, params, options = {}) {
     }
   }
   // Probe actual grids before pruning to retain a concrete rejected trade and a useful incumbent.
+  for (const seed of options.seeds ?? []) remember(seed.vsTargetQuantity, seed.hlTargetQuantity);
   if (!dec(current[0]).eq(0) && dec(current[0]).times(current[1]).lte(0)) remember(...current);
   for (const { seg, hh, hi } of branches) {
     if (hh.length)
       remember(out(seg.step.times(seg.sign).times(hi)), out(hh[0].step.times(hh[0].sign).times(hh[0].a.i)));
   }
   while (branches.length) {
-    branches.sort((a, b) => a.hi - b.hi);
+    branches.sort(cashFirst ? (a, b) => b.lo - a.lo : (a, b) => a.hi - b.hi);
     const { seg, hh, lo, hi } = branches.pop();
-    if (candidates.length === 5 && seg.step.times(hi).lt(dec(candidates.at(-1).vsTargetQuantity).abs()))
+    if (
+      !cashFirst &&
+      candidates.length === limit &&
+      seg.step.times(hi).lt(dec(candidates.at(-1).vsTargetQuantity).abs())
+    )
       continue;
     if (++nodes > budget || evaluations >= budget) {
       complete = false;
       break;
     }
+    // A range whose most favourable boundary still crosses zero contains no executable path.
+    const invalidBoundary = [p.floor, p.target].some((target) => {
+      const upper = max(shiftAt(seg, lo, target), shiftAt(seg, hi, target));
+      return [m.pf, m.hl].some((leg) => upper.times(leg.factor).plus(leg.mark).lte(0));
+    });
+    if (invalidBoundary) continue;
     const favorable = (target) => {
       const a = shiftAt(seg, lo, target),
         b = shiftAt(seg, hi, target);
@@ -341,6 +358,15 @@ export function solveAuto(book, m, params, options = {}) {
     };
     const fail = favorable(p.floor),
       pass = favorable(p.target);
+    // In one depth segment PF settlement is A + B*i. A convex combination of the
+    // two boundary prices at weights with weighted target A cancels the 1/i term.
+    // This bound keeps success and failure on the SAME PF quantity as the grid is split.
+    const intercept = lerp(seg.a, seg.b, 0);
+    const passWeight = intercept.minus(p.floor).div(dec(p.target).minus(p.floor));
+    const coupledShift =
+      passWeight.gt(0) && passWeight.lt(1)
+        ? intercept.minus(lerp(seg.a, seg.b, lo)).div(seg.slope.times(lo))
+        : null;
     let possible = false;
     for (const h of hh) {
       const cash = (i, shift) => lerp(h.a, h.b, i).plus(h.slope.times(i).times(shift));
@@ -358,13 +384,26 @@ export function solveAuto(book, m, params, options = {}) {
         .times(delayPerLot)
         .plus(h.a.i > 0 ? options.stress?.fundingDebit || '0' : '0');
       const offset = adverseMove.times(-h.sign);
+      let minFailure = failNeed,
+        minSuccess = passNeed;
+      if (cashFirst && best) {
+        const cashFloor = dec(best.worstCash).minus(book.external).plus(p.k);
+        minFailure = max(minFailure, cashFloor);
+        minSuccess = max(minSuccess, cashFloor.minus(payout));
+      }
       for (const [shift, need] of [
-        [fail.plus(offset), failNeed.plus(debitFloor)],
-        [pass.plus(offset), passNeed.plus(debitFloor)]
+        [fail.plus(offset), minFailure.plus(debitFloor)],
+        [pass.plus(offset), minSuccess.plus(debitFloor)]
       ]) {
         const [a, b] = range;
         range = clip(a, b, cash(a, shift).minus(need), cash(b, shift).minus(need));
         if (!range) break;
+      }
+      if (range && coupledShift != null) {
+        const need = minFailure.plus(passWeight.times(minSuccess.minus(minFailure))).plus(debitFloor);
+        const shift = coupledShift.plus(offset);
+        const [a, b] = range;
+        range = clip(a, b, cash(a, shift).minus(need), cash(b, shift).minus(need));
       }
       if (!range) continue;
       possible = true;
@@ -388,7 +427,10 @@ export function solveAuto(book, m, params, options = {}) {
       }
       for (let i = first; i <= last; i++) {
         const cutoff = candidates.at(-1);
-        if (candidates.length === 5 && dec(pf).abs().eq(dec(cutoff.vsTargetQuantity).abs())) {
+        if (
+          candidates.length === limit &&
+          (cashFirst || dec(pf).abs().eq(dec(cutoff.vsTargetQuantity).abs()))
+        ) {
           let possible = [i, last];
           for (const [shift, credit] of [
             [fail, '0'],
@@ -444,7 +486,7 @@ export function solveAuto(book, m, params, options = {}) {
     (!best.candidateLeverage || String(best.candidateLeverage) === m.hl.configuredLeverage);
   complete = complete && !unknown;
   const pressure = {};
-  if (params.movePct && p.stage === 'challenge')
+  if (!cashFirst && params.movePct && p.stage === 'challenge')
     for (const sign of [1, -1]) pressure[sign] = requiredAtMove(book, m, p, current[0], sign, params.movePct);
   let hold = { vsTargetQuantity: '0', hlTargetQuantity: '0', code: 'HOLD' };
   try {
@@ -459,6 +501,15 @@ export function solveAuto(book, m, params, options = {}) {
     hold.personalCash != null &&
     dec(hold.personalCash).gte(p.B) &&
     dec(hold.hlCash).gte(p.R);
+  // A passing quantity grid proves the base calculations. A verified AUTO verdict
+  // also needs the account's actual setting and every requested stress input.
+  const stressVerified = ['basisBps', 'jumpBps', 'delayBps', 'fundingDebit'].every((key) =>
+    nonnegative(options.stress?.[key] || '0').gt(0)
+  );
+  const conditionsVerified =
+    options.accountVerified === true &&
+    stressVerified &&
+    (!best?.candidateLeverage || best.candidateLeverage === Number(m.hl.configuredLeverage));
   return {
     selected: best,
     candidates,
@@ -469,14 +520,17 @@ export function solveAuto(book, m, params, options = {}) {
     nodes,
     searchComplete: complete,
     hold,
-    code: best
-      ? unchanged && complete
-        ? 'AUTO_HOLD'
-        : 'AUTO_FEASIBLE'
-      : complete
-        ? holdEligible
-          ? 'AUTO_HOLD'
-          : 'AUTO_INFEASIBLE'
-        : 'AUTO_PARTIAL'
+    code:
+      best && (!complete || !conditionsVerified)
+        ? 'AUTO_PARTIAL'
+        : best
+          ? unchanged
+            ? 'AUTO_HOLD'
+            : 'AUTO_FEASIBLE'
+          : complete
+            ? holdEligible
+              ? 'AUTO_HOLD'
+              : 'AUTO_INFEASIBLE'
+            : 'AUTO_PARTIAL'
   };
 }

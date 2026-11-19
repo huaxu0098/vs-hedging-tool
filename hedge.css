@@ -473,3 +473,9 @@ label input[type='checkbox'] {
   margin-top: 10px;
   color: var(--muted);
 }
+
+.dual-plans { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr)); gap:12px; }
+.dual-plans > div { padding:12px 16px; background:#f1f6f4; border-radius:6px; }
+.dual-plans h3 { margin-top:0; }
+.dual-plans p:last-child { white-space:pre-line; font-variant-numeric:tabular-nums; }
+#trace-inputs { max-height:24em; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }

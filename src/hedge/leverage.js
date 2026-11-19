@@ -137,16 +137,14 @@ export function evaluateLeverageGrid(book, market, profile, pf, hl, checks) {
       surplus: funding.stressedSurplus,
       buffer: base.priceBuffer,
       status: failed?.status ?? 'pass',
-      reason: failed?.code ?? null
+      reason: failed?.code ?? null,
+      constraint: failed ?? null
     };
     rows.push(row);
     const rank = { pass: 0, unknown: 1, fail: 2 };
-    if (
-      !best ||
-      rank[row.status] < rank[best.row.status] ||
-      (rank[row.status] === rank[best.row.status] && margin.lt(best.margin))
-    )
-      best = { row, extra, margin };
+    // Rows share the same cross pool, net exposure, fees and maintenance schedule.
+    // Ascending enumeration makes the first passing setting the least leverage required.
+    if (!best || rank[row.status] < rank[best.row.status]) best = { row, extra, margin };
   }
   const constraints = [...common, ...best.extra];
   const code = constraints.some((c) => c.status === 'fail')

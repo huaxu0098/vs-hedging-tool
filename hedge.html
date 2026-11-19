@@ -69,11 +69,11 @@
           <strong id="hl-summary">等待账户</strong><span id="hl-change"></span>
         </article>
         <article>
-          <h2>VS 失败后个人资金</h2>
-          <strong id="fail-summary">—</strong><span id="fail-change"></span>
+          <h2>失败端个人保护资金合计</h2>
+          <strong id="fail-summary">—</strong><span id="fail-parts"></span><span id="fail-change"></span>
         </article>
         <article>
-          <h2 id="pass-heading">VS 通过后个人资金</h2>
+          <h2 id="pass-heading">成功端 Hype 现金（分成到账前）</h2>
           <strong id="pass-summary">—</strong><span id="pass-change"></span>
         </article>
         <article>
@@ -85,7 +85,7 @@
           <strong id="margin-funds">—</strong><span id="collateral-source"></span>
         </article>
         <article>
-          <h2>成功端到账前 Hype 现金</h2>
+          <h2>VS 利润分成</h2>
           <strong id="success-hl">—</strong><span id="summary-margin"></span>
         </article>
         <article>
@@ -105,10 +105,25 @@
           <h2>Hype 当前账户设置</h2>
           <strong id="configured-leverage">未知</strong><span id="leverage-status"></span>
         </article>
+        <article><h2>目标有效杠杆</h2><strong id="effective-level">—</strong><span>目标 Hype 名义额 ÷ Hype 权益</span></article>
+        <article><h2>Hype 保证金</h2><strong id="initial-needed">—</strong><span id="already-used"></span></article>
         <p id="leverage-reason"></p>
         <p id="verified-range"></p>
         <p id="summary-status" role="status"></p>
       </section>
+      <section class="card" id="plan-comparison">
+        <h2>双方案对照</h2>
+        <div class="dual-plans">
+          <div><h3>最大可行方案</h3><p>优先扩大符合约束的 PF 仓位。首屏金额按此方案显示。</p><p id="size-plan"></p></div>
+          <div><h3>保守推荐方案</h3><p>优先保留两端及已配置压力情景中最少的个人现金，同额时优先较小 PF 仓位。</p><p id="cash-plan"></p></div>
+        </div>
+      </section>
+      <details class="card" id="trace-panel">
+        <summary>本次计算依据 · <span id="trace-id"></span></summary>
+        <p id="trace-sources"></p>
+        <button type="button" id="trace-download">保存本次核算 JSON</button>
+        <details><summary>查看行情、账户与规则原始输入</summary><pre id="trace-inputs"></pre></details>
+      </details>
       <section class="card" id="snapshot">
         <h2 id="account-heading">当前账户与持仓</h2>
         <div class="flat-entry" id="flat-entry">
@@ -183,6 +198,7 @@
         <p id="best-two"></p>
         <details>
           <summary>首选仓位各档杠杆核算</summary>
+          <p>清算模型对杠杆设置不敏感（当前全仓模型）。仓位及全仓抵押权益相同时，各档共享维持档位和强平价。设置杠杆改变初始保证金要求与剩余可开额度。</p>
           <div class="table-wrap">
             <table>
               <thead>

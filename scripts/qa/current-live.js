@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { openTestBrowser } from './chrome.js';
 
 const b = await openTestBrowser({ current: true });
@@ -40,6 +44,27 @@ try {
   assert.match(await text('#plan-basis'), /500.00 U.*91.00 U.*409.00 U/);
   assert.match(await text('#summary-status'), /预设规划/);
   assert.match(await text('#stress-assumptions'), /压力未配置/);
+  assert.match(await text('#summary-status'), /AUTO_PARTIAL · 条件方案/);
+  assert.match(await text('#size-plan'), /最差个人现金/);
+  assert.match(await text('#cash-plan'), /最差个人现金/);
+  assert.match(await text('#success-hl'), /考核利润不可分/);
+  assert.match(await text('#trace-id'), /AUTO-0.9/);
+  const leverageCheck = await run(`(() => {
+    const rows = Array.from(document.querySelector('#leverage-grid').rows, r => Array.from(r.cells, c => c.textContent));
+    return { rows, suggested: document.getElementById('suggested-leverage').textContent,
+      explanation: document.getElementById('leverage-reason').textContent };
+  })()`);
+  assert.equal(leverageCheck.suggested, leverageCheck.rows.find((row) => row.at(-1).includes('通过'))[0]);
+  if (leverageCheck.rows.filter((row) => row.at(-1).includes('通过')).length > 1)
+    assert.match(leverageCheck.explanation, /仅释放初始保证金/);
+  console.log(
+    'SECTION09_LIVE',
+    JSON.stringify(
+      await run(
+        "Object.fromEntries(['trace-id','trace-sources','size-plan','cash-plan','leverage-reason','fail-summary','fail-parts','pass-summary','success-hl','summary-status'].map(id=>[id,document.getElementById(id).textContent]))"
+      )
+    )
+  );
   console.log(
     'PLAN_LIVE',
     JSON.stringify(
@@ -48,6 +73,28 @@ try {
       )
     )
   );
+  const downloadDir = await mkdtemp(path.join(tmpdir(), 'vs-hl-trace-'));
+  try {
+    await send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadDir });
+    await click('#trace-panel > summary');
+    await click('#trace-download');
+    let filename;
+    for (let i = 0; i < 50 && !filename; i++) {
+      filename = (await readdir(downloadDir)).find((name) => /^hedge-[0-9a-f]+\.json$/.test(name));
+      if (!filename) await delay(100);
+    }
+    assert.ok(filename, '真实浏览器保存核算文件');
+    const saved = JSON.parse(await readFile(path.join(downloadDir, filename), 'utf8'));
+    assert.equal(filename, 'hedge-' + saved.id + '.json');
+    assert.equal(saved.model, 'AUTO-0.9');
+    assert.equal(saved.inputs.accounts.hl.equity, '409');
+    assert.equal(saved.outputs.autoStatus, 'AUTO_PARTIAL');
+    assert.ok(saved.outputs.conservative.candidate);
+    if (process.env.HEDGE_AUDIT_OUTPUT) await writeFile(process.env.HEDGE_AUDIT_OUTPUT, JSON.stringify(saved, null, 2) + '\n');
+    console.log('TRACE_DOWNLOAD', filename, saved.at);
+  } finally {
+    await rm(downloadDir, { recursive: true, force: true });
+  }
   for (const [field, value] of Object.entries({
     jumpBps: '1',
     delayBps: '1',
@@ -205,6 +252,13 @@ try {
     Number(f.sz) < 1 &&
     Math.abs(Number(f.startPosition)) < 1;
   let fill = (await req({ type: 'userFills', user })).find(eligible);
+  for (const minutes of [45, 90, 180]) {
+    if (fill) break;
+    const startTime = Date.now() - minutes * 60000;
+    fill = (await req({ type: 'userFillsByTime', user, startTime, endTime: startTime + 15 * 60000 })).find(
+      eligible
+    );
+  }
   if (!fill) {
     const observed = Date.parse('2026-11-19T10:01:01.423Z');
     fill = (
@@ -313,7 +367,7 @@ try {
   await set('hl-qty', '0');
   await set('mode', 'auto');
   await wait(recommended, 25000);
-  assert.match(await text('#auto-search'), /AUTO_FEASIBLE/);
+  assert.match(await text('#auto-search'), /AUTO_PARTIAL/);
   assert.match(await text('#two-day'), /未验证/);
   console.log(
     'AUTO 实时双空仓',
@@ -341,6 +395,7 @@ try {
   await wait(recommended, 25000);
   assert.equal(await text('#margin-funds'), free);
   assert.match(await text('#protect-funds'), /509.00/);
+  assert.match(await text('#fail-parts'), /Hype 结算现金.*外部已到账 100.00 U/);
   await set('movePct', '3');
   await wait("document.querySelector('#two-day').textContent.includes('五档') && " + recommended, 25000);
   console.log('AUTO both / 两日', await text('#protect-funds'), free, await text('#two-day'));
@@ -364,7 +419,10 @@ try {
     25000
   );
 
-  await wait("document.querySelector('#auto-search').textContent.includes('AUTO_FEASIBLE')", 30000);
+  await wait(
+    hasPlan + " && document.querySelector('#auto-search').textContent.includes('AUTO_PARTIAL')",
+    30000
+  );
   console.log('AUTO 杠杆联合排序', await text('#auto-search'), await text('#top-auto'));
   await send('Network.emulateNetworkConditions', {
     offline: true,
@@ -382,7 +440,10 @@ try {
     uploadThroughput: -1
   });
   await click('#sync');
-  await wait("document.querySelector('#auto-search').textContent.includes('AUTO_FEASIBLE')", 30000);
+  await wait(
+    hasPlan + " && document.querySelector('#auto-search').textContent.includes('AUTO_PARTIAL')",
+    30000
+  );
   await set('deadline', '2020-01-01T00:00');
   assert.match(await text('#auto-search'), /AUTO_DEADLINE_EXIT_REQUIRED/);
   assert.match(await text('#rule-events'), /退出/);

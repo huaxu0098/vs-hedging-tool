@@ -10,6 +10,7 @@ import {
 } from './math.js';
 import { validLeverageCap } from './leverage.js';
 import { solveAuto } from './auto.js';
+import { calculationTrace } from './trace.js';
 import {
   solve,
   executionDetail,
@@ -293,11 +294,15 @@ function heldOutcomes(book, market, p, pf, hl) {
     }
     if (path.some((c) => c.status === 'unknown')) notes.push('现仓到' + label + '的保证金路径未验证');
     const settled = projectSettlementEquity(book, market, 'hl', hl, shift).plus(book.external).minus(p.k);
-    if (key === 'fail') cash.failureCash = out(settled);
-    else {
+    cash.externalReceived = book.external;
+    if (key === 'fail') {
+      cash.failureCash = out(settled);
+      cash.failureHypeCash = out(settled.minus(book.external));
+    } else {
       cash.cashBeforePayout = out(settled.plus(p.inTransit));
       cash.hlBeforePayout = out(settled.minus(book.external));
       const payout = p.stage === 'funded' ? profitSplit(p.target, p.baseline, p.share).user : '0';
+      cash.expectedUserPayout = payout;
       cash.pressureCashAfter = out(dec(cash.cashBeforePayout).plus(payout));
     }
   }
@@ -305,6 +310,12 @@ function heldOutcomes(book, market, p, pf, hl) {
 }
 
 export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(), options = {}) {
+  const result = computeCurrent(r, a, data, fxData, now, options);
+  if (!result.needsSearch) result.trace = calculationTrace(r, a, data, fxData, now, options.cashSearchBudget);
+  return result;
+}
+
+function computeCurrent(r, a, data, fxData, now, options) {
   const issues = [],
     result = {
       issues,
@@ -447,6 +458,7 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
         if (!usable(k, field)) leg[field] = null;
       }
       if (!usable(k, 'free')) leg.directionalFree = null;
+      if (!usable(k, 'leverage') || leg.source !== 'Hype 主网 API') leg.configuredLeverage = null;
       return [k, leg];
     })
   );
@@ -700,9 +712,18 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
       return result;
     }
     result.leverageStatus =
-      !planning && market.hl.configuredLeverage && !a.hl.otherPositions && a.hl.otherHold === '0'
+      !planning &&
+      result.configuredLeverage &&
+      a.hl.crossPoolVerified === true &&
+      !a.hl.otherPositions &&
+      a.hl.otherHold === '0'
         ? 'ACCOUNT_MODEL'
         : 'LEVERAGE_UNVERIFIED';
+    checks.accountVerified =
+      result.leverageStatus === 'ACCOUNT_MODEL' &&
+      !!market.hl.capacity &&
+      a.hl.fee != null &&
+      !a.pf.otherPositions;
     if (options.deferAuto) {
       result.needsSearch = true;
       return result;
@@ -744,9 +765,38 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
     };
 
     if (solved.code === 'AUTO_HOLD' && !solved.selected) result.flatHold = true;
-    if (!planning && !funded && !r.deadline && solved.selected) {
-      result.autoStatus = 'AUTO_PARTIAL';
-      result.notices.push('仓位按考核仍有效计算，实际截止时间待确认');
+    if (solved.selected) {
+      const cashSearch = solveAuto(
+        book,
+        market,
+        { ...params, objective: 'cash' },
+        {
+          ...checks,
+          seeds: solved.candidates,
+          searchBudget: options.cashSearchBudget ?? 1400
+        }
+      );
+      result.conservative = {
+        candidate: cashSearch.selected,
+        complete: cashSearch.searchComplete && !creditUnknown
+      };
+      const missing = [];
+      if (planning) missing.push('账户资金采用预设规划');
+      if (result.leverageStatus !== 'ACCOUNT_MODEL') missing.push('实际杠杆设置或调档后可用额度待核实');
+      if (result.stress.missing.length || result.stress.zero.length) missing.push(result.stress.label);
+      if (!market.hl.capacity || a.hl.fee == null) missing.push('Hype 账户实际可开额度或费率待核实');
+      if (a.pf.otherPositions || a.hl.otherPositions) missing.push('其他持仓的组合风险待核实');
+      if (!planning && !funded && !r.deadline) missing.push('考核截止时间待确认');
+      if (funded && p.C_ref == null) missing.push('整轮收益基准待确认');
+      if (!solved.searchComplete) missing.push('最大仓位搜索尚未证实最优');
+      result.conservative.unverified = [...missing];
+      if (
+        cashSearch.selected?.candidateLeverage &&
+        cashSearch.selected.candidateLeverage !== Number(result.configuredLeverage)
+      )
+        result.conservative.unverified.push('保守方案所需的账户杠杆或调档后额度待核实');
+      result.unverified = missing;
+      if (missing.length) result.autoStatus = 'AUTO_PARTIAL';
     }
     if (solved.selected && params.movePct && !funded) {
       const sign = dec(solved.selected.vsTargetQuantity).gt(0) ? 1 : -1;

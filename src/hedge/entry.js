@@ -167,10 +167,11 @@ let quoteTimer,
   manualPrices = null;
 const useAPI = () => !planning() && $('hl-source').value === 'api';
 function market() {
-  if ($('quote-source').value !== 'manual') return feed;
+  if ($('quote-source').value !== 'manual') return { ...feed, source: 'Vest / Hyperliquid 公开行情' };
   return {
     ...feed,
     asset: asset(),
+    source: '手工确认盘口',
     pf: manualPrices?.pf,
     hl: manualPrices?.hl,
     errors: { spec: feed.errors?.spec }
@@ -386,6 +387,7 @@ function currentFrame(a, m, t) {
   const key = JSON.stringify([context, m, rates]);
   if ((running && running.context !== context) || (completed && completed.context !== context)) cancelAuto();
   if (!running && completed?.key !== key) {
+    const frameRates = rates;
     const revision = ++version;
     running = { context, key };
     if (!worker) worker = new Worker('/src/hedge/auto-worker.js', { type: 'module' });
@@ -400,7 +402,8 @@ function currentFrame(a, m, t) {
           ...result,
           stateVersion: revision,
           calculatedAt: new Date(t).toISOString(),
-          calculationMarket: m
+          calculationMarket: m,
+          calculationRates: frameRates
         }
       };
       render();
@@ -488,30 +491,37 @@ function render() {
         : '账户设置未读取 · LEVERAGE_UNVERIFIED'
   );
   const grid = c?.leverageGrid ?? [];
-  const lower = grid.filter((x) => x.leverage < leverage && x.status === 'pass');
-  const higher = grid.filter((x) => x.leverage > leverage && x.status !== 'pass');
-  const why = !leverage
-    ? c?.hlTargetQuantity === '0'
+  const lower = grid.find((row) => row.leverage === leverage - 1);
+  const higher = grid.findLast((row) => row.leverage > leverage && row.status === 'pass');
+  const gap = lower?.constraint;
+  const why = leverage
+    ? [
+        leverage + '× 是该仓位的最低可行档位，初始保证金 ' + money(c.requiredInitialMargin) + '。',
+        lower &&
+          lower.leverage +
+            '× ' +
+            constraintReason(lower.reason) +
+            (gap?.shortfall != null ? '，缺 ' + checkNumber(gap.shortfall, gap.unit) + ' ' + gap.unit : '') +
+            '。',
+        higher &&
+          '升至 ' +
+            higher.leverage +
+            '× 仅释放初始保证金 ' +
+            money(out(dec(c.requiredInitialMargin).minus(higher.initial))) +
+            '；两端现金、维持保证金、压力后权益与强平距离均相同。'
+      ]
+        .filter(Boolean)
+        .join(' ')
+    : c?.hlTargetQuantity === '0'
       ? 'Hype 目标为空仓。'
-      : ''
-    : '本仓位按 ' +
-      leverage +
-      '× 占用 ' +
-      money(c.requiredInitialMargin) +
-      '。' +
-      (lower.length
-        ? '较低的可行档位占用更多保证金，例如 ' +
-          lower.at(-1).leverage +
-          '× 需 ' +
-          money(lower.at(-1).initial) +
-          '。'
-        : leverage > 1
-          ? '较低档位未通过资金或账户约束。'
-          : '该档为最低合法档位。') +
-      (higher.length
-        ? '更高档位未通过 ' + [...new Set(higher.map((x) => constraintReason(x.reason)))].join('、') + '。'
-        : '更高倍数超出该仓位合法范围。') +
-      '同一全仓仓位的维持保证金及强平价取决于权益和敞口。';
+      : '';
+  put('effective-level', c?.effectiveLeverage == null ? '—' : fmt(c.effectiveLeverage, 3) + '×');
+  put('initial-needed', '目标初始 ' + money(c?.requiredInitialMargin));
+  const used =
+    !plan && !a.hl.error && fresh(fieldTime(a.hl, 'used'), Date.now(), Number(r.accountSecs) * 1000)
+      ? a.hl.used
+      : null;
+  put('already-used', plan ? '实际已占用金额待账户快照确认' : '当前已占用 ' + money(used));
   put('leverage-reason', why);
   const levRows = grid.map((x) =>
     cellRow([
@@ -521,7 +531,11 @@ function render() {
       money(x.stressedEquity),
       money(x.surplus),
       !x.leverage ? '空仓' : x.liquidation == null ? '无正价交点' : fmt(x.liquidation),
-      x.status === 'pass' ? '通过所设条件' : constraintReason(x.reason)
+      x.status === 'pass'
+        ? x.leverage === leverage
+          ? '通过所设条件 · 最低可行'
+          : '通过所设条件'
+        : constraintReason(x.reason)
     ])
   );
   if ($('leverage-grid').textContent !== levRows.map((x) => x.textContent).join(''))
@@ -551,9 +565,10 @@ function render() {
     (dec(qty).gt(0) ? '多 ' : dec(qty).lt(0) ? '空 ' : '空仓 ') + money(amount);
 
   const msg = [
-    status,
-    c && result.leverageStatus === 'LEVERAGE_UNVERIFIED' && '条件方案 · 账户设置未验证',
-    c && coverage
+    c && result.autoStatus === 'AUTO_PARTIAL' ? 'AUTO_PARTIAL · 条件方案' : status,
+    ...(result.unverified ?? []),
+    c && !result.unverified && result.leverageStatus === 'LEVERAGE_UNVERIFIED' && '条件方案 · 账户设置未验证',
+    c && !result.unverified?.includes(coverage) && coverage
   ]
     .filter(Boolean)
     .join(' · ');
@@ -656,11 +671,20 @@ function render() {
       ? '买 ' + money(result.marginHL[0]) + ' / 卖 ' + money(result.marginHL[1])
       : money(result.marginHL)
   );
-  put('success-hl', money(projection?.hlBeforePayout));
+  put('success-hl', r.stage === 'challenge' ? '考核利润不可分' : money(projection?.expectedUserPayout));
+  put(
+    'fail-parts',
+    projection?.failureHypeCash == null
+      ? ''
+      : 'Hype 结算现金 ' +
+          money(projection.failureHypeCash) +
+          ' ＋ 外部已到账 ' +
+          money(projection.externalReceived)
+  );
   put(
     'summary-margin',
-    c?.initialMargin?.length === 2
-      ? '初始保证金 VS ' + money(c.initialMargin[0]) + ' / Hype ' + money(c.initialMargin[1])
+    r.stage === 'funded' && projection?.pressureCashAfter != null
+      ? '若首次分成到账，个人资金合计 ' + money(projection.pressureCashAfter)
       : ''
   );
   put(
@@ -776,6 +800,79 @@ function render() {
             : '')
       ])
     );
+  $('plan-comparison').hidden = r.mode !== 'auto';
+  for (const [id, plan] of [
+    ['size-plan', result.maximum],
+    ['cash-plan', result.conservative]
+  ]) {
+    const pick = plan?.candidate;
+    put(
+      id,
+      pick
+        ? [
+            'PF ' +
+              directional(pick.vsTargetQuantity, pick.vsNotional) +
+              ' / Hype ' +
+              directional(pick.hlTargetQuantity, pick.hlNotional),
+            '对冲比例 ' +
+              pct(pick.actualRatio) +
+              ' · 杠杆 ' +
+              (pick.candidateLeverage ? pick.candidateLeverage + '×' : '空仓'),
+            '失败端个人合计 ' +
+              money(pick.failureCash) +
+              ' / 成功端到账前 Hype ' +
+              money(pick.hlBeforePayout),
+            '最差个人现金 ' +
+              money(pick.worstCash) +
+              ' · Hype 初始保证金 ' +
+              money(pick.requiredInitialMargin),
+            plan.complete ? '已证实为当前条件下的最优解' : '本次搜索已找到的候选，最优性待验证',
+            id === 'cash-plan' && plan.unverified?.length ? '条件方案 · ' + plan.unverified.at(-1) : ''
+          ]
+            .filter(Boolean)
+            .join('\n')
+        : status
+    );
+  }
+  const trace = result.trace;
+  put('trace-id', trace ? trace.model + ' / ' + trace.id : '等待计算');
+  put(
+    'trace-sources',
+    trace
+      ? [
+          '计算于 ' + trace.at,
+          '规则 ' + trace.rulesId,
+          '账户 ' + trace.accountsId,
+          (m.source ?? '行情') + ' ' + trace.marketId,
+          'VS ' + (m.pf?.asOf ?? '无时间'),
+          'Hype ' + (m.hl?.asOf ?? '无时间'),
+          'VS 资金 ' +
+            (a.pf.source ?? '未确认') +
+            (fieldTime(a.pf, 'equity') ? ' ' + fieldTime(a.pf, 'equity') : ''),
+          'Hype 资金 ' +
+            (a.hl.source ?? '未确认') +
+            (fieldTime(a.hl, 'equity') ? ' ' + fieldTime(a.hl, 'equity') : '')
+        ].join(' · ')
+      : ''
+  );
+  $('trace-download').disabled = !trace;
+  $('trace-download').onclick = () => {
+    if (!trace) return;
+    const { inputs, ...identity } = trace;
+    const { trace: _, calculationRates, calculationMarket, ...outputs } = result;
+    const payload = JSON.stringify({ ...identity, inputs: JSON.parse(inputs), outputs }, null, 2);
+    const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'hedge-' + trace.id + '.json';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  const detail = $('trace-inputs').parentElement;
+  const showInputs = () =>
+    put('trace-inputs', trace && detail.open ? JSON.stringify(JSON.parse(trace.inputs), null, 2) : '');
+  detail.ontoggle = showInputs;
+  showInputs();
   const maximum = result.maximum,
     runner = result.top?.[1];
   put(
@@ -862,13 +959,19 @@ function render() {
       put(k + '-change', '保持等待');
     }
   put('fail-summary', money(projection?.failureCash));
-  put('pass-summary', money(projection?.pressureCashAfter));
-  put('pass-heading', r.stage === 'funded' ? '首笔分成到账后个人资金' : 'VS 通过后个人资金');
+  put('pass-summary', money(projection?.hlBeforePayout));
   for (const [id, diff] of [
     ['fail', result.failVsPrincipal],
     ['pass', result.passVsPrincipal]
   ])
-    put(id + '-change', diff == null ? '' : '相对保护本金及额外成本 ' + signedMoney(diff));
+    put(
+      id + '-change',
+      diff == null
+        ? ''
+        : (id === 'pass' ? (r.stage === 'funded' ? '若分成到账，' : '') + '含外部资金的个人合计' : '') +
+            '相对保护本金及额外成本 ' +
+            signedMoney(diff)
+    );
   put(
     'current-h',
     result.currentH == null
@@ -894,7 +997,9 @@ function render() {
                 : result.leverageStatus === 'LEVERAGE_UNVERIFIED'
                   ? ' · 条件推荐'
                   : ' · 推荐'
-            : ' · 待验证')
+            : c.code === 'FEASIBLE'
+              ? ' · 基础候选（条件方案）'
+              : ' · 待验证')
       : '—'
   );
   const verified = result.verified;
@@ -1093,9 +1198,14 @@ function render() {
   const budget =
     !stale && budgetOnly && !result.issues.some((x) => /无解|没有满足|没有可行/.test(x)) ? b.atMinimum : null;
   const lines = [
-    ['失败端个人现金', money(projection?.failureCash ?? budget?.fail)],
+    ['失败端 Hype 结算现金', money(projection?.failureHypeCash)],
+    ['外部已到账资金', money(result.externalValue)],
+    ['失败端个人保护资金合计', money(projection?.failureCash ?? budget?.fail)],
+    ['成功端到账前 Hype 现金', money(projection?.hlBeforePayout)],
     ['成功端分成到账前个人资金（含外部已到账）', money(projection?.cashBeforePayout ?? budget?.before)],
-    ['若分成到账后', money(projection?.pressureCashAfter ?? budget?.after)],
+    ...(r.stage === 'funded'
+      ? [['若首次分成到账后个人合计', money(projection?.pressureCashAfter ?? budget?.after)]]
+      : []),
     ['失败端相对保护本金及额外成本', money(result.failVsPrincipal)],
     ['成功端相对保护本金及额外成本', money(result.passVsPrincipal)],
     ['从当前起的现金变化', money(result.forward)],
@@ -1191,6 +1301,7 @@ function render() {
         : '') +
       (quoteError ? ' ｜ ' + quoteError : '')
   );
+  const frameRates = result.calculationRates ?? rates;
   put(
     'fx-source',
     '共同价格因子按 USDC/USDT 折算 · ' +
@@ -1201,8 +1312,12 @@ function render() {
               (k) =>
                 k +
                 '/USD ' +
-                (rates[k]
-                  ? fmt(String(rates[k].rate), 6) + ' ' + rates[k].source + ' ' + clock(rates[k].asOf)
+                (frameRates[k]
+                  ? fmt(String(frameRates[k].rate), 6) +
+                    ' ' +
+                    frameRates[k].source +
+                    ' ' +
+                    clock(frameRates[k].asOf)
                   : '未取得')
             )
             .join(' ｜ '))

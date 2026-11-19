@@ -584,6 +584,8 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
     code,
     stress,
     scenarioCash,
+    failureHypeCash: out(failHL.minus(extra)),
+    externalReceived: out(dec(s.external)),
     hlBeforePayout: out(passHL.minus(extra)),
     liqMark: liq,
     liqSource: useReference ? '当前仓平台参考' : '全仓档位测算',

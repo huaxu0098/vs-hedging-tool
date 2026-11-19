@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { calculateCurrent, rules } from '../src/hedge/current.js';
-import { solveAuto, compareAuto } from '../src/hedge/auto.js';
+import { solveAuto, compareAuto, compareConservative } from '../src/hedge/auto.js';
 import { demoMarket, evaluateCandidate, profileInputs } from '../src/hedge/solver.js';
 import { createBook } from '../src/hedge/book.js';
 import { dec, out, min } from '../src/hedge/math.js';
@@ -56,7 +56,7 @@ const calc = (r = {}, f = fixture(), time = t) => calculateCurrent({ ...inputs, 
 test('AUTO01 auto 默认联合搜索两边空仓的最大 PF 名义额', () => {
   const x = calc();
   assert.equal(inputs.mode, 'auto');
-  assert.equal(x.autoStatus, 'AUTO_FEASIBLE');
+  assert.equal(x.autoStatus, 'AUTO_PARTIAL');
   assert.equal(x.candidate.vsNotional, '1000');
   assert.equal(x.search.complete, true);
   assert.ok(x.top.length > 1);
@@ -132,7 +132,16 @@ test('AUTO09 达到已证明最优的现仓保持，双边差额为零', () => {
   f.a.hl.qty = c.hlTargetQuantity;
   f.a.hl.configuredLeverage = String(c.candidateLeverage);
   f.a.hl.currentMarginCredit = c.requiredInitialMargin;
-  const x = calc({}, f);
+  Object.assign(f.a.hl, {
+    source: 'Hype 主网 API',
+    crossPoolVerified: true,
+    fee: '0',
+    capacity: ['30', '30']
+  });
+  const x = calc(
+    { adverseBps: '0.01', jumpBps: '0.01', delayBps: '0.01', fundingDebit: '0.001', B: '159' },
+    f
+  );
   assert.equal(x.autoStatus, 'AUTO_HOLD');
   assert.equal(x.candidate.vsDeltaQuantity, '0');
   assert.equal(x.candidate.hlDeltaQuantity, '0');
@@ -217,10 +226,16 @@ test('AUTO12 逐仓位逐杠杆穷举对照，含非零压力和搜索未完成�
     assert.ok(all.length > 5);
     const solved = solveAuto(s, base, params, opts);
     assert.equal(solved.searchComplete, true);
+    assert.equal(solved.code, 'AUTO_PARTIAL'); // Unit-market grids carry no verified exchange account.
     assert.deepEqual(
       solved.candidates.map((x) => [x.vsTargetQuantity, x.hlTargetQuantity, x.candidateLeverage]),
       all.slice(0, 5).map((x) => [x.vsTargetQuantity, x.hlTargetQuantity, x.candidateLeverage])
     );
+    const cash = solveAuto(s, base, { ...params, objective: 'cash' }, opts);
+    assert.equal(cash.searchComplete, true);
+    const independentBest = all.slice().sort(compareConservative)[0];
+    assert.equal(cash.selected.worstCash, independentBest.worstCash);
+    assert.equal(cash.selected.vsNotional, independentBest.vsNotional);
     const partial = solveAuto(s, base, params, { ...opts, searchBudget: 1 });
     assert.equal(partial.searchComplete, false);
     assert.notEqual(partial.code, 'AUTO_INFEASIBLE');
@@ -232,6 +247,7 @@ test('自动仓位同时校验待成交敞口与跳价、资金费、延迟压�
   assert.equal(calc({}, f).autoStatus, 'AUTO_PARTIAL');
   f.a.hl.orders = [{ qty: '2' }];
   f.a.hl.configuredLeverage = '5';
+  f.a.hl.source = 'Hype 主网 API';
   const x = calc({}, f);
   assert.ok(dec(x.candidate.hlDeltaQuantity).gte('2'));
   assert.equal(x.adjust.hl.remaining, out(dec(x.candidate.hlDeltaQuantity).minus('2')));
@@ -347,7 +363,7 @@ test('预设按本金扣一次报名费，隔离账户来源；未开户也能�
   assert.equal(accounts.hl.free, '120');
   assert.equal(accounts.hl.at, undefined);
   const live = calculateCurrent(r, accounts, fixture().m, {}, t);
-  assert.equal(live.autoStatus, 'AUTO_FEASIBLE');
+  assert.equal(live.autoStatus, 'AUTO_PARTIAL');
   assert.ok(live.top[1]);
   assert.equal(presetAccount({ ...r, stage: 'funded' }, 'hl').equity, '101.5');
   assert.ok(presetAccount({ ...r, planCapital: '90' }, 'hl').error);
@@ -445,7 +461,7 @@ test('LEV04 排序逐项比较名义额、最差现金、缓冲、保证金，�
   assert.ok(sort({ vsNotional: out(dec(c.vsNotional).minus(1)), worstCash: '100000' }) < 0);
   assert.ok(sort({ worstCash: out(dec(c.worstCash).minus(1)) }) < 0);
   assert.ok(sort({ stressPriceBuffer: '0' }) < 0);
-  assert.ok(sort({ initialMargin: ['100000', '100000'], candidateLeverage: 1 }) < 0);
+  assert.ok(sort({ initialMargin: ['100000', '100000'], candidateLeverage: 1 }) > 0);
   assert.ok(compareAuto({ ...c, candidateLeverage: 3 }, { ...c, candidateLeverage: 4 }, 'size') < 0);
 });
 
@@ -556,4 +572,120 @@ test('LEV08 按合法最终数量重算档位与清算，跨边界复核', () =>
     assert.equal(c.requiredInitialMargin, out(n.div(c.candidateLeverage)));
     assert.equal(c.maintenanceMargin, out(n.gte(400) ? dec('20').plus(n.minus(400).div(12)) : n.div(20)));
   }
+});
+
+function fortyLevels() {
+  const f = fixture();
+  f.m.hl.maxLeverage = 40;
+  f.m.hl.marginTiers[0].maxLeverage = 40;
+  return f;
+}
+test('LEV09 全仓 4 至 40 档均通过，精算选择 4 倍', () => {
+  const c = calc({}, fortyLevels()).candidate;
+  const passing = c.leverageGrid.filter((row) => row.status === 'pass');
+  assert.deepEqual(
+    passing.map((row) => row.leverage),
+    Array.from({ length: 37 }, (_, i) => i + 4)
+  );
+  assert.equal(c.candidateLeverage, 4);
+  assert.equal(c.requiredInitialMargin, passing[0].initial);
+  assert.ok(
+    c.leverageGrid.slice(0, 3).every((row) => row.status === 'fail' && dec(row.constraint.shortfall).gt(0))
+  );
+});
+test('LEV10 高档位只释放初始保证金，维持、强平、权益及现金结果一致', () => {
+  const f = fortyLevels();
+  const c = calc({}, f).candidate;
+  const four = c.leverageGrid[3],
+    forty = c.leverageGrid[39];
+  assert.equal(four.initial, '100');
+  assert.equal(forty.initial, '10');
+  for (const key of ['maintenance', 'liquidation', 'stressedEquity', 'surplus', 'buffer'])
+    assert.equal(four[key], forty[key], key);
+  f.m.hl.maxLeverage = 4; // Keep the actual maintenance schedule identical.
+  const capped = calc({}, f).candidate;
+  for (const key of [
+    'vsTargetQuantity',
+    'hlTargetQuantity',
+    'failureHypeCash',
+    'hlBeforePayout',
+    'worstCash'
+  ])
+    assert.equal(c[key], capped[key], key);
+});
+test('LEV11 档位证据区分交易所上限、当前设置、最低可行档与有效杠杆', () => {
+  const f = fortyLevels();
+  Object.assign(f.a.hl, { source: 'Hype 主网 API', crossPoolVerified: true, configuredLeverage: 7 });
+  const x = calc({}, f),
+    c = x.candidate;
+  assert.deepEqual([c.exchangeMaxLeverage, x.configuredLeverage, c.candidateLeverage], [40, 7, 4]);
+  assert.equal(c.effectiveLeverage, out(dec(c.hlNotional).div(x.cash.hl)));
+  assert.ok(dec(c.leverageGrid[2].constraint.shortfall).gt(0));
+  assert.equal(x.leverageStatus, 'LEVERAGE_UNVERIFIED');
+});
+test('STATE01 缺失、显式零、规划及未核实账户均只能产生条件方案；完整验证可通过', () => {
+  const f = fortyLevels();
+  const stress = { adverseBps: '0.1', jumpBps: '0.1', delayBps: '0.1', fundingDebit: '0.01', B: '159' };
+  const base = calc(stress, f);
+  Object.assign(f.a.hl, {
+    source: 'Hype 主网 API',
+    crossPoolVerified: true,
+    configuredLeverage: base.candidate.candidateLeverage,
+    fee: '0',
+    capacity: ['30', '30']
+  });
+  assert.equal(calc(stress, f).autoStatus, 'AUTO_FEASIBLE');
+  for (const field of ['adverseBps', 'jumpBps', 'delayBps', 'fundingDebit'])
+    for (const value of ['', '0']) {
+      const x = calc({ ...stress, [field]: value }, f);
+      assert.ok(x.candidate);
+      assert.equal(x.autoStatus, 'AUTO_PARTIAL');
+      assert.match(x.unverified.join(' '), value ? /零压力/ : /压力未配置/);
+    }
+  delete f.a.hl.configuredLeverage;
+  assert.equal(calc(stress, f).autoStatus, 'AUTO_PARTIAL');
+});
+test('STATE02 失败端单列 Hype 结算现金和已到账外部资金，抵押池不变', () => {
+  const x = calc({ external: '45', externalAt: at, inTransit: '70' });
+  const c = x.candidate;
+  assert.equal(x.protect, '165');
+  assert.equal(x.marginHL, '120');
+  assert.equal(c.externalReceived, '45');
+  assert.equal(c.failureCash, out(dec(c.failureHypeCash).plus('45')));
+  assert.equal(c.cashBeforePayout, out(dec(c.hlBeforePayout).plus('45')));
+});
+test('STATE03 考核期应分额为零，Funded 到账前后分别结算', () => {
+  const c = calc({ external: '10', externalAt: at }).candidate;
+  assert.equal(c.expectedUserPayout, '0');
+  assert.equal(c.hlBeforePayout, out(dec(c.pressureCashAfter).minus('10')));
+  const f = fixture();
+  f.m.spec.fundedInitMarginRatio = '0.1';
+  const funded = calc(
+    { stage: 'funded', fundedFloor: '900', fundedTarget: '1100', external: '10', externalAt: at },
+    f
+  ).candidate;
+  assert.equal(funded.expectedUserPayout, '80');
+  assert.equal(funded.pressureCashAfter, out(dec(funded.hlBeforePayout).plus('10').plus('80')));
+});
+test('双方案共享可复算快照，行情、规则或账户变化产生不同依据', () => {
+  const f = fixture(),
+    x = calc({}, f),
+    evidence = JSON.parse(x.trace.inputs);
+  assert.ok(x.conservative.candidate);
+  assert.ok(dec(x.conservative.candidate.worstCash).gte(x.maximum.candidate.worstCash));
+  const replay = calculateCurrent(
+    evidence.rules,
+    evidence.accounts,
+    evidence.market,
+    evidence.rates,
+    Date.parse(x.trace.at)
+  );
+  assert.equal(replay.trace.id, x.trace.id);
+  assert.deepEqual(replay.maximum, x.maximum);
+  assert.deepEqual(replay.conservative, x.conservative);
+  assert.notEqual(calc({ B: '159' }, f).trace.rulesId, x.trace.rulesId);
+  f.a.hl.free = '119';
+  assert.notEqual(calc({}, f).trace.accountsId, x.trace.accountsId);
+  f.m.hl.levels[0][0][1] = '28';
+  assert.notEqual(calc({}, f).trace.marketId, x.trace.marketId);
 });
