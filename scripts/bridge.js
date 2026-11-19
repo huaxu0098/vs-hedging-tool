@@ -70,7 +70,7 @@ function infoBody(body) {
       exact(r, new Set(['type', 'coin'])) && typeof r.coin === 'string' && /^[\w.:-]{1,80}$/.test(r.coin)
     );
   return (
-    r.type === 'clearinghouseState' &&
+    ['clearinghouseState', 'frontendOpenOrders'].includes(r.type) &&
     exact(r, new Set(['type', 'dex', 'user'])) &&
     dex &&
     /^0x[\da-fA-F]{40}$/.test(r.user)

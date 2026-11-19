@@ -3,9 +3,10 @@
   "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "本地 VS × Hype 只读行情、双账本决策与情景回放工作台",
+  "description": "基于双边当前快照与公开行情的只读仓位比例计算器",
   "scripts": {
-    "start": "node scripts/serve.js",
+    "start": "node scripts/serve.js --hedge",
+    "legacy": "node scripts/serve.js",
     "test": "node --test",
     "test:browser": "node scripts/browser-acceptance.js",
     "test:verdict": "node scripts/qa/verdict-refresh.js",
@@ -16,7 +17,8 @@
     "paper": "node scripts/serve.js --paper",
     "hedge": "node scripts/serve.js --hedge",
     "test:hedge": "node --test tests/hedge-*.test.js",
-    "test:hedge:browser": "node scripts/qa/hedge-browser.js",
+    "test:hedge:browser": "node scripts/qa/current-live.js",
+    "test:hedge:internal": "node scripts/qa/hedge-browser.js",
     "test:hedge:live": "node scripts/qa/hedge-live.js",
     "hedge:observe": "node scripts/read-hedge-tabs.js"
   },

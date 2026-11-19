@@ -8,10 +8,9 @@ import { createUsdRatesReader } from './usd-rates.js';
 
 const root = new URL('../', import.meta.url);
 const host = '127.0.0.1';
-const paper = process.argv.includes('--paper');
-const hedge = paper || process.argv.includes('--hedge');
-let paperState = () => ({ message: '正在恢复本地模拟账本' });
-const port = Number(process.env.PORT || (paper ? 4181 : hedge ? 4180 : 4178));
+const internal = process.argv.includes('--internal-qa');
+const hedge = internal || process.argv.includes('--hedge') || process.argv.includes('--paper');
+const port = Number(process.env.PORT || (hedge ? 4181 : 4178));
 const types = {
   html: 'text/html',
   css: 'text/css',
@@ -37,16 +36,20 @@ const server = createServer(async (request, response) => {
     response.writeHead(400).end();
     return;
   }
-  if (paper && url.pathname === '/api/paper-session') {
-    if (request.method !== 'GET') return response.writeHead(405, { Allow: 'GET' }).end();
-    response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-      .end(JSON.stringify(paperState()));
+  if (hedge && url.pathname === '/api/current-market' && request.method === 'GET') {
+    try {
+      const { currentMarket } = await import('./current-market.js');
+      const data = await currentMarket(url.searchParams.get('asset'));
+      response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(data));
+    } catch {
+      response.writeHead(503).end();
+    }
     return;
   }
-  if (hedge && url.pathname !== '/api/hype-info') {
+  if (hedge && !['/api/hype-info', '/api/usd-rates'].includes(url.pathname)) {
     const path = url.pathname;
     const files = {
-      '/': 'hedge.html',
+      '/': internal ? 'fixtures/internal-hedge.html' : 'hedge.html',
       '/hedge.css': 'hedge.css',
       '/vendor/decimal.mjs': 'node_modules/decimal.js/decimal.mjs'
     };
@@ -158,18 +161,9 @@ server.on('error', (error) => {
 });
 server.listen(port, host, async () => {
   const url = 'http://' + host + ':' + server.address().port;
-  if (paper) {
-    try {
-      const { runPaper } = await import('./paper-session.js');
-      paperState = await runPaper(server.address().port);
-    } catch (error) {
-      paperState = () => ({ message: '本地模拟未启动：' + error.message });
-      console.error(paperState().message);
-    }
-  }
-  console.log('本地匹配器 ' + url + (paper ? '/?simulation=paper' : ''));
+  console.log('本地匹配器 ' + url);
   if (process.argv.includes('--open') && process.platform === 'darwin') {
-    execFile('/usr/bin/open', [url + (paper ? '/?simulation=paper' : '')], (error) => {
+    execFile('/usr/bin/open', [url], (error) => {
       if (error) console.error('请在浏览器打开上面的本地地址。');
     });
   }

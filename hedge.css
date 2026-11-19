@@ -388,3 +388,21 @@ label input[type='checkbox'] {
     grid-template-columns: 1fr 1.35fr;
   }
 }
+
+.live-desk { max-width: 1200px; }
+.live-desk .selectors { display:flex; gap:12px; flex-wrap:wrap; }
+.live-desk .accounts,.live-desk .metrics { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:24px; margin-top:12px; }
+.live-desk .metrics { background:#f2f7f7; padding:15px; border-radius:6px; }
+.live-desk .metrics strong { display:block; font-size:clamp(17px,2vw,26px); color:#125451; font-variant-numeric:tabular-nums; }
+.live-desk #calc-status { font-weight:650; color:#174d50; }
+.live-desk #times,.live-desk .accounts p,.live-desk #fx-source { color:#566c70; font-size:13px; }
+.live-desk .table-wrap { overflow-x:auto; }
+.live-desk td { white-space:normal; min-width:95px; }
+.live-desk pre { max-height:230px; overflow:auto; white-space:pre-wrap; }
+.live-desk details { margin-top:12px; }
+.live-desk [hidden] { display:none !important; }
+@media(max-width:680px) {
+  .live-desk .accounts,.live-desk .metrics {grid-template-columns:1fr;gap:10px}
+  .live-desk .heading {display:block}
+  .live-desk td,.live-desk th {padding:4px;min-width:62px;font-size:12px}
+}

@@ -70,7 +70,7 @@ export function endpointCash(p, h, failureUnit, successUnit, k = '0') {
     expense = frac.times(successUnit).plus(cost);
   const before = total.minus(expense),
     after = before.plus(payout);
-  const gain = after
+  const gain = p.C_ref == null ? null : after
     .minus(dec(p.C_ref))
     .minus(nonnegative(p.contributions ?? '0'))
     .plus(nonnegative(p.withdrawals ?? '0'));
@@ -80,7 +80,7 @@ export function endpointCash(p, h, failureUnit, successUnit, k = '0') {
     before: out(before),
     hlBefore: out(hl.minus(expense)),
     after: out(after),
-    gain: out(gain),
+    gain: gain === null ? null : out(gain),
     payout: out(payout)
   };
 }
@@ -100,7 +100,7 @@ function bounds(p, loss, gain, k) {
   const low = max(0, floor.minus(protect).plus(k).div(loss)),
     cash = hl.minus(reserve).minus(k).div(gain);
   const profit =
-    p.stage === 'funded'
+    p.stage === 'funded' && p.C_ref != null
       ? total
           .plus(payout)
           .minus(dec(p.C_ref))

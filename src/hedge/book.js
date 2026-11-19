@@ -166,7 +166,7 @@ export function balances(s, marks = {}) {
           .map((p) => p.user)
       )
     ),
-    gain: out(total.minus(s.ref).minus(s.roundIn).plus(s.roundOut))
+    gain: s.ref == null ? null : out(total.minus(s.ref).minus(s.roundIn).plus(s.roundOut))
   };
 }
 function postFill(s, p) {

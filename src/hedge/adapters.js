@@ -13,6 +13,7 @@ export const infoTypes = new Set([
   'l2Book',
   'clearinghouseState',
   'activeAssetData',
+  'frontendOpenOrders',
   'userAbstraction',
   'userFees',
   'userFills',
@@ -224,6 +225,7 @@ export async function collectHype({ symbol, user = '', now = Date.now(), request
     sizeDecimals: spec.szDecimals,
     maxLeverage: spec.maxLeverage,
     marginTables: meta[0].marginTables,
+    marginTableId: spec.marginTableId,
     collateralToken: meta[0].collateralToken,
     source: 'api',
     unresolved: ['PF_RULES', 'FX', 'CANDIDATE_MARGIN']

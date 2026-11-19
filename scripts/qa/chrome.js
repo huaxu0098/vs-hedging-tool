@@ -6,7 +6,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
-export async function openTestBrowser({ hedge = false } = {}) {
+export async function openTestBrowser({ hedge = false, current = false } = {}) {
   const locations = [
     process.env.CHROME_BIN,
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -25,7 +25,7 @@ export async function openTestBrowser({ hedge = false } = {}) {
   if (!executable) throw Error('请设置 CHROME_BIN 指向本机 Chrome 或 Chromium。');
   const dir = await mkdtemp(path.join(os.tmpdir(), 'vs-hype-browser-'));
   const root = fileURLToPath(new URL('../../', import.meta.url));
-  const server = spawn(process.execPath, ['scripts/serve.js', ...(hedge ? ['--hedge'] : [])], {
+  const server = spawn(process.execPath, ['scripts/serve.js', ...(current ? ['--hedge'] : hedge ? ['--internal-qa'] : [])], {
     cwd: root,
     env: { ...process.env, PORT: '0' },
     stdio: ['ignore', 'pipe', 'inherit']
@@ -120,7 +120,9 @@ export async function openTestBrowser({ hedge = false } = {}) {
       mobile: false
     });
     await send('Page.navigate', { url });
-    if (hedge) {
+    if (current) {
+      await wait("document.querySelector('#calc-status')?.textContent.length > 0", 15000);
+    } else if (hedge) {
       await wait("document.querySelector('#calc-status')?.textContent.length > 0", 15000);
     } else {
       await wait(

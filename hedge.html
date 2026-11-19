@@ -2,8 +2,8 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>VS × Hype 多品种动态对冲匹配器 · 只读版</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>实时对冲计算 · VS × Hype</title>
     <link rel="stylesheet" href="/hedge.css" />
     <script type="importmap">
       { "imports": { "decimal.js": "/vendor/decimal.mjs" } }
@@ -13,219 +13,180 @@
   <body>
     <header>
       <div class="brand">VS <em>×</em> Hype</div>
-      <nav aria-label="工作区">
-        <a href="#desk">动态匹配</a><a href="#ledger">双账本</a><a href="#replay">行情回放</a
-        ><a href="#feeds">只读接入</a><a href="/?simulation=challenge">默认考核模拟</a>
+      <nav>
+        <a href="#current">当前计算</a><a href="#connections">数据连接</a><a href="#rules">规则设置</a>
       </nav>
-      <span class="readonly">本地只读</span>
+      <span class="readonly">只读计算 · 不自动下单</span>
     </header>
-    <main>
-      <section id="desk">
-        <div class="heading">
-          <div>
-            <h1>多品种动态对冲匹配器</h1>
-            <p id="context"></p>
-          </div>
+    <main id="current" class="live-desk">
+      <div class="heading">
+        <h1>实时对冲计算</h1>
+        <div class="selectors">
           <label
-            >计算模式<select id="mode">
-              <option value="demo">离线模拟</option>
-              <option value="manual">手动快照</option>
-              <option value="live_readonly">实时只读</option>
-              <option value="replay">回放</option>
+            >当前合约<select id="asset">
+              <option>BTC</option>
+              <option>ETH</option>
+              <option>SOL</option>
+              <option value="XAU">黄金 · 待映射</option>
+              <option value="US100">US100 · 待映射</option>
+            </select></label
+          >
+          <label
+            >计算方式<select id="mode">
+              <option value="keepPF">保持现有 PF 仓位</option>
+              <option value="joint">联合搜索两边仓位</option>
             </select></label
           >
         </div>
-        <div id="errors" role="alert"></div>
-        <div class="split">
-          <section class="card">
-            <h2>账户与约束</h2>
-            <div class="form">
-              <label>模拟标的<select id="asset"></select></label
-              ><label
-                >阶段<select id="stage">
-                  <option value="challenge">考核试算</option>
-                  <option value="funded">Funded 试算</option>
-                </select></label
-              >
-              <label>PF 当前标记权益（U）<input id="equity" inputmode="decimal" /></label
-              ><label>Hype 当前权益（U）<input id="hl" inputmode="decimal" /></label
-              ><label>外部已到账（U）<input id="external" inputmode="decimal" /></label
-              ><label>Hype 最低留存（U）<input id="reserve" inputmode="decimal" value="100" /></label
-              ><label>提款参考净值（U）<input id="target" inputmode="decimal" value="10100" /></label
-              ><label
-                >仓位模式<select id="sizing">
-                  <option value="auto">联合搜索</option>
-                  <option value="fixedPF">固定 PF 调 Hype</option>
-                  <option value="fixedHL">固定 Hype 调 PF</option>
-                </select></label
-              >
-            </div>
-            <details>
-              <summary>仓位、费用与规则</summary>
-              <div class="form">
-                <label>PF 名义仓位（U）<input id="pf-size" value="10000" /></label
-                ><label>Hype 固定名义额（U）<input id="hl-size" value="1500" /></label
-                ><label>PF 搜索集合（U，逗号分隔）<input id="sizes" value="5000,10000,15000" /></label
-                ><label>Funded 多参考点（选填）<input id="targets" /></label
-                ><label>本轮最低增益 g（U）<input id="gain" value="0" /></label
-                ><label>预算压力 k（U）<input id="friction" value="0" /></label
-                ><label
-                  >计算模型<select id="model">
-                    <option value="exact">逐笔成交与合法仓位</option>
-                    <option value="budget">连续比例与压力预算</option>
-                  </select></label
-                ><label
-                  >方向<select id="direction">
-                    <option value="both">两个方向</option>
-                    <option value="1">PF 多 / Hype 空</option>
-                    <option value="-1">PF 空 / Hype 多</option>
-                  </select></label
-                ><label
-                  >排序<select id="sort">
-                    <option value="gain">成功端增益最高</option>
-                    <option value="worst">较差终点现金最多</option>
-                    <option value="margin">保证金较低</option>
-                    <option value="buffer">维持保证金余量较大</option>
-                  </select></label
-                ><label
-                  >通过口径<select id="pass-trigger">
-                    <option value="net_settlement">净结算权益</option>
-                    <option value="mark_equity">标记权益</option>
-                  </select></label
-                ><label
-                  >失败口径<select id="failure-trigger">
-                    <option value="net_settlement">净结算权益</option>
-                    <option value="mark_equity">标记权益</option>
-                  </select></label
-                >
-              </div>
-              <label><input id="stress-enable" type="checkbox" /> 启用额外路径压力测试</label>
-              <div class="form">
-                <label>跳空（bp）<input id="jump-bps" value="10" /></label
-                ><label>基差扩大（bp）<input id="basis-bps" value="10" /></label
-                ><label>延迟成交偏移（bp）<input id="delay-bps" value="10" /></label
-                ><label>未来资金费支出（U）<input id="funding-debit" value="1" /></label>
-              </div>
-              <label>本地规则配置（JSON）<textarea id="profile" rows="4"></textarea></label
-              ><button id="save-profile">应用规则新版本</button>
-              <label>线性合约规格（JSON，可另填标的 ID）<textarea id="spec" rows="4"></textarea></label
-              ><button id="save-spec">保存模拟合约</button>
-            </details>
-          </section>
-          <section class="card result">
-            <div class="cap">
-              <h2>对冲比例与现金结果</h2>
-              <span id="calc-status" role="status"></span>
-            </div>
-            <div class="hero">
-              <div><small>预算比例交集</small><strong id="bounds">计算中</strong></div>
-              <div><small>当前候选实际比例</small><strong id="actual">计算中</strong></div>
-            </div>
-            <p id="limits"></p>
-            <div id="legs"></div>
-            <div id="outcomes"></div>
-            <p id="deadline-result"></p>
-            <p id="risk"></p>
-            <details>
-              <summary>约束、淘汰原因及两个方案对比</summary>
-              <label>对比候选<select id="compare"></select></label>
-              <div id="comparison"></div>
-              <div id="rejections"></div>
-              <div id="stress"></div>
-            </details>
-          </section>
+      </div>
+      <section class="card" id="snapshot">
+        <h2>当前账户与持仓</h2>
+        <div class="accounts">
+          <div>
+            <h3>VS / PF</h3>
+            <label
+              >当前标记权益（USDC 等值）<input
+                id="pf-equity"
+                inputmode="decimal"
+                placeholder="录入实际权益" /></label
+            ><label
+              >已成交净数量（多为正，空为负）<input
+                id="pf-qty"
+                inputmode="decimal"
+                placeholder="未知留空，空仓填 0"
+            /></label>
+            <p id="pf-meta"></p>
+          </div>
+          <div>
+            <h3>Hype</h3>
+            <label
+              >当前标记权益（USDC）<input
+                id="hl-equity"
+                inputmode="decimal"
+                placeholder="手工录入或连接公开地址" /></label
+            ><label
+              >已成交净数量（多为正，空为负）<input
+                id="hl-qty"
+                inputmode="decimal"
+                placeholder="未知留空，空仓填 0"
+            /></label>
+            <p id="hl-meta"></p>
+          </div>
+          <div>
+            <h3>计算条件</h3>
+            <label
+              >按此阶段规则计算<select id="stage">
+                <option value="challenge">考核 · 固定失败线</option>
+                <option value="funded">出金 · 首次分成</option>
+              </select></label
+            ><label>失败端要保住的资金 B（U）<input id="B" inputmode="decimal" /></label
+            ><label>成功时 Hype 至少留存 R（U）<input id="R" inputmode="decimal" /></label>
+          </div>
+        </div>
+        <div id="joint-fields" hidden>
+          <label>联合搜索 PF 名义额（U，逗号分隔）<input id="sizes" placeholder="填入要比较的仓位" /></label>
         </div>
       </section>
-      <section id="ledger" class="card">
-        <div class="cap">
-          <h2>双账本与阶段结算</h2>
-          <span id="book-state"></span>
+      <section class="card" aria-labelledby="result-heading">
+        <h2 id="result-heading">持仓比例与本次调整</h2>
+        <p id="calc-status" role="status">等待当前快照</p>
+        <div class="metrics">
+          <div>当前实际 h<strong id="current-h">—</strong></div>
+          <div>资金约束比例范围<strong id="range">—</strong></div>
+          <div>候选目标 h<strong id="target-h">—</strong></div>
         </div>
-        <div id="accounts"></div>
-        <p id="clock"></p>
-        <div class="buttons">
-          <button id="demo-stage">载入阶段演示副本</button><button id="adopt">确认试算余额到本地账本</button
-          ><button id="simulate" class="primary">按候选模拟差额成交</button
-          ><button id="close">模拟平仓</button><button id="settle">核对触线 / 到期按当前报价退出</button
-          ><button id="claim">模拟全额利润分配</button><button id="receive">模拟到账</button
-          ><select id="destination" aria-label="到账位置">
-            <option value="external">到账外部账户</option>
-            <option value="hl">到账 Hype</option></select
-          ><button id="transfer-out">模拟从外部转出分成</button
-          ><button id="transfer-in">模拟转入 Hype 到账</button><button id="new-round">建立下一轮基准</button>
+        <p id="bounds-detail"></p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>平台</th>
+                <th>当前已持有</th>
+                <th>目标总量</th>
+                <th>目标 − 已持有</th>
+                <th>考虑挂单后尚需调整</th>
+              </tr>
+            </thead>
+            <tbody id="legs"></tbody>
+          </table>
         </div>
-        <details>
-          <summary>截止设置、流水与本地备份</summary>
+        <p id="order-detail"></p>
+        <p id="previous"></p>
+        <p id="reason"></p>
+        <p id="times"></p>
+      </section>
+      <section class="card">
+        <h2>按当前规则推演的现金</h2>
+        <dl id="cash-results"></dl>
+        <p id="rule-events"></p>
+      </section>
+      <section class="card" id="connections">
+        <h2>实时行情与快照来源</h2>
+        <p id="quotes"></p>
+        <p id="fx-source"></p>
+        <p id="sync-status"></p>
+        <div class="form">
           <label
-            >新考核明确截止（UTC ISO，可空）<input id="deadline" placeholder="默认开始后 48 小时" /></label
-          ><button id="rebuy">模拟重新购买考核</button><button id="save-json">导出当前备份 JSON</button
-          ><button id="save-csv">导出账本 CSV</button
-          ><label>恢复本地备份<input id="restore" type="file" accept=".json" /></label>
-          <p>
-            <a href="/fixtures/hedge-ledger.csv" download>流水样例</a> ·
-            <a href="/fixtures/hedge-ledger.json" download>备份样例</a> ·
-            <a href="/config/hedge-example.json" download>规则与合约配置样例</a>
-          </p>
-          <div id="history"></div>
-          <div id="curves"></div>
+            >Hype 账户来源<select id="hl-source">
+              <option value="manual">手工当前快照</option>
+              <option value="api">公开地址 · 主网只读</option>
+            </select></label
+          ><label
+            >Hype 主账户或子账户公开地址<input
+              id="wallet"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="0x…"
+          /></label>
+        </div>
+        <div class="buttons"><button id="sync">立即刷新行情与账户</button></div>
+        <details>
+          <summary>粘贴 VS 页面或导入当前快照</summary>
+          <label
+            >来源<select id="paste-kind">
+              <option value="vs">VS 页面文本 / JSON（权益单位 USDC）</option>
+              <option value="both">双边当前快照 JSON</option>
+            </select></label
+          ><label>当前数据<textarea id="paste" rows="4"></textarea></label
+          ><small
+            >双边 JSON 含 asset、pf 和 hl。每边可填 equity、qty、anchor、at、orders。qty
+            为带符号净数量，orders 为未成交单数组，每单含带符号的剩余 qty；无挂单填 []。</small
+          >
+          <div class="buttons">
+            <button id="parse">识别并预览</button><button id="confirm" disabled>确认更新当前快照</button>
+          </div>
+          <pre id="preview"></pre>
+        </details>
+        <details>
+          <summary>挂单、保证金与快照标记价</summary>
+          <div class="form" id="leg-settings"></div>
+        </details>
+        <details>
+          <summary>临时使用手工真实盘口</summary>
+          <label
+            >行情来源<select id="quote-source">
+              <option value="api">双边公开行情</option>
+              <option value="manual">手工确认的双边盘口</option>
+            </select></label
+          >
+          <label
+            >两边盘口 JSON<textarea
+              id="manual-quote"
+              rows="3"
+              placeholder="每边包含 mark、asOf、levels；levels 按买卖各列 [价格, 数量] 档位"
+            ></textarea></label
+          ><button id="confirm-quote">确认本次盘口</button>
+          <p id="manual-status"></p>
         </details>
       </section>
-      <section class="card" id="replay">
-        <h2>行情回放</h2>
-        <div class="buttons">
-          <label>离线路径<select id="scenario"></select></label><button id="load-path">载入回放</button
-          ><button id="step">单步</button><button id="play">播放</button><button id="pause">暂停</button
-          ><label>按所选场景与首根开盘价导入 CSV<input id="csv" type="file" accept=".csv" /></label>
-        </div>
-        <label>回放位置<input type="range" min="0" max="0" value="0" id="seek" /></label
-        ><output id="replay-result"></output
-        ><a download href="/fixtures/hedge-candles.csv">下载多品种 K 线样例</a>
-      </section>
-      <section class="card" id="feeds">
-        <h2>只读数据接入</h2>
-        <div class="split">
-          <div>
-            <h3>Vest 手动快照</h3>
-            <label
-              >报价与余额币种<select id="currency">
-                <option>USD</option>
-                <option>USDC</option>
-                <option>USDT</option>
-                <option>EUR</option>
-                <option>U</option>
-              </select></label
-            ><label>页面文字或结构化 JSON<textarea id="vs-text" rows="4"></textarea></label
-            ><button id="parse">解析并预览</button><button id="confirm-vs" disabled>确认 VS 快照</button
-            ><output id="vs-preview"></output>
-          </div>
-          <div>
-            <h3>Hyperliquid 主网</h3>
-            <label>完整合约代码<input id="symbol" placeholder="例如 BTC 或 dex:合约" /></label
-            ><label>公开钱包地址（选填）<input id="wallet" autocomplete="off" placeholder="0x…" /></label>
-            <div class="buttons">
-              <button id="live">只读查询</button><button id="stream">订阅 WS</button
-              ><button id="disconnect">断开</button>
-            </div>
-            <div class="form">
-              <label>报价过期（秒）<input id="quote-age" value="5" /></label
-              ><label>账户过期（秒）<input id="account-age" value="30" /></label>
-            </div>
-            <details>
-              <summary>真实账户预算口径</summary>
-              <label
-                >本轮已确认输入（JSON，referenceEvent 为基准事件）<textarea
-                  id="live-context"
-                  rows="5"
-                  placeholder='{"stage":"funded","vsAccountId":"与VS快照accountId一致","vsSymbol":"VS代码","hlSymbol":"完整Hype代码","vsCurrency":"报价币种","referenceEvent":"本轮事件ID","ref":"实际值","external":"实际值","inTransit":"实际值","vsFx":"实际汇率","hlFx":"实际汇率","token":"实际币种","fxAsOf":"带时区时间","fxUntil":"有效期","challengeDeadlineAt":"考核截止"}'
-                ></textarea></label
-              ><button id="confirm-live">确认本轮参考基准</button>
-            </details>
-            <p id="connection"></p>
-            <output id="api-result"></output>
-          </div>
-        </div>
+      <section class="card" id="rules">
+        <h2>账户规则与测算口径</h2>
+        <p>以下为用户规则，可按当前账户修改。所有资金按 USDC 等值（U）核算。</p>
+        <div class="form" id="rule-fields"></div>
+        <p>
+          现金范围按当前权益计算。条件仓位按双边盘口、差额成交费及数量步长核算，假设到达边界期间标的同步变动；未来基差、滑点变化和资金费待核实。
+        </p>
       </section>
     </main>
-    <footer>VS × Hype · 本地模拟与只读账户观察</footer>
   </body>
 </html>
