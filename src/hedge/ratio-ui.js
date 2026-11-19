@@ -624,8 +624,10 @@ function renderPlans(scan) {
     cell(tr, r.failStop || settlementAmount(r.fail), r.failStop ? '清算结余未知' : '本金 ' + signed(r.failDelta),
       r.failStop ? '' : 'Hype ' + settlementAmount(r.failHype));
     cell(tr, r.passStop || settlementAmount(r.success), r.passStop ? '清算结余未知' : '个人较本金 ' + signed(r.successDelta));
-    const risk = !r.physical ? (r.failStop || r.passStop || r.reason) : r.profitable ? '双路径净盈利' :
-      r.both ? '失败回本 · 成功达留存' : r.covers ? '成功留存不足' : r.survives ? '失败回收不足' : '两端均不足';
+    const protection = r.both ? '失败回本 · 成功达留存' : r.covers ? '成功留存不足' :
+      r.survives ? '失败回收不足' : '两端均不足';
+    const risk = r.physical ? protection + (r.profitable ? ' · 双路径净盈利' : '') :
+      (r.failStop || r.passStop || r.reason);
     const cost = k => [r.failCost, r.passCost].map(v => v ? fmt(v[k], 4) : '未知').join(' / ');
     cell(tr, risk, (r.j ? '保证金 ' + pct(r.marginRate, 1) + ' · 强平距 ' + (r.distanceRate == null ? '无已验证交点' : pct(r.distanceRate, 2)) : 'Hype 空仓'), '手续费 ' + cost('fees') + ' U', '深度滑点 ' + cost('slippage') + ' U');
     const detail = riskBody.insertRow();

@@ -82,7 +82,7 @@ export function recordFromInspection(ctx, row) {
     passCost: row.passStop ? null : costs(row.paths?.pass, row, 'pass', ctx.market.hl),
     initial: row.initial, marginRate: row.imRate, liquidation: row.liquidation, distance: row.buffer, distanceRate: row.bufferRate,
     surplus: row.surplus, physical: row.physical, covers: row.covers, survives: row.survives,
-    both: row.both, profitable: row.profitable,
+    both: row.both, profitable: ctx.params.externalPriced !== false && row.profitable,
     reason: row.physical ? null : (row.reason?.label ?? row.reason?.code ?? '途经保证金约束')
   };
 }

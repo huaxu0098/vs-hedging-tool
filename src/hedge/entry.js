@@ -462,10 +462,14 @@ function currentFrame(a, m, t) {
   }
 
   const trigger = !lastGood ? '首次扫描' : lastGood.context !== context ? '账户或规则已变更' : '行情更新';
-  const waiting = (state, reason) => ({
-    ...base, retained, frameState:state, trigger, refreshPending:state === 'updating',
-    issues: [reason], priorError:state === 'failed' ? reason : null
-  });
+  const waiting = (state, reason) => {
+    // A newer quote may arrive before every worker delivery. Publish accepted
+    // frames to both views while keeping rules/account revisions isolated.
+    if (state === 'updating' && lastGood?.context === context)
+      return { ...retained, observed:base, retained, frameState:state, trigger, refreshPending:true };
+    return { ...base, retained, frameState:state, trigger, refreshPending:state === 'updating',
+      issues:[reason], priorError:state === 'failed' ? reason : null };
+  };
   if (failure?.context === context && performance.now() < failure.retryAt) return waiting('failed', failure.message);
   if (!running) {
     const delay = lastGood?.context === context && !failure ?
@@ -896,6 +900,7 @@ function renderConditions(result, a, m, plan) {
   }
   updateDeadline();
 }
+let lastAdvancedFrame;
 function render() {
   const live = market();
   let m = live;
@@ -935,9 +940,11 @@ function render() {
   renderScan(retained ? {...result, retained} : result, live, r, plan, status);
   if ($('vest-spec-details').open) showVestSpec(live);
   put('advanced-frame', $('scan-status').textContent);
-  if (result.refreshPending) $('trace-download').disabled = true;
+  if (result.refreshPending && !result.ratioScan) $('trace-download').disabled = true;
   if (!$('desk-details').open) return;
-  if (result.retained && result.frameState === 'updating') return;
+  if (result.retained && result.frameState === 'updating' &&
+      (!result.ratioScan || lastAdvancedFrame === result.trace?.id)) return;
+  lastAdvancedFrame = result.trace?.id;
   renderConditions(result, a, m, plan);
   const leverage = c?.candidateLeverage;
   const configured =

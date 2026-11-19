@@ -40,7 +40,18 @@ try {
   assert.equal(await val('funding-view'), 'plan');
   assert.equal(await run("document.querySelectorAll('#planLeverage,#hl-leverage').length"), 0);
   assert.equal(await run("document.getElementById('plan-cross-flat').checked"), true);
-  const freshFrame = "document.querySelector('#scan-desk').dataset.state === 'ready'";
+  await run("document.getElementById('trace-inputs').parentElement.open=true");
+  // Market ticks can continuously overlap a solve. Check the published frame's
+  // actual rules instead of requiring an idle worker between two price ticks.
+  const freshFrame = `(() => {
+    const el=id=>document.getElementById(id), desk=el('scan-desk');
+    const raw=el('trace-inputs').textContent;
+    if(!raw || !desk.dataset.resultId || !el('trace-id').textContent.endsWith(desk.dataset.resultId)) return false;
+    const rules=JSON.parse(raw).rules;
+    return ['ready','updating'].includes(desk.dataset.state) &&
+      ['mode','stage','R_success','jumpBps','delayBps','adverseBps','fundingDebit','external','movePct','hlUtil']
+        .every(id=>String(rules[id]??'')===el(id).value);
+  })()`;
   const hasPlan = freshFrame + " && document.querySelector('#best-two').textContent.includes('第二优 PF')";
   await wait(hasPlan, 40000);
   assert.match(await text('#plan-basis'), /500.00 U.*91.00 U.*409.00 U/);
@@ -499,8 +510,6 @@ try {
   await wait("document.getElementById('bridge-state').textContent.includes('已撤销')");
   console.log('本机桥接', received.status, await text('#pf-meta'));
   await send('Page.navigate', { url: desk + '/dev/replay' });
-  await wait("!!document.getElementById('desk-details')");
-  await run("document.getElementById('desk-details').open=true");
   await wait("document.getElementById('event')?.textContent.includes('START')");
   await click('#step');
   await wait("document.getElementById('event').textContent.includes('步骤 1')");
