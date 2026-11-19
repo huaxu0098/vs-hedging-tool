@@ -5,9 +5,11 @@ const b = await openTestBrowser({ current: true });
 const { send, run, wait, click, text } = b;
 const input = (id, v) => b.set('#' + id, v, 'input');
 const ready =
-  "document.querySelector('#plan-tradeoff').textContent.includes('现金缓冲变化') && document.querySelector('#trace-id').textContent.includes('AUTO-0.18')";
+  "document.querySelector('#plan-tradeoff').textContent.includes('现金缓冲变化') && document.querySelector('#trace-id').textContent.includes('AUTO-0.21')";
 try {
   await send('Page.navigate', { url: (process.env.CURRENT_URL ?? b.url) + '/' });
+  await wait("!!document.getElementById('desk-details')");
+  await run("document.getElementById('desk-details').open=true");
   await wait("typeof document.querySelector('#plan-cross-flat')?.onchange === 'function'");
   assert.equal(await run("document.getElementById('plan-cross-flat').checked"), true);
   await wait(ready, 45000);

@@ -220,6 +220,7 @@ export async function collectHype({ symbol, user = '', now = Date.now(), request
   const result = {
     ...scope,
     quote: decodeWS({ channel: 'l2Book', data: book }, scope),
+    assetId: dex ? null : i,
     mark: norm(ctx.markPx),
     oracle: norm(ctx.oraclePx),
     funding: norm(ctx.funding),

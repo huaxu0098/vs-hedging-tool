@@ -500,10 +500,8 @@ label input[type='checkbox'] {
 #desk-details>summary {padding:12px 0;font-weight:650;cursor:pointer}
 #scan-status,#scan-results p {margin:4px 0}
 @media(max-width:700px){.scan-quotes,.scan-sets{gap:5px}.scan-quotes>div,.scan-sets article{padding:8px}.scan-sets strong,.scan-quotes strong{font-size:16px}#scan-results{padding:10px}}
-.scan-stale .scan-sets,.scan-stale #scan-results,.scan-stale #scan-intersection {opacity:.55}
 #scan-focus {padding:10px 16px;border-left:3px solid #31846d;background:#e9f4ef}
 #scan-focus p {margin:2px 0}
-.scan-stale #scan-focus {opacity:.55}
 
 .scan-sets {grid-template-columns:repeat(4,minmax(0,1fr))}
 .scan-sets strong {font-size:clamp(15px,1.45vw,23px);font-variant-numeric:tabular-nums}
@@ -533,3 +531,36 @@ label input[type='checkbox'] {
 #scan-buckets .representative-range th {border-left:3px solid #31846d}
 
 #fx-source { white-space: pre-line; overflow-wrap: anywhere; }
+
+.live-desk .heading { margin: 0 0 10px; gap: 12px }
+.live-desk h1 { font-size: clamp(20px,2vw,28px); margin: 0 }
+#scan-source { margin-right: auto; font-size: 13px; color: var(--muted) }
+#scan-desk { gap: 8px; margin: 8px 0 6px }
+.scan-quotes, .scan-sets { gap: 6px }
+.scan-quotes>div, .scan-sets article { padding: 7px 12px; border-radius: 4px }
+.scan-quotes strong, .scan-sets strong { line-height: 1.35; font-variant-numeric: tabular-nums }
+.scan-quotes small { display: block; font-size: 12px; min-height: 1.55em }
+#scan-desk h2, #scan-desk b { font-size: 14px }
+#scan-focus { padding: 6px 12px; border: 1px solid var(--line); border-radius: 4px; background: #fff }
+#scan-focus .scan-paths { grid-template-columns: 1fr 1fr; margin: 0; padding: 0; gap: 12px }
+#scan-focus .scan-paths article { grid-column:auto; padding: 0 }
+.scan-rep { display:flex; gap: 8px; flex-wrap:wrap; align-items:baseline; border-top:1px solid var(--line); margin-top:6px; padding-top:4px; font-size:13px }
+#scan-status { min-height:1.55em; margin:0; font-size:12px; font-variant-numeric:tabular-nums }
+#scan-desk[data-state=paused] #scan-status, #scan-desk[data-state=failed] #scan-status { color:#88400c; font-weight:650 }
+#scan-results { padding:8px 12px; border-radius:4px }
+#scan-results .table-wrap { margin:4px 0 0 }
+#scan-results th, #scan-results td { padding:4px 8px; font-size:12px; line-height:1.4 }
+#scan-results table { table-layout:fixed; min-width:700px }
+#scan-results thead th:first-child {width:18%}
+#scan-results table thead th { white-space:normal }
+#desk-details { margin-top:6px }
+@media(max-width:700px){
+  .live-desk .heading { flex-wrap:wrap; gap:4px 8px }
+  .scan-quotes {grid-template-columns: 1fr 1fr}
+  .scan-quotes>div:last-child {grid-column:1/-1;display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
+  .scan-quotes>div,.scan-sets article {padding:6px 8px}
+  #scan-results { min-width:0 }
+}
+
+.scan-quotes .price-line strong {display:inline-block}
+.settle-tag {font-size:12px;color:var(--muted);white-space:nowrap}

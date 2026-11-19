@@ -47,6 +47,7 @@ export function currencyMapping(data, rates, now, ttl, alertBps = '50') {
       if (!c || !known.has(c.quoteAsset) || !known.has(c.settleAsset))
         throw Error('QUOTE_CURRENCY_UNVERIFIED · ' + venue + ' 报价币或结算币未核实');
       if (
+        (c.productType && c.productType !== 'perpetual') ||
         (c.payoffType && c.payoffType !== 'linear') ||
         !c.baseAsset ||
         c.baseAsset !== data.asset ||
@@ -59,6 +60,8 @@ export function currencyMapping(data, rates, now, ttl, alertBps = '50') {
       )
         throw Error('CONTRACT_UNVERIFIED · ' + venue + ' 标的、数量单位、乘数或每点结算规则未核实');
     }
+    if (hl.standardCryptoPerp && (hl.quoteAsset !== 'USDT' || hl.settleAsset !== 'USDC' || hl.settlement !== 'quanto-1:1'))
+      throw Error('CONTRACT_METADATA_UNVERIFIED · 标准永续合约计价或结算规则冲突');
     for (const asset of new Set([pf.quoteAsset, hl.quoteAsset, pf.settleAsset, hl.settleAsset, 'USDC'])) {
       if (asset === 'USD') continue;
       try {
@@ -73,7 +76,10 @@ export function currencyMapping(data, rates, now, ttl, alertBps = '50') {
     }
     const rate = (from, to) => conversionBook(from, to, rates, now, ttl);
     result.hypeToVest = rate(hl.quoteAsset, pf.quoteAsset);
-    result.vestMoveToHype = rate(pf.quoteAsset, hl.quoteAsset);
+    // The BTC stress path moves both native prices by the same number of points.
+    // The contract pays its native point PnL in USDC. Spot FX prices the reference
+    // spread only; it cannot rescale this price path or the resulting cash flows.
+    result.nativeMovePerVestPoint = hl.settlement === 'quanto-1:1' ? '1' : rate(pf.quoteAsset, hl.quoteAsset).mid;
     result.legs = {};
     for (const [side, c] of [
       ['pf', pf],
@@ -87,7 +93,7 @@ export function currencyMapping(data, rates, now, ttl, alertBps = '50') {
     }
     result.ok = true;
   } catch (e) {
-    result.error = /^(QUOTE_CURRENCY_UNVERIFIED|CONTRACT_UNVERIFIED|FX_STALE|FX_UNVERIFIED)/.test(e.message)
+    result.error = /^(QUOTE_CURRENCY_UNVERIFIED|CONTRACT_UNVERIFIED|CONTRACT_METADATA_UNVERIFIED|FX_STALE|FX_UNVERIFIED)/.test(e.message)
       ? e.message
       : 'FX_UNVERIFIED · 币种路径、汇率或合约数值无效';
   }

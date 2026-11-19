@@ -13,44 +13,39 @@
   <body>
     <header>
       <div class="brand">VS <em>×</em> Hyperliquid</div>
-      <nav>
-        <a href="#current">当前计算</a><a href="#connections">数据连接</a><a href="#rules">规则设置</a>
-      </nav>
       <span class="readonly">只读计算 · 不自动下单</span>
     </header>
     <main id="current" class="live-desk">
       <div class="heading">
-        <h1>实时对冲比例扫描</h1>
+        <h1>实时对冲比例扫描</h1><span id="scan-source"></span>
         <button type="button" id="scan-config">账户与资金规则</button>
 
       </div>
-      <div id="funding-banner" class="funding-banner"></div>
+
       <section id="scan-desk" aria-label="实时比例扫描">
-        <div class="scan-quotes"><div>VS 标记价 <span id="scan-pf-unit"></span><strong id="scan-pf-price">—</strong><small id="scan-pf-quote"></small></div><div>Hyperliquid 标记价 <span id="scan-hl-unit"></span><strong id="scan-hl-price">—</strong><small id="scan-hl-quote"></small></div><div>统一报价币价差 · Hype − VS<strong id="scan-basis">—</strong><small id="scan-clock"></small></div></div>
-        <p id="scan-capital"></p>
+        <div class="scan-quotes"><div><b id="scan-pf-product">Vest 永续</b> · Mark <span id="scan-pf-unit"></span><div class="price-line"><strong id="scan-pf-price">—</strong> <span class="settle-tag" id="scan-pf-settle"></span></div><small id="scan-pf-quote"></small></div><div><b id="scan-hl-product">Hyperliquid 永续</b> · Mark <span id="scan-hl-unit"></span><div class="price-line"><strong id="scan-hl-price">—</strong> <span class="settle-tag" id="scan-hl-settle"></span></div><small id="scan-hl-quote"></small></div><div>参考价差 · Hype − Vest<strong id="scan-basis">—</strong><small id="scan-clock"></small></div></div>
+
+        <p id="scan-status" role="status"></p>
         <div class="scan-sets">
           <article><h2>失败端本金回收区间</h2><strong id="scan-protect">—</strong><small id="scan-protect-count"></small></article>
           <article><h2>成功端最低留存区间</h2><strong id="scan-survive">—</strong><small id="scan-survive-count"></small></article>
           <article><h2>失败回本 + 成功端最低留存交集</h2><strong id="scan-both">—</strong><small id="scan-both-count"></small></article>
           <article id="profit-panel"><h2>个人净盈利区间</h2><strong id="scan-profit">—</strong><small id="scan-profit-count"></small></article>
         </div>
-        <div id="scan-focus" hidden><h2 id="scan-representative"></h2><p id="scan-position"></p>
+        <div id="scan-focus" hidden>
           <div id="scan-cash" class="scan-paths">
-            <article><h2>若 VS 先失败 · 个人回收</h2><strong id="scan-fail-cash">—</strong><small id="scan-fail-net"></small></article>
-            <article><h2 id="scan-pass-title">若 VS 先通过 · 个人剩余</h2><strong id="scan-pass-cash">—</strong><small id="scan-pass-net"></small></article>
-            <article><h2>两日截止</h2><strong id="scan-deadline">到期结果未知</strong><small id="scan-deadline-note"></small></article>
-          </div><p id="scan-risk"></p>
-        </div><p id="scan-funded"></p><p id="scan-status" role="status"></p>
-        <div id="scan-results" hidden>
-          <h2>四类区间的仓位、现金与风险范围</h2>
-          <p id="scan-intersection"></p>
-          <div class="table-wrap"><table><thead id="range-columns"></thead><tbody id="scan-rows"></tbody></table></div>
-          <h2>按比例分段</h2><p>数量为各合约原生下单量的绝对值。每组方向与双边数量分别计数。各列给出该段内通过保证金和清算检查的最小值与最大值，各列极值可能来自不同仓位。</p>
-          <div class="table-wrap"><table><thead id="bin-columns"></thead><tbody id="scan-buckets"></tbody></table></div>
-          <details id="scan-exclusions"><summary>查看各段未达到两端约束的数量</summary><div id="scan-risk-counts"></div></details>
+            <article><h2>若 VS 失败 · 预计回收</h2><strong id="scan-fail-cash">—</strong><small id="scan-fail-summary"></small></article>
+            <article><h2 id="scan-pass-title">若 VS 通过 · 预计剩余</h2><strong id="scan-pass-cash">—</strong><small id="scan-pass-summary"></small></article>
+          </div>
+          <div class="scan-rep"><b id="scan-representative"></b><span id="scan-position"></span></div>
         </div>
+        <section id="scan-results" hidden>
+          <h2>各比例下的仓位与资金范围</h2>
+          <div class="table-wrap"><table><thead id="bin-columns"></thead><tbody id="scan-buckets"></tbody></table></div>
+        </section>
       </section>
       <details id="desk-details"><summary>高级详情 · 账户、资金规则与数据连接</summary>
+        <small id="advanced-frame"></small>
         <div class="selectors">
           <label
             >资金来源<select id="funding-view">
@@ -60,9 +55,9 @@
           >
           <label
             >当前合约<select id="asset">
-              <option>BTC</option>
-              <option>ETH</option>
-              <option>SOL</option>
+              <option value="BTC">BTC 永续</option>
+              <option value="ETH">ETH 永续</option>
+              <option value="SOL">SOL 永续</option>
               <option value="XAU">黄金 · 待映射</option>
               <option value="US100">US100 · 待映射</option>
             </select></label
@@ -75,6 +70,15 @@
             </select></label
           >
         </div>
+      <div id="funding-banner" class="funding-banner"></div>
+      <p id="scan-capital"></p><p id="scan-intersection"></p>
+      <p id="scan-fail-net"></p><p id="scan-pass-net"></p><p id="scan-risk"></p>
+      <p><strong id="scan-deadline"></strong> <span id="scan-deadline-note"></span></p><p id="scan-funded"></p>
+      <p id="scan-runtime"></p>
+      <details><summary>四类区间的完整统计与费用</summary>
+        <div class="table-wrap"><table><thead id="range-columns"></thead><tbody id="scan-rows"></tbody></table></div>
+        <details id="scan-exclusions"><summary>各段未达到两端约束的数量</summary><div id="scan-risk-counts"></div></details>
+      </details>
       <details id="scan-detail"><summary>自动代表方案的价格路径、费用流水与清算依据</summary><pre id="scan-audit"></pre></details>
 
       <section class="card" id="plan-settings">
@@ -435,8 +439,8 @@
           现金范围按当前权益计算。条件仓位按双边盘口、差额成交费及数量步长核算，假设到达边界期间标的同步变动；未来基差、滑点变化和资金费待核实。
         </p>
       </section>
-      </details>
       <footer><a href="/dev/replay">开发测试 · 行情回放</a></footer>
+      </details>
     </main>
   </body>
 </html>

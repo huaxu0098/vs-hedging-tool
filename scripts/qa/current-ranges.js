@@ -57,7 +57,7 @@ try {
   assert.ok(await run("document.getElementById('profit-panel').classList.contains('no-profit')"));
   assert.ok(
     await run(
-      "document.querySelectorAll('#scan-buckets .representative-range').length===1 && document.querySelector('#scan-buckets .representative-range').textContent.includes('含代表方案')"
+      "document.querySelectorAll('#scan-buckets .representative-range').length===1 && document.querySelector('#scan-buckets .representative-range th').title.includes('含代表方案')"
     )
   );
   assert.match(await text('#scan-funded'), /当前阶段不适用/);
@@ -67,6 +67,8 @@ try {
     /假设 PF 自身净结算达到 12000.00 U.*满足 100.00 U 最低留存.*尚差/
   );
   assert.match(await text('#scan-intersection'), /500.00 U.*100.00 U/);
+  await run("document.getElementById('desk-details').open=true");
+  await ready("document.getElementById('trace-id').textContent.includes('AUTO-0.21')");
   await record('AUTOSEL01—AUTOSEL07 · 首次打开即自动展示两端与四个区间');
   const captured =
     await run(`(()=>{const el=id=>document.getElementById(id), doc=el('trace-inputs').parentElement;doc.open=true;doc.ontoggle();
@@ -146,6 +148,7 @@ try {
     const shot = await send('Page.captureScreenshot', { format: 'png' });
     await writeFile(process.env.RANGE_CAPTURE, Buffer.from(shot.data, 'base64'));
   }
+  await run("document.getElementById('desk-details').open=true");
   const prior = await text('#trace-id');
   await ready("document.querySelector('#trace-id').textContent!==" + JSON.stringify(prior));
   await record('PATH06 · 下一帧主网行情');
@@ -174,7 +177,7 @@ try {
  window.timeoutSeen=false;new MutationObserver(()=>{if(document.getElementById('scan-status').textContent.includes('超过 10 秒'))window.timeoutSeen=true}).observe(document.getElementById('scan-status'),{subtree:true,childList:true,characterData:true});})()`);
   await set('#R_free', '5', 'input');
   await wait(
-    "document.getElementById('scan-status').textContent.includes('重算') && document.getElementById('scan-status').textContent.includes('上次完成')",
+    "document.getElementById('scan-status').textContent.includes('更新中') && document.getElementById('scan-status').textContent.includes('上次完成')",
     1000
   );
   await wait('window.timeoutSeen', 18000);

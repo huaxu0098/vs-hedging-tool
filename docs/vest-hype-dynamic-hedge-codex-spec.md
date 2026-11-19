@@ -1226,6 +1226,141 @@ Hyperliquid 交易对为 **BTC-USDC**。Hype 标记价是 USDC/BTC 报价，不�
 | FX09 | 同名BTC但合约规格不同 | 根据乘数、数量单位和结算币转换；不兼容则阻断 |
 | FX10 | 截图价格复算 | 对给定VS/Hype价格与明确FX方向，显示中间步骤，不能出现无法解释的-84.494 |
 
+## 0 20 本轮修复：页面稳定渲染、极简主界面、明确选择Perp/Spot及币种语义
+
+### 必须先确认交易产品
+
+当前页面从 Hyperliquid `metaAndAssetCtxs` 读取标准 BTC perpetual。Hyperliquid 官方合约规格说明，标准 BTC/ETH 等主流 perp 是 USDT-denominated、USDC-margined；官方特别说明不将 USDC/USDT FX 应用于该合约 PnL（quanto 机制）。因此页面当前“价格USDT、抵押/结算USDC”可能是标准 BTC perp 的正确描述，而不是简单的错误读取。官方规格：https://hyperliquid.gitbook.io/hyperliquid-docs/trading/contract-specifications
+用户口头说 BTC-USDC，可能指USDC抵押，也可能指BTC/USDC现货。必须在产品层区分：
+
+- `BTC Perpetual (USDT计价 / USDC抵押与结算)`：使用perp metaAndAssetCtxs、perp盘口、quanto PnL模型。
+
+- `BTC/USDC Spot (USDC计价 / 现货)`：使用spotMeta、spot盘口和现货PnL，不得套用perp杠杆/强平模型。
+不得只把页面label从USDT改成USDC。必须由用户确认交易品种并按对应接口与公式计算。
+
+### Perp与Spot的计算边界
+
+- 标准BTC perp的USDT价格用于合约价格参考，但PnL按官方quanto规则计算；不得将USDC/USDT FX因子机械乘入HL perp PnL。
+
+- FX仅用于统一展示跨市场参考价格/基差及稳定币脱锚风险；PnL敏感度独立按合约规格实现。
+
+- 若Vest BTC报价USDC，HL BTC perp价格USDT，参考价基差可通过新鲜USD_per_USDC、USD_per_USDT推导USDC_per_USDT，但必须与HL PnL映射分开。
+
+- 若切换BTC/USDC Spot，使用现货币种和数量模型，不显示永续保证金、杠杆、强平价字段。
+
+### UI闪烁根因与修复
+
+当前每次行情刷新触发“本帧重算”，结果卡全部清空为“等待有效数据”。禁止这种全页面空白重渲染。
+
+1. 将实时行情状态与求解结果状态分离；报价更新只更新价格区域，不清空上一次完整计算结果。
+
+2. 新快照进入后台求解，UI显示轻量“更新中”，继续展示上次完整结果，并标注“结果对应上次快照时间/版本”。
+
+3. 新求解成功后，将价格、区间、仓位、资金结果作为同一snapshot原子替换；不得部分字段先更新造成混帧。
+
+4. 资金规则/阶段/合约规格/账户快照变化：立即将旧结果标记stale并触发完整求解。
+
+5. 高频行情变化：使用debounce/throttle、价格/基差变动阈值及候选局部重估；不因每个微小tick全量扫描约10亿组合。
+
+6. 相同snapshot hash不重复求解。每次任务带requestId/snapshotVersion，旧任务完成后若版本落后必须丢弃。
+
+7. 求解器后台运行（Worker或等效后台任务）；不得阻塞主线程、反复卸载组件或重建全页DOM。
+
+8. 显示实际开始时间、完成时间、耗时、触发原因、lastGoodSnapshot；超过超时阈值显示“求解超时/保留上次结果”，不得无限空白。
+
+9. 如果数据失效，停止给出新的调整建议，但保留最后完整结果并明显标注过期原因。
+
+### 首页极简重构
+
+首页只保留一个屏幕内核心信息：
+
+- 顶部：VS价格、Hype产品类型与价格、统一口径参考价差/基差、报价更新时间。
+
+- 资金结果：失败后预计回收金额及相对本金盈亏；通过后Hype平仓剩余及相对本金缺口；当前是否存在净盈利区间。
+
+- 四个比例区间：失败本金保护、成功端最低留存、双路径保护交集、个人净盈利。
+
+- 比例分段表：h区间、PF仓位数量/名义额范围、Hype仓位数量/名义额范围、失败回收范围、成功剩余范围、风险等级。
+
+- 自动代表候选仅作次级小摘要，不显示“已选比例”。
+
+- 不出现路径选择、比例必填、复杂风险偏好控件或庞大杠杆表。
+全部资金公式、逐笔账本、杠杆档位、清算推导、原始盘口、API来源、搜索日志收进一个默认折叠的“高级详情”。
+
+### 本轮验收
+
+| 编号 | 场景 | 期望 |
+|---|---|---|
+| PRODUCT01 | 用户选择标准BTC perp | 明确显示USDT计价、USDC抵押/结算，PnL按官方quanto规则 |
+| PRODUCT02 | 用户选择BTC/USDC spot | 使用spotMeta/spot book和现货PnL，不套perp保证金模型 |
+| PRODUCT03 | perp与spot切换 | 数据接口、币种、PnL、保证金和风险模型整体切换，不能混缓存 |
+| PRODUCT04 | Vest BTC-USDC与HL BTC perp比较 | 参考基差用FX归一化；HL PnL敏感度不重复乘FX |
+| UI08 | 高频行情更新 | 只刷新报价，结果不闪白、不清空 |
+| UI09 | 后台重算中 | 显示上次完整结果及其快照时间，轻量显示更新中 |
+| UI10 | 新求解完成 | 全部结果同一版本原子替换 |
+| UI11 | 连续旧任务晚完成 | 丢弃旧requestId，不能覆盖新结果 |
+| UI12 | 小幅报价tick | 局部重估或节流，不触发十亿候选全量扫描 |
+| UI13 | 求解超时/失败 | 保留lastGoodSnapshot并显示超时原因 |
+| UI14 | 极简首页 | 主要信息一屏可见；长详情默认折叠 |
+
+## 0 21 用户确认Hyperliquid产品：app.hyperliquid.xyz/trade/BTC（标准BTC Perp）
+
+用户提供的实际交易页面为 `https://app.hyperliquid.xyz/trade/BTC`。按该页面的BTC永续产品及Hyperliquid官方合约规格，应按**标准BTC Perpetual**实现，而不是BTC/USDC现货。
+
+### 最终产品确认
+
+- Hyperliquid产品：BTC Perpetual（永续）。
+
+- 价格/oracle计价：USDT。
+
+- 保证金抵押及结算：USDC。
+
+- 行情读取：perp `metaAndAssetCtxs` 与对应perp盘口；不得误用 `spotMeta` 的BTC/USDC现货报价。
+
+- 合约PnL：按Hyperliquid官方quanto规则；官方明确不对USDC/USDT汇率进行PnL转换。
+
+- Vest端当前页面规格：BTC报价/结算USDC（需以实时合约元数据继续校验）。
+
+### 必须拆成两个独立计算层
+
+1. **显示价差/跨市场基差层**：Vest USDC/BTC 与 Hype USDT/BTC 如需比较，使用新鲜且方向明确的USDC/USDT参考汇率归一化到共同报价币。当前UI可以展示 `USDC_per_USDT`，但必须显示公式和汇率来源。
+
+2. **交易盈亏/对冲敏感度层**：Hyperliquid BTC perp按quanto规格计算USDC结算PnL，不得把显示价差层的FX系数再次乘进Hype PnL。Vest PnL按Vest合约实际规格计算。共同价格变动下的两边盈亏敏感度必须分别从各自合约规格推导。
+
+### UI最终要求
+
+顶部必须明确写：
+
+- Vest BTC Perp/合约报价币种及结算币；
+
+- Hyperliquid BTC Perp：价格USDT，抵押/结算USDC；
+
+- 统一参考价差（使用USDC/USDT FX归一化）；
+
+- 单独显示FX来源、时间和方向（放简洁次级文字/详情）。
+
+不得将Hype BTC Perp标为BTC/USDC Spot，也不得把账户USDC抵押误写成价格以USDC计价。
+
+### 复查要求
+
+- 验证页面行情价格与Hyperliquid app BTC perp显示一致（允许明确说明Mark/oracle与UI last/trade price不同，不可混用）。
+
+- 同时对照Hyperliquid perp metaAndAssetCtxs中的mark/oracle及L2盘口。
+
+- 价格基差归一化FX与quanto PnL计算分别单元测试。
+
+- 删除/禁止spot路径作为当前选定产品；除非用户未来明确切换产品。
+
+### 验收
+
+| 编号 | 场景 | 期望 |
+|---|---|---|
+| HL05 | 用户提供 /trade/BTC | 选择标准BTC Perp，不选择BTC/USDC Spot |
+| HL06 | Hype行情显示 | 标注“价格USDT；抵押/结算USDC” |
+| HL07 | 参考价差归一化 | 可使用方向明确的USDC_per_USDT FX |
+| HL08 | Hype perp PnL | 不应用USDC/USDT FX转换，按quanto规则 |
+| HL09 | App显示价与API Mark不同 | 标明Mark/oracle与last/trade差异，不以错误价格源认定接口错误 |
+
 # 1 给 Codex 的执行要求
 
 请在当前项目上纠正产品流程，不另起一个与真实状态脱节的演示页面。

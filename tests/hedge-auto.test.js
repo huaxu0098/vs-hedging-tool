@@ -738,7 +738,7 @@ test('OPT02 搜索范围记录双边方向、步长和数量上限，预算中�
   const partial = calculateCurrent(inputs, f.a, f.m, {}, t, { searchBudget: 1 });
   assert.equal(partial.search.complete, false);
   assert.ok(!partial.maximum?.complete);
-  assert.equal(full.trace.model, 'AUTO-0.18');
+  assert.equal(full.trace.model, 'AUTO-0.21');
 });
 test('OPT03 PF 虚拟保证金、目标 Hype 初始、其他占用及调仓后真实可用分别核验', () => {
   const f = fixture();

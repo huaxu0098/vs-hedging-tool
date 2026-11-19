@@ -10,6 +10,7 @@ export function vestContract(raw) {
   const quote = field(raw, 'quoteAsset', raw.quote);
   const settle = field(raw, 'settleAsset', documented ? 'USDC' : null);
   return {
+    productType: field(raw, 'productType', 'perpetual'),
     payoffType: field(raw, 'payoffType', raw.isInverse ? 'inverse' : 'linear'),
     symbol: raw.symbol,
     baseAsset: field(raw, 'baseAsset', raw.base),
@@ -31,6 +32,8 @@ export function hypeContract(raw, dex, collateralToken) {
   const documented = dex === '' && collateralToken === 0 && nativeCrypto.has(raw.name);
   const quote = field(raw, 'quoteAsset', field(raw, 'quote', documented ? 'USDT' : null));
   return {
+    standardCryptoPerp: documented,
+    productType: field(raw, 'productType', 'perpetual'),
     payoffType: field(raw, 'payoffType', raw.isInverse ? 'inverse' : 'linear'),
     symbol: raw.name,
     baseAsset: field(raw, 'baseAsset', field(raw, 'base', documented ? raw.name : null)),

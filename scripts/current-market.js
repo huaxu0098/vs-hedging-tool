@@ -103,6 +103,8 @@ export async function currentMarket(asset) {
             s.hl = {
               symbol: d.symbol,
               mark: d.mark,
+              oracle: d.oracle,
+              assetId: d.assetId,
               markAt: new Date(s.requested).toISOString(),
               tiersAt: new Date(s.requested).toISOString(),
               bookSource: 'Hyperliquid REST · l2Book',

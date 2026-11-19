@@ -1,4 +1,4 @@
-import { dec, out, nonnegative, positive } from './math.js';
+import { dec, out, nonnegative, positive, normalizeExposure } from './math.js';
 import {
   rules,
   splitReserves,
@@ -9,6 +9,7 @@ import {
   stressFields,
   reason as constraintReason
 } from './current.js';
+import { scanKeys, refreshDelay } from './scan-refresh.js';
 import { renderScan, setupScan } from './ratio-ui.js';
 import { ledgerLabels, presentLedger } from './settlement-ledger.js';
 import { captureScript } from '../vs-parser.js';
@@ -414,127 +415,96 @@ function freshnessLabel(at, seconds) {
   if (!at) return '未确认';
   return fresh(at, Date.now(), Number(seconds) * 1000) ? '有效' : '过期';
 }
-let lastFinished = null,
-  workerTimer;
-let worker = null,
-  version = 0,
-  running = null,
-  completed = null;
+let worker = null, running = null, completed = null, lastGood = null, failure = null;
+let version = 0, wantedKey = null, lastStart = -Infinity, wakeTimer, workerTimer;
+function scanScope() {
+  return JSON.stringify([asset(), state.fundingView, useAPI() ? $('wallet').value.trim().toLowerCase() : 'manual']);
+}
 function cancelAuto() {
   clearTimeout(workerTimer);
+  clearTimeout(wakeTimer);
   worker?.terminate();
   worker = null;
-  running = null;
-  completed = null;
+  running = completed = failure = wantedKey = null;
   version++;
 }
 function currentFrame(a, m, t) {
+  const scope = scanScope();
+  if (lastGood && lastGood.scope !== scope) { cancelAuto(); lastGood = null; }
   const base = calculateCurrent(r, a, m, rates, t, { deferAuto: true });
-  base.lastFinished = lastFinished;
+  const retained = lastGood?.result;
+  const paused = () => ({ ...base, retained, frameState:'paused' });
   if (!base.needsSearch) {
-    if (running || completed) cancelAuto();
-    return base;
+    if (running || completed || failure || wantedKey) cancelAuto();
+    return paused();
   }
-  const { obtainedAt, ...spec } = m.spec;
-  const context = JSON.stringify([
-    r,
-    a,
-    m.asset,
-    useAPI(),
-    $('quote-source').value,
-    spec,
-    m.hl.marginTiers,
-    m.hl.maxLeverage,
-    m.hl.sizeDecimals,
-    m.hl.onlyIsolated,
-    m.hl.contract,
-    rates
-  ]);
-  const key = JSON.stringify([context, m, rates]);
-  if ((running && running.context !== context) || (completed && completed.context !== context)) cancelAuto();
-  if (!running && completed?.key !== key) {
-    const frameRates = rates;
-    const revision = ++version;
-    running = {
-      context,
-      key,
-      since: performance.now(),
-      trigger: completed?.context === context ? '实时行情或汇率更新' : '账户、资金规则或行情输入更新'
-    };
+  const {context, key} = scanKeys(r, a, m, rates, [scope, $('quote-source').value, m.source]);
+  if (running && running.context !== context) cancelAuto();
+  wantedKey = key;
+  if (completed?.key === key)
+    return { ...completed.result, observed:base, frameState:'ready' };
+
+  const trigger = !lastGood ? '首次扫描' : lastGood.context !== context ? '账户或规则已变更' : '行情更新';
+  const waiting = (state, reason) => ({
+    ...base, retained, frameState:state, trigger, refreshPending:state === 'updating',
+    issues: [reason], priorError:state === 'failed' ? reason : null
+  });
+  if (failure?.context === context && performance.now() < failure.retryAt) return waiting('failed', failure.message);
+  if (!running) {
+    const delay = lastGood?.context === context && !failure ?
+      refreshDelay(lastGood.result.calculationMarket, m, performance.now()-lastStart,
+        lastGood.result.priceComparison?.fraction, base.priceComparison?.fraction) : 0;
+    clearTimeout(wakeTimer);
+    if (delay > 0) {
+      wakeTimer = setTimeout(render, delay + 1);
+      return waiting('updating', '行情更新，正在合并连续报价');
+    }
+    const revision = ++version, frameRates = rates;
+    lastStart = performance.now();
+    failure = null;
+    running = { version:revision, context, key };
     if (!worker) worker = new Worker('/src/hedge/auto-worker.js', { type: 'module' });
-    const finish = (result) => {
-      if (revision !== version) return;
+    const finish = (result, error) => {
+      if (revision !== version || running?.version !== revision) return;
       clearTimeout(workerTimer);
       running = null;
-      if (result.ratioScan) lastFinished = { id: result.trace.id, at: result.trace.at };
-      completed = {
-        context,
-        key,
-        stamps: ['pf', 'hl'].flatMap((k) => [m[k].bookAt ?? m[k].asOf, m[k].markAt ?? m[k].asOf]),
-        result: {
-          ...result,
-          stateVersion: revision,
-          calculatedAt: new Date(t).toISOString(),
-          calculationMarket: m,
-          calculationRates: frameRates
-        }
-      };
+      // A newer market observation may already be queued. A completed, still
+      // eligible snapshot can be displayed with its own time while it is being
+      // superseded. Scope/rule changes cancel the request before this callback.
+      if (!result?.ratioScan) {
+        const message = error ?? result?.issues?.join(' · ') ?? '本帧缺少完整计算结果';
+        failure = { context, message, retryAt:performance.now()+2000 };
+        wakeTimer = setTimeout(render, 2010);
+      } else {
+        completed = { context, key, scope, result: {
+          ...result, stateVersion:revision, calculatedAt:new Date(t).toISOString(), calculationMarket:m,
+          calculationRates:frameRates, trigger, frameState:'ready'
+        } };
+        // Recheck the original clocks, account and eligibility before publication.
+        // A long worker task may have crossed a deadline or a quote TTL.
+        const eligible = calculateCurrent(r, a, m, frameRates, Date.now(), {deferAuto:true}).needsSearch;
+        if (eligible) lastGood = completed;
+        else completed = null;
+      }
       render();
     };
     workerTimer = setTimeout(() => {
       if (revision !== version) return;
-      worker.terminate();
-      worker = null;
-      finish({
-        ...base,
-        needsSearch: false,
-        range: null,
-        funding: null,
-        autoStatus: 'AUTO_PARTIAL',
-        issues: ['比例扫描超过 10 秒，本帧结果已撤回。下一次行情或输入更新后重试。']
-      });
+      worker.terminate(); worker = null;
+      finish(null, '求解超过 10 秒，已超时；保留上次结果');
     }, 10000);
-    worker.onmessage = ({ data }) => {
-      if (data.version === revision)
-        finish(
-          data.error
-            ? {
-                ...base,
-                autoStatus: 'AUTO_PARTIAL',
-                range: null,
-                funding: null,
-                issues: [constraintReason(data.error)]
-              }
-            : data.result
-        );
+    worker.onmessage = ({data}) => {
+      if (data.version === revision) finish(data.result, data.error && constraintReason(data.error));
     };
     worker.onerror = () => {
       if (revision !== version) return;
-      worker.terminate();
-      worker = null;
-      finish({ ...base, range: null, funding: null, autoStatus: 'AUTO_PARTIAL', issues: ['后台计算失败'] });
+      worker.terminate(); worker = null;
+      finish(null, '后台求解失败，保留上次结果');
     };
-    const priorTarget = completed?.context === context ? completed.result.advice?.pair : null;
-    worker.postMessage({ version: revision, r, a, m, rates, t, priorTarget });
+    worker.postMessage({version:revision, r, a, m, rates:frameRates, t, priorTarget:
+      lastGood?.context === context ? retained.advice?.pair : null});
   }
-  // A new tick queues the latest frame without starving an in-flight search.
-  // Account edits, safety gates and rule changes invalidate old answers immediately.
-  if (completed?.key === key && completed.stamps.every((v) => fresh(v, t, Number(r.quoteSecs) * 1000)))
-    return { ...completed.result, lastFinished, refreshPending: completed.key !== key };
-  return {
-    ...base,
-    range: null,
-    funding: null,
-    trace: null,
-    autoStatus: 'AUTO_PARTIAL',
-    refreshPending: true,
-    lastFinished,
-    priorError:
-      completed?.context === context && !completed.result.ratioScan ? completed.result.issues?.[0] : null,
-    trigger: running?.trigger,
-    since: running?.since,
-    issues: ['当前快照正在重算，仓位调整建议已暂停']
-  };
+  return waiting('updating', trigger + '，后台重算中');
 }
 const autoLabels = {
   AUTO_FEASIBLE: '有可行仓位',
@@ -966,7 +936,8 @@ function renderConditions(result, a, m, plan) {
   updateDeadline();
 }
 function render() {
-  let m = market();
+  const live = market();
+  let m = live;
   const a = { pf: account('pf'), hl: account('hl') };
   let result;
   try {
@@ -976,6 +947,8 @@ function render() {
     cancelAuto();
     result = {
       autoStatus: r.mode === 'auto' ? 'AUTO_DATA_BLOCKED' : null,
+      retained: lastGood?.scope === scanScope() ? lastGood.result : null,
+      frameState: 'paused',
       issues: [e.message],
       notices: [],
       cash: {},
@@ -997,7 +970,11 @@ function render() {
           : '已验算所设保证金条件')
       : result.issues[0] || result.notices.at(-1) || '等待当前快照';
   const plan = planning();
-  renderScan(result, m, r, plan, status);
+  renderScan(result, live, r, plan, status);
+  put('advanced-frame', $('scan-status').textContent);
+  if (result.refreshPending) $('trace-download').disabled = true;
+  if (!$('desk-details').open) return;
+  if (result.retained && result.frameState === 'updating') return;
   renderConditions(result, a, m, plan);
   const leverage = c?.candidateLeverage;
   const configured =
@@ -1476,7 +1453,7 @@ function render() {
   $('trace-download').onclick = () => {
     if (!trace) return;
     const { inputs, ...identity } = trace;
-    const { trace: _, calculationRates, calculationMarket, ...outputs } = result;
+    const { trace: _, calculationRates, calculationMarket, retained, observed, ...outputs } = result;
     const payload = JSON.stringify(
       { ...identity, inputs: JSON.parse(inputs), outputs },
       (_, v) => (typeof v === 'bigint' ? String(v) : v),
@@ -1949,6 +1926,12 @@ function render() {
       ' · ' + c.source + (c.collateralEvidence ? ' · spotMeta 抵押币索引 ' +
         c.collateralEvidence.index + ' = ' + c.collateralEvidence.name : ''));
   }
+  if (m.hl?.symbol) fxRows.push('Hyperliquid ' + m.hl.symbol +
+    ' Perpetual · metaAndAssetCtxs (coin ' + m.hl.symbol + ', asset id ' + (m.hl.assetId ?? '未知') + ') · ' +
+    (m.hl.bookSource ?? 'l2Book') + ' · Mark ' + (m.hl.mark ?? '未知') + ' / Oracle ' + (m.hl.oracle ?? '未知') +
+    '。Mark 用于估值；Oracle 是参考指数，App 图表和逐笔成交的 Last 可与二者不同。' +
+    ' 数量小数位 ' + m.hl.sizeDecimals + '，合约最大杠杆 ' + (m.hl.maxLeverage ?? '未知') +
+    '，当前账户保证金模式 ' + (a.hl.marginMode ?? '未知') + '。');
   for (const [asset, q] of Object.entries(currencies?.spots ?? {}))
     fxRows.push('USD_per_' + asset + ' · ' + (q.error || ('买 ' + q.bid + ' / 卖 ' + q.ask +
       ' · ' + q.source + ' ' + q.asOf + ' · 本帧有效，年龄 ' +
@@ -1961,8 +1944,14 @@ function render() {
     fxRows.push('顶档成交价差（Hype − VS）· PF 多 / Hype 空开仓、反向平仓 ' + fmt(px.sellHypeBuyVest, 5) +
       '；PF 空 / Hype 多开仓、反向平仓 ' + fmt(px.buyHypeSellVest, 5) + ' ' + spot.to +
       ' · 换汇买 / 卖 ' + fmt(spot.bid, 8) + ' / ' + fmt(spot.ask, 8) + ' ' + spot.name);
-    fxRows.push('共同标的每变动 1 ' + spot.to + '，Hype 报价变动 ' +
-      fmt(currencies.vestMoveToHype.mid, 9) + ' ' + spot.from + '。双边按各自盘口成交，U 账本单位为 USDC。');
+    fxRows.push('条件路径（两边原生报价平行移动，基差压力另计）· Vest 每变动 1 ' + spot.to + '，Hype 报价变动 ' +
+      fmt(currencies.nativeMovePerVestPoint, 9) + ' ' + spot.from + '。双边按各自盘口成交，U 账本单位为 USDC。');
+  }
+  if (result.ratioScan) {
+    const { market } = result.ratioScan.ctx;
+    fxRows.push('共同路径每上移 1 个原生价格点，每 1 个多头下单单位的盈亏敏感度 · Vest ' +
+      normalizeExposure('1', market.pf) + ' USDC，Hyperliquid ' +
+      normalizeExposure('1', market.hl) + ' USDC。空头符号相反。');
   }
   const dollarMark = currencies?.spots?.USDC;
   if (dollarMark?.mid && result.cash.hl != null) {
@@ -1997,16 +1986,6 @@ function render() {
         : '当前使用手工账户快照，公开行情独立更新。'
   );
 }
-// Consume one coherent public tick at a time. A slow scan gets a chance to
-// publish before polling the latest book again; the independent expiry timer
-// still revokes data at its original timestamp.
-function pollNextMarket() {
-  if (running && ['pf', 'hl'].every((k) => quoteClock(feed[k], Date.now(), Number(r.quoteSecs) * 1000).ok)) {
-    quoteTimer = setTimeout(pollNextMarket, 120);
-    return;
-  }
-  refreshMarket();
-}
 async function refreshMarket() {
   const version = ++feedVersion,
     symbol = asset();
@@ -2030,7 +2009,7 @@ async function refreshMarket() {
   }
   rates = res[1].status === 'fulfilled' ? res[1].value.rates ?? {} : {};
   render();
-  quoteTimer = setTimeout(pollNextMarket, 1250);
+  quoteTimer = setTimeout(refreshMarket, 1250);
 }
 async function refreshAccount() {
   const version = ++accountVersion;
@@ -2562,6 +2541,7 @@ $('confirm-quote').onclick = () => {
     put('manual-status', e.message);
   }
 };
+$('desk-details').addEventListener('toggle', () => { if ($('desk-details').open) render(); });
 setupScan(() => {
   $('desk-details').open = true;
   $('quick-entry').click();
@@ -2575,7 +2555,6 @@ setInterval(() => {
   const t = Date.now(),
     m = market();
   const next = [
-    completed?.stamps.every((v) => fresh(v, t, Number(r.quoteSecs) * 1000)) ?? false,
     ...['pf', 'hl'].map((k) => quoteClock(m[k], t, Number(r.quoteSecs) * 1000).ok),
     ...['pf', 'hl'].map((k) => fresh(account(k).at, t, Number(r.accountSecs) * 1000)),
     ...['pf', 'hl'].flatMap((k) =>

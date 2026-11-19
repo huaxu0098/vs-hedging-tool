@@ -221,7 +221,7 @@ function buildMarket(data, r, a, currencies) {
       multiplier: currencies.legs[key].multiplier,
       fx: currencies.legs[key].pointToLedger.mid,
       // Native price movement per unit change of the common (Vest quote) price.
-      factor: isPF ? '1' : currencies.vestMoveToHype.mid,
+      factor: isPF ? '1' : currencies.nativeMovePerVestPoint,
       step,
       minQty: out(positive(String((isPF ? spec : hl).minQty ?? step))),
       minNotional: out(nonnegative(String((isPF ? spec : hl).minNotional ?? (isPF ? '0' : '10'))).times(currencies.legs[key].settleToLedger.mid)),

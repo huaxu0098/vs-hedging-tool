@@ -6,7 +6,7 @@ import { openTestBrowser } from './chrome.js';
 const browser = await openTestBrowser({ current: true });
 const { send, run, wait, set } = browser;
 const completed =
-  "!document.getElementById('scan-results').hidden && !document.getElementById('scan-results').inert && document.getElementById('scan-clock').textContent.includes('快照 ')";
+  "!document.getElementById('scan-results').hidden && !document.getElementById('scan-results').inert && document.getElementById('scan-desk').dataset.state==='ready'";
 const evidence = [];
 async function capture(asset) {
   await wait(
@@ -17,7 +17,7 @@ async function capture(asset) {
     box.open=true;box.ontoggle();return {trace:e('trace-id').textContent, clock:e('scan-clock').textContent,
     basis:e('scan-basis').textContent, metadata:e('fx-source').textContent, position:e('scan-position').textContent,
     failure:e('scan-fail-cash').textContent,success:e('scan-pass-cash').textContent,profit:e('scan-profit').textContent,
-    status:e('scan-status').textContent, input:JSON.parse(e('trace-inputs').textContent)}})()`);
+    status:e('scan-status').textContent,source:e('scan-source').textContent, input:JSON.parse(e('trace-inputs').textContent)}})()`);
   const { market: m, rates } = frame.input;
   assert.equal(m.asset, asset);
   assert.equal(m.spec.contract.quoteAsset, 'USDC');
@@ -36,9 +36,9 @@ async function capture(asset) {
     .div(String(rates.USDC.bid))
     .minus(m.pf.levels[0][0][0]);
   assert.ok(frame.metadata.includes(entry.toFixed(5)) && frame.metadata.includes(exit.toFixed(5)));
-  assert.ok(frame.clock.includes(frame.trace.split(' / ')[1]));
+  assert.ok(frame.status.includes(frame.trace.split(' / ')[1]));
   assert.match(frame.status, /AUTO_PARTIAL/);
-  assert.match(frame.position, /预设资金规划/);
+  assert.match(frame.source, /预设资金规划/);
   evidence.push({
     asset,
     trace: frame.trace,
@@ -60,6 +60,8 @@ async function capture(asset) {
 }
 try {
   await send('Page.navigate', { url: process.env.CURRENT_URL || browser.url });
+  await wait("!!document.getElementById('desk-details')");
+  await run("document.getElementById('desk-details').open=true");
   await capture('BTC');
   await set('#asset', 'ETH');
   await capture('ETH');
@@ -81,7 +83,7 @@ try {
     await wait(
       "document.getElementById('scan-basis').textContent===" +
         JSON.stringify(expected) +
-        " && document.getElementById('scan-focus').hidden && document.getElementById('scan-results').hidden",
+        " && !document.getElementById('scan-focus').hidden && document.getElementById('scan-results').inert && document.getElementById('scan-desk').dataset.state==='paused'",
       35000
     );
     evidence.push({ injectedFault: fault, state: expected, oldResultsWithdrawn: true });
