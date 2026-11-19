@@ -43,6 +43,12 @@ export function displayHistory(storage) {
               row.both = row.both && row.coversWithBuffer;
             }
           }
+          // Historical all-left-open bins cannot be reclassified from extrema.
+          // Keep their cash and target rows, and wait for a live grid to repopulate bins.
+          if (scan.buckets.some(bin => !['below','joint','above','all'].includes(bin.edgeKey))) {
+            scan.buckets = [];
+            if (scan.analysis) scan.analysis.boundary = null;
+          }
           if (!scan.plans && scan.representative?.row) {
             const row = recordFromInspection(scan.ctx, scan.representative.row);
             scan.plans = { legacy: true, rows: [{ ...row, labels: ['上次计算仓位'] }],
@@ -92,7 +98,7 @@ export function displayHistory(storage) {
           buckets,
           representative,
           analysis,
-          plans: scan.plans && { rows: scan.plans.rows, eligible: scan.plans.eligible, pending: scan.plans.pending, pfQuote: scan.plans.pfQuote, hlQuote: scan.plans.hlQuote },
+          plans: scan.plans && { rows: scan.plans.rows, comparison:scan.plans.comparison, eligible: scan.plans.eligible, pending: scan.plans.pending, pfQuote: scan.plans.pfQuote, hlQuote: scan.plans.hlQuote },
           complete,
           ctx: {
             book: { B: book.B },

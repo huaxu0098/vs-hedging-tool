@@ -25,7 +25,10 @@ const install = `(() => {
         test.results[key]={id:key, started:r.startedAt,finished:r.finishedAt,ms:r.solveMs,
           pfMark:s.ctx.market.pf.mark,hlMark:s.ctx.market.hl.mark, count:s.sets.legal.count,
           revaluation:r.revaluation, sequence:data.version, protect:s.ctx.book.B, reserve:s.ctx.params.R,
-          plans:s.plans.rows, rep:rep && {pf:rep.pfValue, hl:rep.hypeValue, fail:rep.fail, success:rep.success},
+          plans:['最大 PF 仓位','失败回收优先','成功留存优先'].map(label=>s.plans.rows.find(row=>row.labels.includes(label))).filter(Boolean),
+          comparison:s.plans.comparison, comparisonRows:s.plans.rows.filter(row=>row.labels.includes('同 h 规模对照')),
+          joint:{count:s.sets.both.count,min:s.sets.both.min,max:s.sets.both.max,minCount:s.sets.both.minCount,maxCount:s.sets.both.maxCount,
+            counts:s.buckets.map(bin=>[bin.edgeKey,bin.both])}, rep:rep && {pf:rep.pfValue, hl:rep.hypeValue, fail:rep.fail, success:rep.success},
           bins:s.buckets.flatMap((b,index)=>{
             if(!b.legal)return [];
             const groups=[b.risk?'risk':'legal'];
@@ -51,7 +54,11 @@ const install = `(() => {
       const quote=['pf','hl'].flatMap(k=>['bid','ask'].map(side=>e('scan-'+k+'-'+side).textContent)).join('|');
       if(quote!==previousQuote){test.quoteChanges=(test.quoteChanges||0)+1;previousQuote=quote}
       test.paints++;
-      if(desk.dataset.state==='updating') test.pendingPaints++;
+      if(desk.dataset.state==='updating') {
+        test.pendingPaints++;
+        if(!/重算/.test(e('scan-status').textContent) || e('scan-status').textContent.includes('当前数据有效')) test.conflict=true;
+      }
+      if(desk.dataset.state==='ready' && !e('scan-status').textContent.includes('当前数据有效 · 条件估算')) test.conflict=true;
       if(desk.dataset.state==='paused') test.pausedPaints++;
       if(e('scan-focus').hidden || e('scan-results').hidden || !e('scan-fail-cash').textContent ||
         !e('scan-pass-cash').textContent || ['scan-pass-cash','scan-fail-cash'].some(k=>e(k).textContent==='—') || !e('plan-rows').rows.length || ['protect','survive','both','profit'].some(k=>!e('scan-'+k).textContent || e('scan-'+k).textContent.includes('等待有效数据'))) test.blanks++;
@@ -95,6 +102,8 @@ try {
     document.querySelectorAll('#scan-desk > section').length===4 &&
     !/USDC_per_USDT|参考价差|相邻仓位|[0-9,]+ 组|AUTO_|杠杆档位|费用流水/.test(document.body.innerText) &&
     ['pf','hl'].every(k=>['bid','ask','price'].every(s=>Number(document.getElementById('scan-'+k+'-'+s).textContent)>0))`));
+  assert.equal(await run('Boolean(window.scanTest.conflict)'),false);
+  assert.ok(await run("document.getElementById('plan-stress').textContent.includes('压力未配置')"));
   const frames = await run('window.scanTest.commits');
   for (const f of frames) {
     assert.ok(f.status.includes('最近成功计算'));
@@ -155,6 +164,38 @@ try {
     if (width>=1000) assert.ok(layout.table <= height, JSON.stringify(layout));
     evidence.viewports.push(layout);
   }
+  assert.ok(await run("!document.querySelector('#scale-details').open && !document.querySelector('#desk-details').open && document.getElementById('plan-rows').rows.length===3 && !document.body.innerText.includes('全部目标仓位')"));
+  for (const f of frames) {
+    assert.equal(f.joint.counts.find(([key]) => key === 'joint')[1],f.joint.count);
+    assert.ok(f.joint.counts.every(([key,n]) => key==='joint' || n===0));
+    assert.ok(f.joint.minCount>0 && f.joint.maxCount>0);
+  }
+  await b.click('#scale-details > summary');
+  const comparison = await run(`(() => {
+    const e=id=>document.getElementById(id), id=e('scan-desk').dataset.resultId;
+    const result=window.scanTest.results[id], read=id=>[...e(id).rows].map(tr=>[...tr.cells].map(td=>td.textContent));
+    return {id, result:result.comparison, plans:result.comparisonRows, cells:read('scale-rows'),
+      headline:read('plan-rows')[0][5],source:e('scan-source').textContent};
+  })()`);
+  const {result,plans,cells}=comparison;
+  assert.equal(cells.length,9);
+  const small=plans.find(p=>p.key===result.small), large=plans.find(p=>p.key===result.large);
+  for (const [index,key] of ['pf','pfValue','hl','hypeValue','initial','marginRate','failDelta','success','distance'].entries()) {
+    const val=row=>['pf','hl'].includes(key)?dec(row[key]).abs():dec(row[key]);
+    if (small[key]==null || large[key]==null) { assert.equal(cells[index][3],'未验证'); continue; }
+    const delta=val(large).minus(val(small));
+    assert.ok(delta.eq(result.delta[key]));
+    const displayed=cells[index][3].replace('−','-').split(' ')[0];
+    const digits=['pf','hl'].includes(key) ? delta.decimalPlaces() : ['failDelta','success'].includes(key) ? 4 : 2;
+    const expected=key==='marginRate'?delta.times(100):delta;
+    assert.ok(dec(displayed).eq(expected.toDecimalPlaces(digits)),key+' '+displayed+' / '+expected);
+  }
+  assert.match(comparison.source,/预设资金规划.*规划空仓/);
+  if (large.labels.includes('最大 PF 仓位')) assert.match(comparison.headline,/本方案 \/ 同一比例小仓/);
+  evidence.scaleComparison=comparison;
+  await b.click('#scale-details > summary');
+  await b.click('#desk-details > summary');
+  await b.click('#grid-disclosure > summary');
   await b.click('#plan-view');
   await wait("document.querySelector('#grid-caption').textContent.includes('第 1 页')");
   const first=await run("document.querySelector('#grid-rows tr').dataset.point");
@@ -166,7 +207,7 @@ try {
   await b.click('#plan-last');
   assert.ok(await run("document.getElementById('plan-next').disabled && document.getElementById('grid-rows').rows.length>0"));
   await b.click('#plan-close');
-  assert.match(await b.text('#plan-rows'), /失败回收优先/);
+  assert.match(await b.text('#plan-rows'), /失败端回收缓冲优先/);
   // Hold one legitimate request, supersede it with a new rule, then deliver
   // the old response after dispatch. It must never become visible.
   await run('window.scanTest.hold=true');

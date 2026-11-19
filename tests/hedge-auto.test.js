@@ -9,7 +9,7 @@ import {
   adjacentScale
 } from '../src/hedge/ratio-scan.js';
 import { displayHistory } from '../src/hedge/display-history.js';
-import { pagePoints, planRecord, pointKey, segmentPage } from '../src/hedge/position-plans.js';
+import { pagePoints, planRecord, pointKey, scaleComparison, segmentPage } from '../src/hedge/position-plans.js';
 import { ratioChanges } from '../src/hedge/ratio-analysis.js';
 import { exactRatio, ratioBin } from '../src/hedge/ratio-scan.js';
 import { MarketRevaluation } from '../src/hedge/scan-refresh.js';
@@ -1293,11 +1293,15 @@ test('RANGE03 / AUTOSEL08 小网格逐点穷举对照整段扫描，方向、现
       const members = legalRows.filter(qualifies);
       assert.equal(members.length, s.sets[key].count, variant + '/' + key);
       for (const [index, bin] of [...s.buckets, null].entries()) {
-        const lower = bin && s.buckets[index - 1]?.throughLots,
-          upper = bin?.throughLots;
-        const rows = members.filter(
-          (r) => (!lower || r.j * lower.i > lower.j * r.i) && (!upper || r.j * upper.i <= upper.j * r.i)
-        );
+        // Independent exact oracle, with BOTH ends owned by the joint band.
+        const compare = (row, edge) => BigInt(row.j)*BigInt(edge.i) - BigInt(edge.j)*BigInt(row.i);
+        const rows = members.filter(row => {
+          if (!bin || bin.edgeKey === 'all') return true;
+          const lo = compare(row,s.sets.both.min), hi = compare(row,s.sets.both.max);
+          if (bin.edgeKey === 'below') return lo < 0n;
+          if (bin.edgeKey === 'above') return hi > 0n;
+          return lo >= 0n && hi <= 0n;
+        });
         const range = bin ? bin.ranges[key] : s.sets[key].range;
         if (bin) assert.equal(bin[key], rows.length);
         if (!rows.length) {
@@ -1719,8 +1723,10 @@ test('DYN05、DYN06 边界单组的精确见证，按半开区间只计入一个
   const b = scan.analysis.boundary;
   assert.deepEqual([b.count, b.fraction, b.pf, b.hl], [1, '2/5', '5', '-2']);
   assert.equal(ratioBin(scan.buckets, b), b.segment);
-  const edge = scan.buckets[b.segment].throughLots;
-  assert.equal(b.i * edge.j, b.j * edge.i);
+  assert.equal(scan.buckets[b.segment].edgeKey,'joint');
+  assert.equal(ratioBin(scan.buckets,scan.sets.both.max), b.segment);
+  assert.equal(scan.buckets[b.segment].both,scan.sets.both.count);
+  assert.ok(scan.buckets.every(bin => bin.edgeKey === 'joint' || bin.both === 0));
   const sums = {};
   for (const key of ['legal', 'risk', 'protect', 'survive', 'both', 'failProfit', 'passProfit', 'profit']) {
     sums[key] = scan.buckets.reduce((acc, x) => acc + x[key], 0);
@@ -1919,4 +1925,49 @@ test('额外保护缓冲在等号处入交集，多一个最小现金单位即�
     assert.equal(inspectRatio(s.ctx,point).both,expected);
     assert.equal(ratioSlice(s,point.sign,point.i,'both').some(([lo,hi])=>lo<=point.j && point.j<=hi),expected);
   }
+});
+
+test('交集闭区间的精确边界、紧邻 tick、单点和零下界统一归段', () => {
+  // These exact lot pairs produce the two reported rounded percentages.
+  const min = {i:11000,j:1670}, max = {i:5700,j:880};
+  const partition = (a,b) => [{throughLots:{...a,inclusive:false}},
+    {throughLots:{...b,inclusive:true}}, {throughLots:null}];
+  assert.equal(dec(String(min.j)).div(min.i).times(100).toFixed(4),'15.1818');
+  assert.equal(dec(String(max.j)).div(max.i).times(100).toFixed(4),'15.4386');
+  for (const [a,b] of [[min,max],[min,min],[{i:2,j:0},max]]) {
+    const bins=partition(a,b);
+    for (const [point,expected] of [[a,1],[b,1],[{i:a.i*9,j:a.j*9},1],[{i:b.i*9,j:b.j*9+1},2]])
+      assert.equal(ratioBin(bins,point),expected);
+    if (a.j) assert.equal(ratioBin(bins,{i:a.i*9,j:a.j*9-1}),0);
+  }
+  const scan=scanFixture().ratioScan;
+  const joint=scan.buckets.findIndex(bin=>bin.edgeKey==='joint'), members=[];
+  for (let page=1;page<=Math.ceil(scan.sets.both.count/2);page++)
+    members.push(...segmentPage(scan,joint,'both',page,2).points);
+  const atEdge=(p,e)=>BigInt(p.i)*BigInt(e.j)===BigInt(p.j)*BigInt(e.i);
+  assert.ok(members.length && new Set(members.map(pointKey)).size===scan.sets.both.count);
+  assert.equal(members.filter(p=>atEdge(p,scan.sets.both.min)).length,scan.sets.both.minCount);
+  assert.equal(members.filter(p=>atEdge(p,scan.sets.both.max)).length,scan.sets.both.maxCount);
+});
+
+test('同精确比例的规模边际变化逐项来自独立大小仓核算，未知风险不计作零', () => {
+  const scan=scanFixture({hlFee:'0.005',pfFee:'0.001'}).ratioScan;
+  const c=scan.plans.comparison;
+  assert.ok(c);
+  const fetchRow=key=>planRecord(scan,scan.plans.rows.find(r=>r.key===key));
+  const small=fetchRow(c.small), large=fetchRow(c.large);
+  assert.equal(small.sign,large.sign);
+  assert.equal(small.fraction,large.fraction);
+  assert.ok(small.i<large.i);
+  for (const key of Object.keys(c.delta)) {
+    if(small[key]==null || large[key]==null) assert.equal(c.delta[key],null);
+    else {
+      const value = row => ['pf','hl'].includes(key) ? dec(row[key]).abs() : dec(row[key]);
+      assert.ok(dec(c.delta[key]).eq(value(large).minus(value(small))),key);
+    }
+  }
+  const pair=[small,large].map(r=>({...r,labels:['同 h 规模对照']}));
+  pair[0].distance=null;
+  assert.equal(scaleComparison(pair).delta.distance,null);
+  assert.equal(scaleComparison([pair[0],{...pair[1],sign:-pair[1].sign}]),null);
 });

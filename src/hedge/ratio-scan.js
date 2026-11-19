@@ -6,7 +6,6 @@ import {
   newReport,
   includeBand,
   finishReport,
-  reportGroups,
   subsetGroups,
   mergeReport,
   recoveryCushion
@@ -321,8 +320,12 @@ function add(set, lo, hi, i, sign) {
       ? Math.sign(j * p.i - p.j * i)
       : Number(BigInt(j) * BigInt(p.i) - BigInt(p.j) * BigInt(i));
   if (!set.largest || set.largest.i < i) set.largest = { sign, i, j: lo };
-  if (!set.min || cmp(lo, set.min) < 0) set.min = { i, j: lo, sign };
-  if (!set.max || cmp(hi, set.max) > 0) set.max = { i, j: hi, sign };
+  const lower = set.min ? cmp(lo, set.min) : -1;
+  const upper = set.max ? cmp(hi, set.max) : 1;
+  if (lower < 0) { set.min = { i, j: lo, sign }; set.minCount = 1; }
+  else if (lower === 0) set.minCount++;
+  if (upper > 0) { set.max = { i, j: hi, sign }; set.maxCount = 1; }
+  else if (upper === 0) set.maxCount++;
 }
 function deadlinePath(ctx, c, p) {
   if (p.stage === 'funded') return { status: 'notApplicable' };
@@ -569,30 +572,29 @@ function scanLotRanges(ctx, maxVisits, legs, cache) {
 // Boundaries are compared as lot-index fractions, without rounding to the displayed %.
 export const scalesPerBlock = 128;
 
-// Integer division is the inclusive upper boundary of the discrete ratio bin.
-export const lastLotAtRatio = (edge, i) => Number(BigInt(edge.j) * BigInt(i) / BigInt(edge.i));
+// The last admissible Hype lot on this side of a cut. A strict cut
+// excludes only exact multiples, including zero. All three consumers
+// (aggregation, candidate lookup and pagination) use this same operation.
+export function lastLotAtRatio(edge, i) {
+  if (!edge) return Infinity;
+  const numerator = BigInt(edge.j) * BigInt(i), denominator = BigInt(edge.i);
+  const quotient = numerator / denominator;
+  return Number(edge.inclusive === false && numerator % denominator === 0n ? quotient - 1n : quotient);
+}
 
 function reportBuckets(ctx, p, sets, cells, cache) {
-  const edges = [
-    { i: 1, j: 0, h: '0' },
-    ...reportGroups.flatMap((k) => [sets[k].min, sets[k].max]).filter(Boolean)
-  ];
-  const cmp = (a, b) => Number(BigInt(a.j) * BigInt(b.i) - BigInt(b.j) * BigInt(a.i));
-  edges.sort(cmp);
-  const cuts = edges.filter((point, k) => k === 0 || cmp(point, edges[k - 1]) !== 0);
+  const joint = sets.both;
+  const gridEdge = (point, inclusive) => ({i:point.i, j:point.j, inclusive});
+  const buckets = joint.min ? [
+    {edgeKey:'below', above:null, through:joint.min.h, throughLots:gridEdge(joint.min,false)},
+    {edgeKey:'joint', above:joint.min.h, through:joint.max.h, throughLots:gridEdge(joint.max,true)},
+    {edgeKey:'above', above:joint.max.h, through:null, throughLots:null}
+  ] : [{edgeKey:'all', above:null, through:null, throughLots:null}];
   const counted = [...subsetGroups, 'risk', ...(sets.eligible ? ['eligible'] : [])];
   const accumulators = () => Object.fromEntries(counted.map((key) => [key, newReport()]));
   const totals = accumulators();
-  const buckets = [...cuts, null].map((edge, n) => ({
-    above: cuts[n - 1]?.h ?? null,
-    through: edge?.h ?? null,
-    throughLots: edge ? { i: edge.i, j: edge.j } : null,
-    edgeKey: !edge ? 'end' : !edge.j ? 'zero' :
-      reportGroups.flatMap(key => ['min','max'].filter(side =>
-        sets[key][side] && cmp(edge, sets[key][side]) === 0).map(side => key + '-' + side)).join('/'),
-    stats: accumulators()
-  }));
-  const ratios = cuts.map(({i,j}) => ({i,j}));
+  for (const bin of buckets) bin.stats = accumulators();
+  const ratios = buckets.map(bin => bin.throughLots);
   const blockMaps = Array.from({ length:buckets.length + 1 }, () => new Map());
   function addBlock(map, id, legal, both) {
     let block = map.get(id);
@@ -663,6 +665,8 @@ function reportBuckets(ctx, p, sets, cells, cache) {
     if (totals[key].count !== sets[key].count) throw Error('分段与总计不一致 · ' + key);
     sets[key].range = finishReport(totals[key], ctx, p);
   }
+  if (joint.count && result.find(bin => bin.edgeKey === 'joint').both !== joint.count)
+    throw Error('双路径交集成员落在闭区间之外');
   const pageIndex = blockMaps.map((map, n) => {
     const blocks = Array.from(map, ([id, counts]) => ({
       sign:Math.sign(id), first:1 + (Math.abs(id)-1)*scalesPerBlock, ...counts
@@ -686,22 +690,29 @@ export function ratioSlice(scan, sign, i, kind = 'legal') {
   return bands.sort((a, b) => a[0] - b[0]);
 }
 
-// All bin edges use (lower, upper]. The common sensitivity per lot cancels
-// in this comparison, including for equal ratios at different position sizes.
+// Ratio membership is independent of how the percentage is formatted.
 export function ratioBin(buckets, point) {
-  return buckets.findIndex(
-    ({ throughLots: end }) => !end || BigInt(point.j) * BigInt(end.i) <= BigInt(end.j) * BigInt(point.i)
-  );
+  return buckets.findIndex(bin => point.j <= lastLotAtRatio(bin.throughLots, point.i));
 }
 
 export function exactRatio(market, pfQty, hlQty) {
-  const numerator = decimal(normalizeExposure(hlQty, market.hl)).abs();
-  const denominator = decimal(normalizeExposure(pfQty, market.pf)).abs();
-  const places = Math.max(numerator.decimalPlaces(), denominator.decimalPlaces());
-  const asInteger = (x) => BigInt(x.toFixed(places).replace('.', ''));
-  const n = asInteger(numerator),
-    d = asInteger(denominator),
-    factor = gcd(n, d);
+  // Multiply the supplied finite decimals as integers. Rounding a converted
+  // exposure before reducing the fraction makes proportional sizes disagree.
+  function exposure(qty, leg) {
+    // Preserve the contract eligibility and positive-factor checks of the exposure model.
+    normalizeExposure('1', leg);
+    let coefficient = 1n, scale = 0;
+    for (const value of [qty, leg.multiplier, leg.fx, leg.factor]) {
+      const [whole, fraction = ''] = decimal(value).abs().toFixed().split('.');
+      coefficient *= BigInt(whole + fraction);
+      scale += fraction.length;
+    }
+    return {coefficient, scale};
+  }
+  const hl = exposure(hlQty, market.hl), pf = exposure(pfQty, market.pf);
+  const n = hl.coefficient * 10n ** BigInt(Math.max(0, pf.scale-hl.scale));
+  const d = pf.coefficient * 10n ** BigInt(Math.max(0, hl.scale-pf.scale));
+  const factor = gcd(n,d);
   return (n / factor).toString() + '/' + (d / factor).toString();
 }
 

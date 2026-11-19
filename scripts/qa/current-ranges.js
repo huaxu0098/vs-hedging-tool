@@ -47,7 +47,7 @@ try {
     )
   );
   console.log('RANGE12 极简首页与折叠详情通过');
-  await ready("document.getElementById('scan-representative').textContent.includes('最大 PF 方案')");
+  await ready("document.getElementById('scan-representative').textContent.includes('最大 PF 目标仓位')");
   assert.ok(
     await run(`['scan-percent','scan-find','scan-reset','scan-slider','scan-smaller','scan-larger','scan-scale','scan-filter','scan-endpoint'].every(x=>!document.getElementById(x)) &&
     !document.getElementById('desk-details').open && !document.getElementById('scan-desk').innerText.includes('已选') &&
@@ -58,7 +58,7 @@ try {
   assert.ok(await run("document.getElementById('profit-panel').classList.contains('no-profit')"));
   assert.ok(
     await run(
-      "document.querySelectorAll('#scan-buckets .representative-range').length===1 && document.querySelector('#scan-buckets .representative-range th').title.includes('含代表方案')"
+      "document.querySelectorAll('#scan-buckets .representative-range').length===1 && document.querySelector('#scan-buckets .representative-range th').title.includes('含本帧条件目标方案')"
     )
   );
   assert.match(await text('#scan-funded'), /当前阶段不适用/);
@@ -211,7 +211,8 @@ try {
   const current = calculateCurrent(g.rules,g.accounts,g.market,g.rates,Date.parse(guarded.at),g.options);
   assert.ok(guarded.id.endsWith(current.trace.id));
   const scan = current.ratioScan;
-  assert.equal(guarded.sections.length,scan.buckets.filter(bin => bin.both > 0).length);
+  assert.equal(guarded.sections.length,scan.sets.both.count ? 1 : 0);
+  assert.ok(scan.buckets.every(bin => bin.edgeKey === 'joint' ? bin.both === scan.sets.both.count : bin.both === 0));
   for (const section of guarded.sections) {
     const n = scan.buckets.findIndex(bin => bin.edgeKey === section.edge);
     const range = scan.buckets[n].ranges.both;

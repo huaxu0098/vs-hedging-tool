@@ -1,7 +1,7 @@
 import { sumPostings } from './settlement-ledger.js';
 import { executionDetail } from './solver.js';
 import { dec, out } from './math.js';
-import { exactRatio, inspectRatio, ratioSlice, scalesPerBlock, lastLotAtRatio } from './ratio-scan.js';
+import { exactRatio, adjacentScale, inspectRatio, ratioSlice, scalesPerBlock, lastLotAtRatio } from './ratio-scan.js';
 
 export const pointKey = ({sign, i, j}) => [sign, i, j].join('/');
 
@@ -40,7 +40,7 @@ export function pagePoints(scan, index, start, limit = 5) {
 }
 
 // Index 0 covers the whole grid; segment n uses index n+1. Both aggregates
-// and drilldown use (previous edge, current edge] on the unrounded lot ratio.
+// and drilldown share exact strict/inclusive limits on the unrounded lot ratio.
 export function segmentPage(scan, segment, kind, requestedPage, size = 5) {
   if (!['both','legal'].includes(kind) || !Number.isSafeInteger(size) || size < 1)
     throw Error('无效的仓位分段查询');
@@ -171,7 +171,16 @@ export function buildPlanReport(scan, pending = false) {
   }
   const index = scaleIndex(scan);
   const featured = [...points.values()];
-  const examples = scalePair(scan, index, featured);
+  // Prefer a genuine smaller target at the maximum's exact exposure ratio.
+  // Preserve the existing half-size comparison when it is on the legal grid.
+  let smaller = null;
+  if (!pending && primary) {
+    const {sign,i,j} = primary;
+    if (i % 2 === 0 && j % 2 === 0 && ratioSlice(scan,sign,i/2).some(([a,b]) => a <= j/2 && j/2 <= b))
+      smaller = {sign, i:i/2, j:j/2};
+    else smaller = adjacentScale(scan,primary,-1);
+  }
+  const examples = smaller ? [primary, smaller] : scalePair(scan, index, featured);
   for (const point of examples) add(point, '同 h 规模对照');
   if (!points.size)
     for (const point of pagePoints(scan, index, null, 3).rows) add(point, '合法规模');
@@ -189,5 +198,22 @@ export function buildPlanReport(scan, pending = false) {
     group.push(row);
     fractions.set(row.fraction, group);
   }
-  return { index, rows: [...fractions.values()].flat(), pending, eligible: pending ? 0 : eligible.count };
+  return { index, rows: [...fractions.values()].flat(), comparison: scaleComparison(rows), pending, eligible: pending ? 0 : eligible.count };
+}
+
+// Pair actual evaluations from the same frame, direction and exact exposure
+// fraction. Null path/clearing values propagate to the corresponding change.
+export function scaleComparison(rows) {
+  const pair = rows.filter(row => row.labels?.includes('同 h 规模对照')).sort((a,b) => a.i-b.i);
+  if (pair.length !== 2) return null;
+  const [small, large] = pair;
+  if (!small.fraction || small.fraction !== large.fraction || small.sign !== large.sign || small.i === large.i)
+    return null;
+  const delta = {};
+  for (const key of ['pf','pfValue','hl','hypeValue','initial','marginRate','failDelta','success','distance']) {
+    if (small[key] == null || large[key] == null) { delta[key] = null; continue; }
+    const value = row => key === 'pf' || key === 'hl' ? dec(row[key]).abs() : dec(row[key]);
+    delta[key] = out(value(large).minus(value(small)));
+  }
+  return {small:small.key, large:large.key, fraction:small.fraction, delta};
 }

@@ -41,15 +41,13 @@ export function analyzeRatios(result, rules) {
   if (min) {
     const segment = ratioBin(scan.buckets, min);
     const bin = scan.buckets[segment];
-    // The minimum itself is a cut. Every qualifying member in this bin
-    // therefore has exactly this h, whatever its direction or position size.
-    if (!bin.both || BigInt(min.i) * BigInt(bin.throughLots.j) !== BigInt(min.j) * BigInt(bin.throughLots.i))
+    if (bin?.edgeKey !== 'joint' || bin.both !== scan.sets.both.count)
       throw Error('交集下界与精确分段不一致');
     const row = inspectRatio(scan.ctx, min);
     if (!row.both) throw Error('交集边界见证仓位未通过两端核算');
     boundary = {
       segment,
-      count: bin.both,
+      count: scan.sets.both.minCount,
       fraction: exactRatio(market, row.pf, row.hl),
       ...positionSummary(row)
     };

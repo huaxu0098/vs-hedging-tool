@@ -139,10 +139,11 @@ export function metricRow(model, i) {
 }
 function update(pair, key, numerator, denominator, i, j, sign) {
   const prev = pair[key];
-  if (
-    !prev ||
-    (key === 'min' ? numerator * prev.d < prev.n * denominator : numerator * prev.d > prev.n * denominator)
-  ) {
+  const difference = prev ? numerator * prev.d - prev.n * denominator : 0n;
+  // Equal extrema choose the same witness regardless of how cells are partitioned.
+  const tiedFirst = prev && difference === 0n && (i < prev.point.i ||
+    (i === prev.point.i && (j < prev.point.j || (j === prev.point.j && sign > prev.point.sign))));
+  if (!prev || tiedFirst || (key === 'min' ? difference < 0n : difference > 0n)) {
     pair[key] = { n: numerator, d: denominator, point: { i, j, sign } };
   }
 }
@@ -173,7 +174,7 @@ export function includeBand(report, row, i, lo, hi, sign) {
     const left = offset + slope * low,
       right = offset + slope * high;
     update(report.extrema[k], 'min', slope < 0n ? right : left, den, i, slope < 0n ? hi : lo, sign);
-    update(report.extrema[k], 'max', slope < 0n ? left : right, den, i, slope < 0n ? lo : hi, sign);
+    update(report.extrema[k], 'max', slope <= 0n ? left : right, den, i, slope <= 0n ? lo : hi, sign);
   });
 }
 // Union of disjoint ratio bins. Fractions and their actual candidate witnesses

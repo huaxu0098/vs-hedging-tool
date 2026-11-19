@@ -5,7 +5,7 @@ const b = await openTestBrowser({ current: true });
 const { send, run, wait, click, text } = b;
 const input = (id, v) => b.set('#' + id, v, 'input');
 const ready =
-  "document.querySelector('#plan-rows').textContent.includes('最大 PF 仓位') && document.querySelector('#scan-desk').dataset.state==='ready' && document.querySelector('#trace-id').textContent.includes('AUTO-0.21')";
+  "document.querySelector('#plan-rows').textContent.includes('最大 PF 目标仓位') && document.querySelector('#scan-desk').dataset.state==='ready' && document.querySelector('#trace-id').textContent.includes('AUTO-0.21')";
 try {
   await send('Page.navigate', { url: (process.env.CURRENT_URL ?? b.url) + '/' });
   await wait("!!document.getElementById('desk-details')");
@@ -34,8 +34,8 @@ try {
   );
   assert.ok(frame.stamp.endsWith(x.trace.id));
   assert.equal(frame.versions.length, 1);
-  assert.match(fields['plan-rows'], /失败回收优先/);
-  assert.match(fields['plan-rows'], /成功留存优先/);
+  assert.match(fields['plan-rows'], /失败端回收缓冲优先/);
+  assert.match(fields['plan-rows'], /成功端现金留存优先/);
   assert.ok(fields['plan-risk-rows']);
   assert.match(fields['risk-values'], /PF 模拟初始保证金/);
   assert.match(fields['risk-values'], /Hype 其他保证金占用/);
@@ -59,6 +59,14 @@ try {
   await run("document.getElementById('desk-details').open=true;document.getElementById('account-details').open=true");
   await click('#missing-list a[href="#jumpBps"]');
   assert.equal(await run('document.activeElement.id'), 'jumpBps');
+  // This assertion targets a rule change with valid books. After the independent
+  // replay and focus check above, either exchange may already have timed out.
+  await wait(ready + ` && (() => {
+    const m=JSON.parse(document.querySelector('#trace-inputs').textContent).market;
+    const ttl=Number(document.querySelector('#quoteSecs').value)*1000;
+    return [m.pf,m.hl].every(q => [q.bookAt ?? q.asOf,q.markAt ?? q.asOf]
+      .every(stamp => Date.now()-Date.parse(stamp)<ttl-500));
+  })()`,45000);
   const pending = await run(`(() => {
     const desk=document.querySelector('#scan-desk'), reserve=document.querySelector('#R_success');
     const before=[desk.dataset.resultId,document.querySelector('#scan-fail-cash').textContent];
