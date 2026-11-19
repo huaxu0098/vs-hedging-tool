@@ -1,9 +1,9 @@
 // Legal lots are divided at every entry/exit depth breakpoint. Between breakpoints
 // settlement at today's mark is affine in lots; the boundary shift is A/lots + B.
 // Those bounds let us exclude whole rectangles without assuming a hedge ratio.
-import { D, dec, positive, nonnegative, out, min, max, profitSplit } from './math.js';
+import { D, dec, positive, nonnegative, out, min, max, profitSplit, fundingInterval } from './math.js';
 import { evaluateLeverageGrid } from './leverage.js';
-import { executionDetail, projectSettlementEquity, profileInputs } from './solver.js';
+import { executionDetail, projectSettlementEquity, profileInputs, fundingProof } from './solver.js';
 
 const slack = dec('1e-28'); // Round bounds outwards; final admission always uses the exact candidate.
 const units = (l) => positive(l.multiplier).times(l.fx);
@@ -257,11 +257,16 @@ export function solveAuto(book, m, params, options = {}) {
     old = (v) =>
       Object.values(book.positions).find((x) => x.asset === m.id && x.venue === v && x.pool === m[v].pool)
         ?.qty ?? '0';
+  const funding = fundingInterval(p);
   const candidates = [],
     rejected = [],
     ratios = new Set(),
     seen = new Set(),
     current = [old('pf'), old('hl')];
+  const pruned = { sizeBound: 0, invalidPrice: 0, cashBound: 0, incumbentBound: 0 };
+  let gridPairs = 0n,
+    leverageRows = 0,
+    stoppedByBudget = false;
   let best = null,
     evaluations = 0,
     nodes = 0,
@@ -275,7 +280,7 @@ export function solveAuto(book, m, params, options = {}) {
     .minus(book.external);
   const passNeed = max(
     dec(p.R).plus(p.k),
-    cashFloor == null ? p.R : cashFloor.minus(book.external).minus(payout).plus(p.k),
+    cashFloor == null ? p.R : cashFloor.minus(book.external).plus(p.k),
     p.stage === 'funded' && book.ref != null
       ? dec(book.ref)
           .plus(p.g)
@@ -293,16 +298,25 @@ export function solveAuto(book, m, params, options = {}) {
     evaluations++;
     try {
       const c = evaluateLeverageGrid(book, m, p, pf, hl, options);
+      leverageRows += c.leverageGrid?.length ?? 0;
+      if (options.currentSnapshot && c.lines && c.vsTargetQuantity && c.actualRatio != null) {
+        c.funding = fundingProof(p, m, c);
+        if (!c.funding.valid) {
+          unknown = true;
+          c.constraints.push({ code: 'FUNDING_RECONCILIATION', status: 'unknown', unit: 'U' });
+          c.code = 'FUNDING_UNVERIFIED';
+        }
+      }
       if (c.code !== 'FEASIBLE') {
         if (
           c.constraints?.some((t) => t.status === 'unknown') &&
           !c.constraints.some((t) => t.status === 'fail')
         )
           unknown = true;
-        if (rejected.length < 8 && c.constraints?.some((t) => t.status === 'fail')) rejected.push(c);
+        if (rejected.length < 8 && c.constraints?.some((t) => t.status !== 'pass')) rejected.push(c);
         return;
       }
-      c.worstCash = out(min(c.failureCash, c.pressureCashAfter, ...(c.scenarioCash ?? [])));
+      c.worstCash = c.worstAvailableCash;
       if (cashFloor && dec(c.worstCash).lt(cashFloor)) return;
       ratios.add(c.actualRatio);
       candidates.push(c);
@@ -310,7 +324,16 @@ export function solveAuto(book, m, params, options = {}) {
       candidates.length = Math.min(candidates.length, limit);
       best = candidates[0];
     } catch (e) {
-      if (['MARGIN_UNVERIFIED', 'LEVERAGE_UNVERIFIED'].includes(e.message)) unknown = true;
+      if (
+        ![
+          'INVALID_PRICE_ENDPOINT',
+          'INSUFFICIENT_DEPTH',
+          'INVALID_STEP',
+          'CANDIDATE_ALREADY_AT_BOUNDARY',
+          '数值必须大于零'
+        ].includes(e.message)
+      )
+        unknown = true;
       if (!rejected.length) rejected.push({ code: e.message, vsTargetQuantity: pf, hlTargetQuantity: hl });
     }
   };
@@ -335,7 +358,10 @@ export function solveAuto(book, m, params, options = {}) {
             step: out(segments[0].step)
           }
         : null;
-    domain.push({ pfSide: sign, pf: edge(pp), hl: edge(hh) });
+    const lots = (ss) => ss.reduce((sum, s) => sum + BigInt(s.b.i) - BigInt(s.a.i) + 1n, 0n);
+    const pairs = lots(pp) * lots(hh);
+    gridPairs += pairs;
+    domain.push({ pfSide: sign, pf: edge(pp), hl: edge(hh), quantityPairs: String(pairs) });
     for (const seg of pp) {
       branches.push({ seg, hh, lo: seg.a.i, hi: seg.b.i });
     }
@@ -354,9 +380,12 @@ export function solveAuto(book, m, params, options = {}) {
       !cashFirst &&
       candidates.length === limit &&
       seg.step.times(hi).lt(dec(candidates.at(-1).vsTargetQuantity).abs())
-    )
+    ) {
+      pruned.sizeBound++;
       continue;
+    }
     if (++nodes > budget || evaluations >= budget) {
+      stoppedByBudget = true;
       complete = false;
       break;
     }
@@ -365,7 +394,10 @@ export function solveAuto(book, m, params, options = {}) {
       const upper = max(shiftAt(seg, lo, target), shiftAt(seg, hi, target));
       return [m.pf, m.hl].some((leg) => upper.times(leg.factor).plus(leg.mark).lte(0));
     });
-    if (invalidBoundary) continue;
+    if (invalidBoundary) {
+      pruned.invalidPrice++;
+      continue;
+    }
     const favorable = (target) => {
       const a = shiftAt(seg, lo, target),
         b = shiftAt(seg, hi, target);
@@ -404,7 +436,7 @@ export function solveAuto(book, m, params, options = {}) {
       if (cashFirst && best) {
         const cashFloor = dec(best.worstCash).minus(book.external).plus(p.k);
         minFailure = max(minFailure, cashFloor);
-        minSuccess = max(minSuccess, cashFloor.minus(payout));
+        minSuccess = max(minSuccess, cashFloor);
       }
       for (const [shift, need] of [
         [fail.plus(offset), minFailure.plus(debitFloor)],
@@ -420,13 +452,16 @@ export function solveAuto(book, m, params, options = {}) {
         const [a, b] = range;
         range = clip(a, b, cash(a, shift).minus(need), cash(b, shift).minus(need));
       }
-      if (!range) continue;
+      if (!range) {
+        pruned.cashBound++;
+        continue;
+      }
       possible = true;
       if (lo !== hi) break;
       const pf = out(seg.step.times(lo).times(seg.sign));
       const visit = (i) => remember(pf, out(h.step.times(i).times(h.sign)));
       const [first, last] = range;
-      const diff = (i) => cash(i, fail).minus(cash(i, pass)).minus(payout);
+      const diff = (i) => cash(i, fail).minus(cash(i, pass));
       const da = diff(first),
         db = diff(last);
       const peak =
@@ -447,19 +482,21 @@ export function solveAuto(book, m, params, options = {}) {
           (cashFirst || dec(pf).abs().eq(dec(cutoff.vsTargetQuantity).abs()))
         ) {
           let possible = [i, last];
-          for (const [shift, credit] of [
-            [fail, '0'],
-            [pass, payout]
-          ]) {
+          for (const shift of [fail, pass]) {
             const [a, b] = possible,
-              need = dec(cutoff.worstCash).minus(book.external).plus(p.k).minus(credit);
+              need = dec(cutoff.worstCash).minus(book.external).plus(p.k);
             possible = clip(a, b, cash(a, shift).minus(need), cash(b, shift).minus(need));
             if (!possible) break;
           }
-          if (!possible) break;
+          if (!possible) {
+            pruned.incumbentBound++;
+            break;
+          }
+          if (possible[0] > i) pruned.incumbentBound++;
           i = possible[0];
         }
         if (evaluations >= budget) {
+          stoppedByBudget = true;
           complete = false;
           break;
         }
@@ -527,6 +564,18 @@ export function solveAuto(book, m, params, options = {}) {
     (!best?.candidateLeverage || best.candidateLeverage === Number(m.hl.configuredLeverage));
   return {
     domain,
+    funding,
+    coverage: {
+      gridPairs: String(gridPairs),
+      exactPairs: evaluations,
+      leverageRows,
+      nodes,
+      budget,
+      pruned,
+      stoppedByBudget,
+      unknown,
+      method: 'branch_and_bound'
+    },
     selected: best,
     candidates,
     rejected,

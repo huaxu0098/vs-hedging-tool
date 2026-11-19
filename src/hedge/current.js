@@ -4,13 +4,15 @@ import {
   positive,
   nonnegative,
   profitSplit,
+  fundingInterval,
   solveBudgetBounds,
   normalizeExposure,
   estimateFill
 } from './math.js';
 import { validLeverageCap } from './leverage.js';
 import { auditCross } from './cross-check.js';
-import { adjustmentTarget, comparePlans, failureBridge } from './optimization.js';
+import { adjustmentTarget, comparePlans } from './optimization.js';
+import { settlementBridge } from './funding-formula.js';
 import { solveAuto } from './auto.js';
 import { calculationTrace } from './trace.js';
 import {
@@ -26,6 +28,42 @@ const optional = (x) =>
   specified(x) ? out(dec(String(x).replace(/^([+-]?)\./, (_, sign) => sign + '0.'))) : null;
 export const fresh = (stamp, now, ms) =>
   Number.isFinite(Date.parse(stamp)) && now - Date.parse(stamp) >= -1000 && now - Date.parse(stamp) <= ms;
+// Two independent venue clocks; older atomic snapshots use their common timestamp.
+export function quoteClock(q, now, ttl) {
+  const bookAt = q?.bookAt ?? q?.asOf;
+  const splitFeed = q?.bookSource?.startsWith('Hyperliquid') || q?.bookAt != null;
+  const markAt = q?.markAt ?? (splitFeed ? null : q?.asOf);
+  const age = (x) => (Number.isFinite(Date.parse(x)) ? now - Date.parse(x) : null);
+  const levels = q?.levels;
+  const depthOK =
+    Array.isArray(levels) &&
+    levels.length === 2 &&
+    levels.every(
+      (side, i) =>
+        Array.isArray(side) &&
+        side.length &&
+        side.every(
+          (row, j) =>
+            Array.isArray(row) &&
+            row.slice(0, 2).length === 2 &&
+            row.slice(0, 2).every((v) => Number.isFinite(Number(v)) && Number(v) > 0) &&
+            (!j || (i ? Number(row[0]) >= Number(side[j - 1][0]) : Number(row[0]) <= Number(side[j - 1][0])))
+        )
+    ) &&
+    Number(levels[0][0][0]) <= Number(levels[1][0][0]);
+  const bookOK = fresh(bookAt, now, ttl),
+    markOK = fresh(markAt, now, ttl) && Number(q?.mark) > 0;
+  return {
+    bookAt,
+    markAt,
+    bookAge: age(bookAt),
+    markAge: age(markAt),
+    bookOK,
+    markOK,
+    depthOK,
+    ok: bookOK && markOK && depthOK
+  };
+}
 export const rules = {
   stage: 'challenge',
   challengeFloor: '9400',
@@ -243,6 +281,7 @@ export function reason(code) {
       hl_SWITCH_MARGIN: '变更杠杆时原仓初始保证金',
       LEVERAGE_UNVERIFIED: '杠杆与清算模型未验证',
       NO_PAYOUT_TARGET: '提款参考点须高于分成基线',
+      FUNDING_RECONCILIATION: '资金公式与双边成交现金未能对账',
       NO_DISCRETE_MATCH: '按步长取整后没有可行仓位',
       NO_MATCH_IN_SEARCH: '当前搜索范围没有满足约束的仓位',
       INSUFFICIENT_DEPTH: '盘口深度不足',
@@ -301,24 +340,29 @@ function heldOutcomes(book, market, p, pf, hl) {
     if (path.some((c) => c.status === 'unknown')) notes.push('现仓到' + label + '的保证金路径未验证');
     const settled = projectSettlementEquity(book, market, 'hl', hl, shift).plus(book.external).minus(p.k);
     cash.externalReceived = book.external;
+    const bridges = (cash.paths ??= {});
+    const legs = {};
+    for (const [side, qty] of [
+      ['pf', pf],
+      ['hl', hl]
+    ]) {
+      const l = market[side];
+      legs[side] = settlementBridge(
+        book[side],
+        l,
+        qty,
+        '0',
+        shift,
+        executionDetail(l, '0'),
+        executionDetail(l, out(dec(qty).neg()), shift),
+        side === 'hl' ? p.k : '0'
+      );
+    }
+    bridges[key] = legs;
     if (key === 'fail') {
       cash.failureCash = out(settled);
       cash.failureHypeCash = out(settled.minus(book.external));
-      cash.bridge = failureBridge(
-        book.hl,
-        {
-          hlTargetQuantity: hl,
-          hlDeltaQuantity: '0',
-          lines: { fail: shift },
-          externalReceived: book.external
-        },
-        market,
-        {
-          entry: executionDetail(market.hl, '0'),
-          fail: executionDetail(market.hl, out(dec(hl).neg()), shift)
-        },
-        p.k
-      );
+      cash.bridge = { ...legs.hl, external: book.external };
     } else {
       cash.cashBeforePayout = out(settled.plus(p.inTransit));
       cash.hlBeforePayout = out(settled.minus(book.external));
@@ -386,14 +430,12 @@ function computeCurrent(r, a, data, fxData, now, options) {
   const planning = a.pf.sourceKind === 'plan' && a.hl.sourceKind === 'plan';
   const ttl = positive(r.accountSecs).toNumber() * 1000;
   const ages = positive(r.quoteSecs).toNumber() * 1000;
-  const quoteOK = (k) =>
-    fresh(data[k]?.asOf, now, ages) &&
-    (!data[k]?.markAt || fresh(data[k].markAt, now, ages)) &&
-    !data.errors?.[k];
+  const clocks = Object.fromEntries(['pf', 'hl'].map((k) => [k, quoteClock(data[k], now, ages)]));
+  const quoteOK = (k) => clocks[k].ok && !data.errors?.[k];
   const usable = (k, field) => !a[k].error && (planning || fresh(fieldTime(a[k], field), now, ttl));
   result.inputGaps = [];
   const quotes = ['pf', 'hl']
-    .flatMap((k) => [data[k]?.asOf, data[k]?.markAt])
+    .flatMap((k) => [clocks[k].bookAt, clocks[k].markAt])
     .filter(Boolean)
     .map(Date.parse);
   const stamps = planning
@@ -421,15 +463,16 @@ function computeCurrent(r, a, data, fxData, now, options) {
   const span = (times) =>
     times.length && times.every(Number.isFinite) ? Math.max(...times) - Math.min(...times) : null;
   result.timing = {
+    clocks,
+    quoteTTL: ages,
+    accountTTL: ttl,
     quoteSkew: span(quotes),
     accountSkew: span(stamps),
     quoteLimit: nonnegative(r.quoteSkewMs ?? rules.quoteSkewMs).toNumber(),
     accountLimit: nonnegative(r.accountSkewSecs ?? rules.accountSkewSecs)
       .times(1000)
       .toNumber(),
-    quoteAges: Object.fromEntries(
-      ['pf', 'hl'].map((k) => [k, data[k]?.asOf ? now - Date.parse(data[k].asOf) : null])
-    ),
+    quoteAges: Object.fromEntries(['pf', 'hl'].map((k) => [k, clocks[k].bookAge])),
     accountAges: Object.fromEntries(
       ['pf', 'hl'].map((k) => [
         k,
@@ -440,8 +483,10 @@ function computeCurrent(r, a, data, fxData, now, options) {
   if (result.timing.quoteSkew > result.timing.quoteLimit)
     issues.push('双边盘口或标记时间差超过阈值，行情熔断');
   if (result.timing.accountSkew > result.timing.accountLimit) issues.push('账户快照时间差超过阈值，账户熔断');
-  if ((a.pf.sourceKind === 'plan') !== (a.hl.sourceKind === 'plan'))
+  if ((a.pf.sourceKind === 'plan') !== (a.hl.sourceKind === 'plan')) {
     issues.push('账户来源混用，禁止跨模式计算');
+    return result;
+  }
   result.deadline =
     !funded && r.deadline && Number.isFinite(Date.parse(r.deadline))
       ? new Date(r.deadline).toISOString()
@@ -535,6 +580,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
   };
   let terminal;
   if (p.E != null && p.C_hl != null) {
+    result.funding = fundingInterval(p);
     result.range = solveBudgetBounds(p);
     if (result.range.min == null) result.range = null; // Terminal events need fresh positions and executable quotes below.
   }
@@ -574,17 +620,6 @@ function computeCurrent(r, a, data, fxData, now, options) {
       h = dec(normalizeExposure(hl, market.hl));
     result.currentH = out(h.abs().div(v.abs()));
     result.sameDirection = h.times(v).gt(0);
-    const leg = market.hl;
-    if (
-      !a.hl.otherPositions &&
-      leg.leverage &&
-      leg.hold != null &&
-      result.cash.hl != null &&
-      leg.marginMode === 'cross'
-    ) {
-      const qtyCap = dec(result.cash.hl).minus(leg.hold).div(positive(leg.mark)).times(leg.leverage);
-      result.marginMax = out(dec(normalizeExposure(out(qtyCap), leg)).div(v.abs()));
-    }
   }
   if (!planning && !funded && !r.deadline) result.notices.push('截止时间未录入');
   if (funded && p.C_ref == null) result.notices.push('缺少本轮起点，整轮收益及其比例上限未验证');
@@ -603,14 +638,19 @@ function computeCurrent(r, a, data, fxData, now, options) {
   if (!fx) issues.push('缺少有效 USDC/USDT 折算，可在规则中确认汇率');
   if (!market) issues.push('等待已核实的双边合约与盘口');
   for (const k of ['pf', 'hl']) {
-    if (
-      !fresh(data[k]?.asOf, now, ages) ||
-      (data[k]?.markAt && !fresh(data[k].markAt, now, ages)) ||
-      data.errors?.[k]
-    )
+    if (!quoteOK(k))
       issues.push(
         (k === 'pf' ? 'VS' : 'Hype') +
-          (data.errors?.[k] ? ' 行情接口断开：' + data.errors[k] : ' 行情缺失或过期')
+          (data.errors?.[k]
+            ? ' 行情接口断开：' + data.errors[k]
+            : ' 行情缺失或过期 · ' +
+              [
+                !clocks[k].bookOK && '盘口时间',
+                !clocks[k].markOK && '标记价或时间',
+                !clocks[k].depthOK && '盘口深度无效'
+              ]
+                .filter(Boolean)
+                .join('、'))
       );
     if (a[k].error) issues.push(a[k].error);
     if (result.qty[k] != null && !dec(result.qty[k]).isZero() && !a[k].anchor)
@@ -850,9 +890,14 @@ function computeCurrent(r, a, data, fxData, now, options) {
     result.maximum = {
       amount: size.selected.vsNotional,
       candidate: size.selected,
+      search: size.coverage,
       complete: size.searchComplete && creditKnown
     };
-    result.conservative = { candidate: cash.selected, complete: cash.searchComplete && creditKnown };
+    result.conservative = {
+      candidate: cash.selected,
+      search: cash.coverage,
+      complete: cash.searchComplete && creditKnown
+    };
     result.comparison = comparePlans(size.selected, cash.selected);
     const preference = nonnegative(r.riskPreference ?? '0');
     if (preference.gt(100)) throw Error('风险偏好须在 0 至 100 之间');
@@ -864,7 +909,19 @@ function computeCurrent(r, a, data, fxData, now, options) {
         ? cash
         : solveAuto(book, market, params, { ...checks, seeds: [cash.selected] });
     }
-    result.preference = { percent: out(preference), floor: params.cashFloor ?? size.selected.worstCash };
+    result.preference = {
+      percent: out(preference),
+      floor: params.cashFloor ?? size.selected.worstCash,
+      sizeFloor: size.selected.worstCash,
+      cashFloor: cash.selected?.worstCash ?? null,
+      endpointsComplete: result.maximum.complete && result.conservative.complete,
+      objective: preference.eq(100)
+        ? 'max_min_cash'
+        : preference.isZero()
+          ? 'max_pf'
+          : 'max_pf_with_cash_floor'
+    };
+    if (preference.gt(0) && !result.preference.endpointsComplete) solved.searchComplete = false;
     for (const plan of [result.maximum, result.conservative])
       if (plan.candidate) plan.audit = auditCross(market.hl, a.hl, plan.candidate, planning);
   }
@@ -876,7 +933,13 @@ function computeCurrent(r, a, data, fxData, now, options) {
       if (solved.code === 'AUTO_INFEASIBLE') solved.code = 'AUTO_PARTIAL';
     }
     result.autoStatus = solved.code;
-    result.search = { complete: solved.searchComplete, evaluations: solved.evaluations, nodes: solved.nodes };
+    result.domain ??= solved.domain;
+    result.search = {
+      complete: solved.searchComplete,
+      evaluations: solved.evaluations,
+      nodes: solved.nodes,
+      ...solved.coverage
+    };
     if (
       solved.selected?.candidateLeverage &&
       market.hl.configuredLeverage &&
@@ -891,6 +954,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
       hl: c.hlTargetQuantity,
       candidate: c,
       why: reason(c.constraints?.find((x) => x.status === 'fail')?.code ?? c.code),
+      gaps: (c.constraints ?? []).filter((x) => x.status !== 'pass'),
       check: c.constraints?.find((x) => x.status === 'fail')
     }));
     result.waiting = solved.hold;
@@ -899,6 +963,9 @@ function computeCurrent(r, a, data, fxData, now, options) {
     if (solved.selected) {
       const missing = [];
       if (planning) missing.push('账户资金采用预设规划');
+      for (const [side, name] of [['pf','PF'],['hl','Hype']]) {
+        if (!dec(result.qty[side]).isZero() && !a[side].anchor) missing.push(name + ' 非空现仓的权益标记价待确认');
+      }
       if (result.leverageStatus !== 'ACCOUNT_MODEL') missing.push('实际杠杆设置或调档后可用额度待核实');
       if (result.stress.missing.length || result.stress.zero.length) missing.push(result.stress.label);
       if (!market.hl.capacity || a.hl.fee == null) missing.push('Hype 账户实际可开额度或费率待核实');
@@ -947,6 +1014,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
       if (held) {
         result.heldCash = held.cash;
         result.bridge = held.cash.bridge;
+        result.paths = held.cash.paths;
         result.notices.push('以下现金按现有已成交仓位、保持不动计算', ...held.notes);
         if (held.cash.failureCash != null)
           result.failVsPrincipal = out(dec(held.cash.failureCash).minus(protection));
@@ -1013,7 +1081,29 @@ function computeCurrent(r, a, data, fxData, now, options) {
     };
   }
   result.audit ??= auditCross(market.hl, a.hl, c, planning);
-  result.bridge = failureBridge(result.cash.hl, c, market, result.costs.hl, r.k);
+  result.paths = c.funding?.paths ?? {};
+  for (const path of ['fail', 'pass']) {
+    if (result.paths[path]) continue;
+    const legs = {};
+    for (const [side, target, delta] of [
+      ['pf', c.vsTargetQuantity, c.vsDeltaQuantity],
+      ['hl', c.hlTargetQuantity, c.hlDeltaQuantity]
+    ]) {
+      const costs = result.costs[side];
+      legs[side] = settlementBridge(
+        result.cash[side],
+        market[side],
+        target,
+        delta,
+        c.lines[path],
+        costs.entry,
+        costs[path],
+        side === 'hl' ? r.k : '0'
+      );
+    }
+    result.paths[path] = legs;
+  }
+  result.bridge = { ...result.paths.fail.hl, external: c.externalReceived };
   result.failVsPrincipal = out(dec(c.failureCash).minus(protection));
   result.passVsPrincipal = out(dec(c.pressureCashAfter).minus(protection));
   result.adjust = {};

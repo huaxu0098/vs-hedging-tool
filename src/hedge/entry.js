@@ -3,6 +3,7 @@ import {
   rules,
   calculateCurrent,
   fresh,
+  quoteClock,
   fieldTime,
   stressFields,
   reason as constraintReason
@@ -128,7 +129,12 @@ const planFields = {
 };
 for (const [k, label] of Object.entries(planFields)) input('plan-fields', k, label);
 for (const [k, label] of Object.entries(ruleFields))
-  input('rule-fields', k, label, k === 'deadline' ? 'datetime-local' : 'text');
+  input(
+    k in stressFields ? 'stress-fields' : 'rule-fields',
+    k,
+    label,
+    k === 'deadline' ? 'datetime-local' : 'text'
+  );
 for (const side of ['pf', 'hl'])
   for (const [k, label] of Object.entries(legFields))
     if (k !== 'free') input('leg-settings', side + '-' + k, (side === 'pf' ? 'VS ' : 'Hype ') + label);
@@ -307,6 +313,7 @@ function renderRisk(result, accounts, market) {
           '独立权益与维持保证金交点核对 ' +
             (audit.mathMatches == null ? '无法验证' : audit.mathMatches ? '一致' : '不一致'),
           '目标仓模型 ' + fmt(audit.model) + ' / 独立数值解 ' + fmt(audit.independent),
+          '交易所核验 · ' + audit.exchangeCheck,
           '现仓模型 ' + fmt(audit.currentModel) + ' / 平台现仓参考 ' + fmt(audit.reference),
           '现仓维持要求 模型 ' + money(audit.currentMaintenance) + ' / 平台 ' + money(audit.apiMaintenance),
           ...audit.gaps
@@ -434,7 +441,7 @@ function currentFrame(a, m, t) {
       completed = {
         context,
         key,
-        stamps: [m.pf.asOf, m.hl.asOf, m.pf.markAt, m.hl.markAt].filter(Boolean),
+        stamps: ['pf', 'hl'].flatMap((k) => [m[k].bookAt ?? m[k].asOf, m[k].markAt ?? m[k].asOf]),
         result: {
           ...result,
           stateVersion: revision,
@@ -500,7 +507,191 @@ for (const el of frameCards) {
   stamp.className = 'frame-key';
   (el.id === 'cash-results' ? el.parentElement : el).append(stamp);
 }
+function renderFunding(result, a, m, plan) {
+  const f = result.funding,
+    c = result.candidate,
+    v = c?.funding;
+  put(
+    'formula-inputs',
+    f?.lower == null
+      ? '等待有效的资金快照、阶段和边界。'
+      : '保护本金及额外历史成本 B ' +
+          money(f.B) +
+          ' · Hype 当前权益 ' +
+          money(f.C_H) +
+          '（' +
+          (a.hl.source ?? '手工快照') +
+          '）＋外部已到账 ' +
+          money(f.C_E) +
+          ' = 保护资金 ' +
+          money(f.C_P) +
+          '。PF 权益 ' +
+          money(f.E) +
+          '（' +
+          (a.pf.source ?? '手工快照') +
+          '），失败线 ' +
+          money(f.F) +
+          '，成功线 ' +
+          money(f.T) +
+          '。'
+  );
+  put(
+    'formula-bounds',
+    f?.lower == null
+      ? ''
+      : '理论保护下限 max(0, (' +
+          fmt(f.B) +
+          ' − ' +
+          fmt(f.C_P) +
+          ' + ' +
+          fmt(f.failCost) +
+          ') ÷ ' +
+          fmt(f.loss) +
+          ') = ' +
+          pct(f.lower) +
+          '；到账前上限 (' +
+          fmt(f.C_H) +
+          ' − ' +
+          fmt(f.R) +
+          ' − ' +
+          fmt(f.passCost) +
+          ') ÷ ' +
+          fmt(f.gain) +
+          ' = ' +
+          pct(f.upper) +
+          '。此处费用仅含额外终点预算。' +
+          (f.code === 'NO_CASH_INTERSECTION'
+            ? '理论无交集。取下限时成功端缺 ' +
+              money(f.successShortfallAtLower) +
+              (f.failureShortfallAtUpper == null
+                ? '；零对冲亦缺留存 ' + money(f.reserveShortfallAtZero)
+                : '；取上限时失败保护缺 ' + money(f.failureShortfallAtUpper)) +
+              '。'
+            : '')
+  );
+  put(
+    'formula-pair',
+    v
+      ? '本候选按两边实际数量核算，每单位共同价格变化 PF ' +
+          fmt(v.Kpf, 7) +
+          ' U、Hype ' +
+          fmt(v.Kh, 7) +
+          ' U。目标 h = |Hype / PF| = ' +
+          pct(v.h) +
+          '。实际成交成本折算到对冲端，失败 ' +
+          money(v.failCost) +
+          '、成功 ' +
+          money(v.passCost) +
+          '；代入本候选成本的现金下限 ' +
+          pct(v.lower) +
+          '，上限 ' +
+          pct(v.upper) +
+          '。' +
+          (v.stress
+            ? '计入已配置压力，保护下限 ' + pct(v.stress.lower) + '，留存上限 ' + pct(v.stress.upper) + '。'
+            : '')
+      : result.refreshPending
+        ? '资金、规则或行情已更新，等待本版仓位核算。'
+        : '当前没有可逐笔核对的 AUTO 候选。'
+  );
+  const paths = result.paths;
+  const cols = ['fail', 'pass'].flatMap((s) => ['pf', 'hl'].map((k) => paths?.[s]?.[k]));
+  const items = [
+    ['起始标记权益', 'start'],
+    ['目标仓标记盈亏', 'move'],
+    ['差额调仓 Mark 至买卖一档', 'entrySpread'],
+    ['调仓深度滑点（扣）', 'entrySlippage'],
+    ['调仓手续费（扣）', 'entryFee'],
+    ['平仓 Mark 至买卖一档', 'exitSpread'],
+    ['平仓深度滑点（扣）', 'exitSlippage'],
+    ['平仓手续费（扣）', 'exitFee'],
+    ['另设终点摩擦（扣）', 'friction'],
+    ['预计双边平仓后各自结算余额', 'settled'],
+    ['起始标记价', 'mark'],
+    ['差额调仓均价', 'entryPrice'],
+    ['边界标记价', 'exitMark'],
+    ['预计平仓均价', 'exitPrice'],
+    ['合约乘数', 'multiplier'],
+    ['结算币兑 U', 'fx'],
+    ['数量步长', 'step']
+  ];
+  const rows = paths
+    ? items.map(([title, key], i) =>
+        cellRow([title, ...cols.map((b) => (b?.[key] == null ? '—' : i < 10 ? fmt(b[key], 4) : b[key]))])
+      )
+    : [];
+  const table = $('path-rows');
+  if (table.textContent !== rows.map((row) => row.textContent).join('')) table.replaceChildren(...rows);
+  put(
+    'settlement-note',
+    paths
+      ? '终点按当前可见盘口平移至 VS 触线时的预计成交均价。表内价差、深度滑点和手续费各计一次。PF 模拟利润留在 PF 账本。外部已到账 ' +
+          money(result.externalValue) +
+          '。成功时预计可分 ' +
+          money((c ?? result.heldCash)?.expectedUserPayout) +
+          '，到账前不计入 Hype。'
+      : ''
+  );
+  const pass = paths?.pass;
+  put(
+    'pass-bridge',
+    pass
+      ? 'Hype 起点 ' +
+          money(pass.hl.start) +
+          ' → 成功路径预计 ' +
+          money(pass.hl.settled) +
+          '；Hype 标记盈亏 ' +
+          signedMoney(pass.hl.move) +
+          '。'
+      : ''
+  );
+  put(
+    'frame-times',
+    result.trace
+      ? '行情 · VS ' +
+          clock(m.pf?.bookAt ?? m.pf?.asOf) +
+          ' / Hype ' +
+          clock(m.hl?.asOf) +
+          ' ｜ 账户 · ' +
+          (plan
+            ? '预设资金规划'
+            : 'VS ' + clock(fieldTime(a.pf, 'equity')) + ' / Hype ' + clock(fieldTime(a.hl, 'equity'))) +
+          ' ｜ 规则 · ' +
+          (r.editedAt ? clock(r.editedAt) : '初始配置') +
+          ' ｜ 计算 · ' +
+          clock(result.trace.at)
+      : '等待同一版本的计算结果'
+  );
+  const s = result.search;
+  put(
+    'search-coverage',
+    s?.pruned
+      ? '数量上限与深度分段后共 ' +
+          s.gridPairs +
+          ' 对网格点。分支定界，实际核算 ' +
+          s.exactPairs +
+          ' 对与 ' +
+          s.leverageRows +
+          ' 个杠杆档次，访问 ' +
+          s.nodes +
+          ' 个分支（预算 ' +
+          s.budget +
+          '）。剪枝次数 · 仓位上界 ' +
+          s.pruned.sizeBound +
+          '、价格失效 ' +
+          s.pruned.invalidPrice +
+          '、现金上下界 ' +
+          s.pruned.cashBound +
+          '、已知更优解 ' +
+          s.pruned.incumbentBound +
+          '。' +
+          (s.stoppedByBudget ? '已用尽预算，最优性未证实。' : '') +
+          (result.solveMs == null ? '' : '本帧联合求解 ' + result.solveMs + ' ms。')
+      : ''
+  );
+}
 function renderConditions(result, a, m, plan) {
+  renderFunding(result, a, m, plan);
   put(
     'funding-banner',
     plan
@@ -520,13 +711,19 @@ function renderConditions(result, a, m, plan) {
     'clock-skew',
     t
       ? 'VS 盘口 ' +
-          (m.pf?.asOf ?? '未取得') +
+          (t.clocks.pf.bookAt ?? '未取得') +
           '，年龄 ' +
           age(t.quoteAges.pf) +
           ' / Hype 盘口 ' +
           (m.hl?.asOf ?? '未取得') +
           '，年龄 ' +
           age(t.quoteAges.hl) +
+          ' · 标记年龄 VS ' +
+          age(t.clocks.pf.markAge) +
+          ' / Hype ' +
+          age(t.clocks.hl.markAge) +
+          ' · 盘口与标记有效期 ' +
+          age(t.quoteTTL) +
           ' · 盘口与标记最大时差 ' +
           (t.quoteSkew ?? '—') +
           ' / 允许 ' +
@@ -554,7 +751,11 @@ function renderConditions(result, a, m, plan) {
   );
   put(
     'cash-title',
-    result.conservative && !result.conservative.complete ? '现金优先候选 · 最优性待验证' : '保守推荐方案'
+    result.conservative && !result.conservative.complete
+      ? '现金优先候选 · 最优性待验证'
+      : actualStress
+        ? '已配置情景 · 现金优先'
+        : '基础情景 · 现金优先'
   );
   const diff = result.comparison;
   put(
@@ -576,9 +777,33 @@ function renderConditions(result, a, m, plan) {
     (r.riskPreference ?? '0') +
       '% · 当前方案最差个人现金留存下限 ' +
       money(result.preference?.floor) +
+      (result.preference
+        ? '（' +
+          money(result.preference.sizeFloor) +
+          ' + ' +
+          (r.riskPreference ?? '0') +
+          '% × 两端最低现金差）'
+        : '') +
       '；失败保护、保证金与清算约束继续生效。'
   );
   $('riskPreference').disabled = r.mode !== 'auto';
+  put(
+    'risk-tradeoff',
+    diff
+      ? '现金优先相对仓位优先 · Hype 名义额 ' +
+          signedMoney(diff.hypeChange) +
+          '，失败端现金 ' +
+          signedMoney(diff.failureChange) +
+          '，当前维持保证金 ' +
+          signedMoney(diff.maintenanceChange) +
+          '，路径最低维持余量 ' +
+          signedMoney(diff.surplusChange) +
+          '，成功线至强平线距离变化 ' +
+          (diff.distanceChange == null ? '无可比较交点' : signed(diff.distanceChange) + ' 价格单位') +
+          '，候选杠杆变化 ' +
+          (diff.leverageChange == null ? '—' : signed(diff.leverageChange) + '×')
+      : ''
+  );
   const h = result.advice;
   put(
     'hysteresis',
@@ -625,23 +850,11 @@ function renderConditions(result, a, m, plan) {
     );
   }
   const tr = result.trace;
-  const stamp = tr
-    ? '行情 ' +
-      tr.marketId.slice(0, 6) +
-      ' · 账户 ' +
-      tr.accountsId.slice(0, 6) +
-      ' · 规则 ' +
-      tr.rulesId.slice(0, 6) +
-      ' · ' +
-      tr.model +
-      ' / ' +
-      tr.id.slice(0, 8)
-    : '等待同帧核算';
-  for (const el of document.querySelectorAll('.frame-key'))
-    if (el.textContent !== stamp) {
-      el.textContent = stamp;
-      el.title = tr ? [tr.marketId, tr.accountsId, tr.rulesId, tr.model, tr.id].join(' / ') : stamp;
-    }
+  const stamp = tr ? '行情 ' + clock(m.hl?.asOf) + ' · 核算 ' + clock(tr.at) : '等待同帧核算';
+  for (const el of document.querySelectorAll('.frame-key')) {
+    if (el.textContent !== stamp) el.textContent = stamp;
+    el.title = tr ? [tr.marketId, tr.accountsId, tr.rulesId, tr.model, tr.id].join(' / ') : stamp;
+  }
   updateDeadline();
 }
 function render() {
@@ -686,19 +899,22 @@ function render() {
   put('configured-leverage', configured ? configured + '×' : '未知');
   put(
     'leverage-cap',
-    c?.exchangeMaxLeverage
+    (c?.exchangeMaxLeverage
       ? '该仓位档位上限 ' + c.exchangeMaxLeverage + '× · 合约上限 ' + c.contractMaxLeverage + '×'
-      : '合约上限 ' + (m.hl?.maxLeverage ? m.hl.maxLeverage + '×' : '待核实')
+      : '合约上限 ' + (m.hl?.maxLeverage ? m.hl.maxLeverage + '×' : '待核实')) +
+      ' · 档位读取 ' +
+      clock(m.hl?.tiersAt)
   );
   put(
     'leverage-status',
-    plan
-      ? '规划资金 · LEVERAGE_UNVERIFIED'
+    (plan
+      ? '规划资金 · LEVERAGE_UNVERIFIED · 候选调档额度未经交易所确认'
       : configured
         ? 'Hyperliquid 只读快照 · ' +
           clock(a.hl.at) +
           (result.leverageStatus === 'LEVERAGE_UNVERIFIED' ? ' · LEVERAGE_UNVERIFIED' : '')
-        : '账户设置未读取 · LEVERAGE_UNVERIFIED'
+        : '账户设置未读取 · LEVERAGE_UNVERIFIED') +
+      (configured != null && leverage === configured ? ' · 按当前档额度' : ' · 目标档额度待核实')
   );
   const grid = c?.leverageGrid ?? [];
   const lower = grid.find((row) => row.leverage === leverage - 1);
@@ -1013,7 +1229,10 @@ function render() {
       money(c.worstCash),
       fmt(c.priceBuffer),
       money(c.initialMargin[0]),
-      '基础约束通过 · 失败端 ' +
+      (c.funding
+        ? '失败 / 成功成本 ' + money(c.funding.failCost) + ' / ' + money(c.funding.passCost) + ' · '
+        : '') +
+        '基础约束通过 · 失败端 ' +
         money(c.failureCash) +
         ' / 成功端 Hype ' +
         money(c.hlBeforePayout) +
@@ -1033,7 +1252,14 @@ function render() {
         money(bad.candidate?.worstCash),
         fmt(bad.candidate?.priceBuffer),
         money(bad.candidate?.initialMargin?.[0]),
-        bad.why +
+        (bad.candidate?.funding
+          ? '失败 / 成功成本 ' +
+            money(bad.candidate.funding.failCost) +
+            ' / ' +
+            money(bad.candidate.funding.passCost) +
+            ' · '
+          : '') +
+          bad.why +
           (bad.check
             ? '，实算 ' +
               checkNumber(bad.check.actual, bad.check.unit) +
@@ -1043,6 +1269,19 @@ function render() {
               checkNumber(bad.check.shortfall, bad.check.unit) +
               ' ' +
               bad.check.unit
+            : '') +
+          (bad.gaps?.length > 1
+            ? ' ｜ ' +
+              bad.gaps
+                .filter((gap) => gap.code !== bad.check?.code)
+                .map(
+                  (gap) =>
+                    constraintReason(gap.code) +
+                    (gap.shortfall == null
+                      ? ' 待核实'
+                      : ' 缺 ' + checkNumber(gap.shortfall, gap.unit) + ' ' + gap.unit)
+                )
+                .join('、')
             : '')
       ])
     );
@@ -1074,6 +1313,12 @@ function render() {
               money(pick.worstCash) +
               ' · Hype 初始保证金 ' +
               money(pick.requiredInitialMargin),
+            '路径最低维持余量 ' +
+              money(pick.stressedSurplus ?? pick.baseSurplus) +
+              ' · 成功线至强平线距离 ' +
+              (pick.priceBuffer == null
+                ? '无可比较交点'
+                : fmt(pick.stressPriceBuffer ?? pick.priceBuffer) + ' 价格单位'),
             plan.complete
               ? '当前输入、行情快照、已配置约束与已枚举数量网格内最优'
               : '本次搜索已找到的候选，最优性待验证',
@@ -1311,12 +1556,7 @@ function render() {
           pct(b.min) +
           ' · 到账前现金上限 ' +
           pct(b.cashMax) +
-          ' · Hype 初始保证金比例上限 ' +
-          (result.marginMax != null
-            ? pct(result.marginMax)
-            : result.qty.pf === '0'
-              ? '随 PF 候选逐笔验算'
-              : '未核实') +
+          ' · Hype 初始保证金按每对目标数量和候选档位单独核验' +
           (r.stage === 'funded'
             ? ' · 整轮利润上限 ' + (b.profitMax == null ? '缺少本轮起点' : pct(b.profitMax))
             : '') +
@@ -1528,9 +1768,7 @@ function render() {
             (manual ? '手工盘口' : k === 'pf' ? 'Vest WebSocket' : q.bookSource) +
             ' · ' +
             freshnessLabel(q.asOf, r.quoteSecs) +
-            (q.markAt
-              ? ' · 标记价 REST 请求 ' + clock(q.markAt) + ' ' + freshnessLabel(q.markAt, r.quoteSecs)
-              : '')
+            (q.markAt ? ' · 标记价 ' + clock(q.markAt) + ' ' + freshnessLabel(q.markAt, r.quoteSecs) : '')
           : '')
     );
   }
@@ -1931,7 +2169,9 @@ for (const s of ['pf', 'hl'])
 for (const field of Object.keys(planFields))
   $(field).oninput = () => {
     if (!planning()) return;
+    const followCapital = field === 'planCapital' && r.B === r.planCapital;
     r[field] = $(field).value.trim();
+    if (followCapital) r.B = r[field];
     r.editedAt = now();
     save();
     inputs();
@@ -1940,6 +2180,7 @@ for (const field of Object.keys(planFields))
 $('plan-cross-flat').onchange = () => {
   if (planning()) {
     r.planCrossFlat = $('plan-cross-flat').checked;
+    r.editedAt = now();
     save();
     inputs();
     render();
@@ -2134,7 +2375,8 @@ $('confirm-quote').onclick = () => {
         throw Error('盘口无效');
       both[k] = {
         ...spec,
-        markAt: null,
+        bookAt: q.bookAt ?? q.asOf,
+        markAt: q.markAt ?? q.asOf,
         bookSource: '手工盘口',
         mark: out(positive(String(q.mark))),
         asOf: q.asOf,
@@ -2159,8 +2401,7 @@ setInterval(() => {
     m = market();
   const next = [
     completed?.stamps.every((v) => fresh(v, t, Number(r.quoteSecs) * 1000)) ?? false,
-    ...['pf', 'hl'].map((k) => fresh(m[k]?.asOf, t, Number(r.quoteSecs) * 1000)),
-    !m.hl?.markAt || fresh(m.hl.markAt, t, Number(r.quoteSecs) * 1000),
+    ...['pf', 'hl'].map((k) => quoteClock(m[k], t, Number(r.quoteSecs) * 1000).ok),
     ...['pf', 'hl'].map((k) => fresh(account(k).at, t, Number(r.accountSecs) * 1000)),
     ...['pf', 'hl'].flatMap((k) =>
       Object.values(local()[k].origins ?? {}).map((meta) => fresh(meta.at, t, Number(r.accountSecs) * 1000))

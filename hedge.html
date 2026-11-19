@@ -74,8 +74,8 @@
           <strong id="fail-summary">—</strong><span id="cash-bridge"></span><span id="fail-parts"></span><span id="fail-change"></span>
         </article>
         <article>
-          <h2 id="pass-heading">成功端 Hype 现金（分成到账前）</h2>
-          <strong id="pass-summary">—</strong><span id="pass-change"></span>
+          <h2 id="pass-heading">成功路径预计 Hype 现金（双边平仓、分成到账前）</h2>
+          <strong id="pass-summary">—</strong><span id="pass-bridge"></span><span id="pass-change"></span>
         </article>
         <article>
           <h2 id="protection-label">已确认个人保护资金</h2>
@@ -113,17 +113,27 @@
         <p id="summary-status" role="status"></p>
         <div id="missing-list" aria-label="待核实条件"></div>
       </section>
+      <section class="card" id="funding-formula">
+        <h2>资金规则如何决定对冲比例</h2>
+        <p id="formula-inputs"></p><p id="formula-bounds"></p><p id="formula-pair"></p>
+        <details><summary>核对失败和成功路径的成交现金</summary>
+          <div class="table-wrap"><table><thead><tr><th>项目（U）</th><th>失败 · PF 模拟</th><th>失败 · Hype</th><th>成功 · PF 模拟</th><th>成功 · Hype</th></tr></thead>
+          <tbody id="path-rows"></tbody></table></div><p id="settlement-note"></p>
+        </details>
+        <p id="frame-times"></p>
+      </section>
       <section class="card" id="plan-comparison">
         <h2>双方案对照</h2>
         <label class="risk-choice">风险偏好 · 仓位优先 → 现金留存优先
           <input id="riskPreference" type="range" min="0" max="100" step="1" value="0" />
           <output id="preference-info"></output>
+          <span>0% 最大化 PF 仓位。100% 最大化已配置情景中最低的可用个人现金。中间值在两端现金下限间线性插值，在满足该下限后最大化 PF 仓位。</span>
         </label>
         <div class="dual-plans">
           <div><h3 id="size-title">最大可行方案</h3><p>优先扩大符合约束的 PF 仓位。每个候选均须满足失败保护及已配置的风险约束。</p><p id="size-plan"></p></div>
           <div><h3 id="cash-title">保守推荐方案</h3><p>优先保留两端及已配置压力情景中最少的个人现金，同额时优先较小 PF 仓位。</p><p id="cash-plan"></p></div>
         </div>
-        <p id="plan-tradeoff"></p>
+        <p id="plan-tradeoff"></p><p id="risk-tradeoff"></p>
       </section>
       <details class="card" id="trace-panel">
         <summary>本次计算依据 · <span id="trace-id"></span></summary>
@@ -136,7 +146,7 @@
         <div class="flat-entry" id="flat-entry">
           <div id="separate-confirm"></div>
           <button type="button" id="confirm-flat">确认双方全账户空仓、无挂单，均使用全仓</button>
-          <span>仅当前合约空仓时，可单独填写数量 0。权益与可用保证金须来自对应账户。</span
+          <span>全账户确认涵盖当前资金池内所有品种和挂单。主账户与各子账户分别核对，仅录入本次选定账户；其他独立资金池的余额不能相加。仅当前合约空仓时，可单独填写数量 0。权益与可用保证金须来自对应账户。</span
           ><span id="flat-feedback" role="status"></span>
         </div>
         <div class="accounts">
@@ -201,7 +211,7 @@
           <summary>查看已验证的比例点</summary>
           <p id="points"></p>
         </details>
-        <p id="auto-search"></p><p id="hysteresis"></p>
+        <p id="auto-search"></p><p id="search-coverage"></p><p id="hysteresis"></p>
         <p id="two-day"></p>
         <p id="best-two"></p>
         <details>
@@ -386,6 +396,10 @@
           </select></label
         >
         <p id="external-value"></p>
+        <details id="stress-guide"><summary>配置额外压力假设</summary>
+          <p>四项均为本机用户假设。基差或跳价取对 Hype 不利的一侧，两者取较大变动；延迟按调仓差额计损，资金费按持有期间的支出扣减。空白表示未配置，手工填 0 表示明确采用零压力。</p>
+          <div class="form" id="stress-fields"></div>
+        </details>
         <div class="form" id="rule-fields"></div>
         <p>
           现金范围按当前权益计算。条件仓位按双边盘口、差额成交费及数量步长核算，假设到达边界期间标的同步变动；未来基差、滑点变化和资金费待核实。

@@ -1,7 +1,7 @@
 import { dec, out, nonnegative, positive } from './math.js';
 import { readAccount, accountMode } from './adapters.js';
 
-export async function accountSnapshot(user, asset, query) {
+export async function accountSnapshot(user, asset, query, clock = Date.now) {
   if (!/^0x[0-9a-f]{40}$/i.test(user)) throw Error('请填写有效的 Hype 公开地址');
   const types = [
     'clearinghouseState',
@@ -10,12 +10,16 @@ export async function accountSnapshot(user, asset, query) {
     'activeAssetData',
     'userFees'
   ];
+  const requested = {};
   const data = await Promise.allSettled(
-    types.map((type) => query({ type, user, ...(type === 'activeAssetData' ? { coin: asset } : {}) }))
+    types.map((type) => {
+      requested[type] = new Date(clock()).toISOString();
+      return query({ type, user, ...(type === 'activeAssetData' ? { coin: asset } : {}) });
+    })
   );
   if (data[0].status !== 'fulfilled') throw Error('Hype 账户查询失败');
   const result = (i) => (data[i].status === 'fulfilled' ? data[i].value : undefined);
-  const receivedAt = new Date().toISOString();
+  const receivedAt = new Date(clock()).toISOString();
   const account = readAccount(result(0), { user, dex: '', token: 'USDC', receivedAt });
   if (!account.occurredAt) throw Error('Hype 账户快照缺少来源时间');
   const pos = account.positions.find((p) => p.symbol === asset);
@@ -45,6 +49,12 @@ export async function accountSnapshot(user, asset, query) {
   return {
     source: 'Hype 主网 API',
     at: account.occurredAt,
+    ordersAt: requested.frontendOpenOrders,
+    feeAt: requested.userFees,
+    capacityAt: requested.activeAssetData,
+    freeAt: requested.activeAssetData,
+    leverageAt: validCap ? requested.activeAssetData : account.occurredAt,
+    marginModeAt: validCap ? requested.activeAssetData : account.occurredAt,
     receivedAt,
     equity: unsupported ? null : account.equity,
     rawEquity: account.equity,

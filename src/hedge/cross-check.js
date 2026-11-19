@@ -53,7 +53,14 @@ export function auditCross(leg, account, c, planning) {
   if (account.otherPositions !== false || account.otherHold == null || !Array.isArray(account.orders))
     gaps.push('全账户仓位与挂单');
   if (account.fee == null) gaps.push('实际费率');
-  const audit = { gaps, model: c.modelLiq ?? null, independent: null, reference: null, status: '条件估算' };
+  const audit = {
+    exchangeCheck: '未取得可比现仓',
+    gaps,
+    model: c.modelLiq ?? null,
+    independent: null,
+    reference: null,
+    status: '条件估算'
+  };
   const im = c.constraints.find((x) => x.code === 'hl_INITIAL_MARGIN');
   if (!leg.tiers || leg.marginMode !== 'cross' || leg.hold == null || im?.actual == null) {
     gaps.push('完整全仓维持模型');
@@ -93,6 +100,7 @@ export function auditCross(leg, account, c, planning) {
   if (account.source === 'Hype 主网 API' && account.equity != null && account.qty != null) {
     const flat = dec(account.qty).isZero(),
       anchor = account.anchor;
+    audit.exchangeCheck = flat ? '当前空仓，无现仓强平参考' : '现仓参考未完成核对';
     if (!flat && !anchor) gaps.push('现仓快照标记价');
     if (account.crossMaintenance == null) gaps.push('平台全仓维持要求');
     if (flat || anchor) {
@@ -109,11 +117,17 @@ export function auditCross(leg, account, c, planning) {
         audit.currentModel = crossCheckRoot(leg, account.qty, account.equity, mark, other);
         audit.reference = account.liquidation ?? null;
         audit.priceTolerance = out(dec(mark).times('0.0001'));
+        if (audit.reference != null && near(audit.currentModel, audit.reference, audit.priceTolerance))
+          audit.exchangeCheck = gaps.length ? '现仓参考在容差内，账户资料不全' : '已核对现仓参考';
         if (audit.reference == null || !near(audit.currentModel, audit.reference, audit.priceTolerance))
           gaps.push('现仓强平参考缺失或偏差超过快照标记价的 1 基点');
       }
     }
   }
-  if (!gaps.length) audit.status = '模型与当前账户快照已核对';
+  if (!gaps.length)
+    audit.status =
+      audit.exchangeCheck === '已核对现仓参考'
+        ? '模型与当前账户快照已核对'
+        : '目标仓条件估算 · 当前账户维持要求已核对';
   return audit;
 }

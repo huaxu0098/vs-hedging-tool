@@ -13,6 +13,7 @@ import {
   solveExactBounds,
   profitSplit
 } from './math.js';
+import { settlementBridge, verifyFundingPair } from './funding-formula.js';
 import { balances, markEquity } from './book.js';
 
 const leg = (name, unit, mark, multiplier, step, fee, underlying) => ({
@@ -95,6 +96,31 @@ export function executionDetail(l, delta, shift = '0') {
     price: fill.price,
     impact: out(dec(fill.price).minus(best).abs().times(n.abs()).times(value(l)))
   };
+}
+
+export function fundingProof(profile, market, c) {
+  const paths = { fail: {}, pass: {} };
+  for (const [venue, cash, target, delta] of [
+    ['pf', profile.E, c.vsTargetQuantity, c.vsDeltaQuantity],
+    ['hl', profile.C_hl, c.hlTargetQuantity, c.hlDeltaQuantity]
+  ]) {
+    const leg = market[venue],
+      entry = executionDetail(leg, delta);
+    for (const [path, shift] of Object.entries(c.lines)) {
+      const exit = executionDetail(leg, out(dec(target).neg()), shift);
+      paths[path][venue] = settlementBridge(
+        cash,
+        leg,
+        target,
+        delta,
+        shift,
+        entry,
+        exit,
+        venue === 'hl' ? profile.k : '0'
+      );
+    }
+  }
+  return verifyFundingPair(profile, market, c, paths);
 }
 
 export function projectSettlementEquity(
@@ -459,6 +485,7 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
     .div(m.hl.factor)
     .times(h.gt(0) ? -1 : 1);
   const scenarioCash = [];
+  let endpointStress = null;
   const delayDebit = h
     .minus(qty(pos(s, m, 'hl')))
     .abs()
@@ -505,7 +532,14 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
       ...validateMargin(s, m, 'hl', hlQty, shifts, options.catalog, out(extraDebit)).at(-1),
       code: 'STRESS_MAINTENANCE'
     });
-    scenarioCash.push(out(downside), out(end));
+    endpointStress = {
+      failureCash: out(downside),
+      successHypeCash: out(survive),
+      priceShock: out(shock.times(m.hl.factor)),
+      delayDebit: out(delayDebit),
+      fundingDebit: out(extraDebit.minus(delayDebit))
+    };
+    scenarioCash.push(out(downside), out(survive.plus(s.external)));
   }
   const stress = options.stress
     ? pathStress(
@@ -584,6 +618,8 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
     code,
     stress,
     scenarioCash,
+    endpointStress,
+    worstAvailableCash: out(min(protect, passHL.minus(extra).plus(s.external), ...scenarioCash)),
     failureHypeCash: out(failHL.minus(extra)),
     externalReceived: out(dec(s.external)),
     hlBeforePayout: out(passHL.minus(extra)),

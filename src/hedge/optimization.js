@@ -1,40 +1,24 @@
-import { dec, out, min } from './math.js';
+import { dec, out } from './math.js';
 import { evaluateLeverageGrid } from './leverage.js';
-import { profileInputs } from './solver.js';
+import { fundingProof, profileInputs } from './solver.js';
 
 export function comparePlans(maximum, conservative) {
   if (!maximum || !conservative) return null;
   const sacrifice = dec(maximum.vsNotional).minus(conservative.vsNotional);
+  const change = (x, y) => (x == null || y == null ? null : out(dec(y).minus(x)));
+  const surplus = (c) => c.stressedSurplus ?? c.baseSurplus;
+  const distance = (c) => c.stressPriceBuffer ?? c.priceBuffer;
   return {
+    hypeChange: change(maximum.hlNotional, conservative.hlNotional),
+    failureChange: change(maximum.failureCash, conservative.failureCash),
+    maintenanceChange: change(maximum.maintenanceMargin, conservative.maintenanceMargin),
+    surplusChange: change(surplus(maximum), surplus(conservative)),
+    distanceChange: change(distance(maximum), distance(conservative)),
+    leverageChange: change(maximum.candidateLeverage?.toString(), conservative.candidateLeverage?.toString()),
     pfReduction: out(sacrifice),
     reductionRatio: out(sacrifice.div(maximum.vsNotional)),
     successGain: out(dec(conservative.hlBeforePayout).minus(maximum.hlBeforePayout)),
     worstGain: out(dec(conservative.worstCash).minus(maximum.worstCash))
-  };
-}
-
-export function failureBridge(cash, c, market, costs, friction) {
-  const qty = dec(c.hlTargetQuantity),
-    delta = dec(c.hlDeltaQuantity);
-  const l = market.hl,
-    unit = dec(l.multiplier).times(l.fx);
-  const mark = dec(l.mark),
-    exitMark = mark.plus(dec(c.lines.fail).times(l.factor));
-  const entryFill = delta.isZero() ? dec('0') : delta.times(unit).times(mark.minus(costs.entry.price));
-  const move = qty.times(unit).times(exitMark.minus(mark));
-  const exitFill = qty.isZero() ? dec('0') : qty.times(unit).times(dec(costs.fail.price).minus(exitMark));
-  const fees = dec(costs.entry.fee).plus(costs.fail.fee);
-  return {
-    start: cash,
-    move: out(move),
-    entryFill: out(entryFill),
-    exitFill: out(exitFill),
-    entryFee: costs.entry.fee,
-    exitFee: costs.fail.fee,
-    friction,
-    external: c.externalReceived,
-    exitMark: out(exitMark),
-    settled: out(dec(cash).plus(move).plus(entryFill).plus(exitFill).minus(fees).minus(friction))
   };
 }
 
@@ -61,12 +45,8 @@ export function adjustmentTarget(book, market, params, checks, picked, prior, th
       continue;
     try {
       const c = evaluateLeverageGrid(book, market, profile, ...pair, checks);
-      if (c.code !== 'FEASIBLE') continue;
-      if (
-        params.cashFloor != null &&
-        min(c.failureCash, c.pressureCashAfter, ...c.scenarioCash).lt(params.cashFloor)
-      )
-        continue;
+      if (c.code !== 'FEASIBLE' || !fundingProof(profile, market, c).valid) continue;
+      if (params.cashFloor != null && dec(c.worstAvailableCash).lt(params.cashFloor)) continue;
       if (
         source === 'existing' &&
         c.candidateLeverage != null &&

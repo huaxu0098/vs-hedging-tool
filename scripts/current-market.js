@@ -70,6 +70,7 @@ export async function currentMarket(asset) {
               symbol: d.symbol,
               mark: d.mark,
               markAt: new Date(s.requested).toISOString(),
+              tiersAt: new Date(s.requested).toISOString(),
               bookSource: 'Hyperliquid REST · l2Book',
               asOf: d.quote.occurredAt,
               levels: d.quote.levels,

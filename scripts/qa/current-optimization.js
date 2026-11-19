@@ -5,10 +5,10 @@ const b = await openTestBrowser({ current: true });
 const { send, run, wait, click, text } = b;
 const input = (id, v) => b.set('#' + id, v, 'input');
 const ready =
-  "document.querySelector('#plan-tradeoff').textContent.includes('现金缓冲变化') && document.querySelector('#trace-id').textContent.includes('AUTO-0.10')";
+  "document.querySelector('#plan-tradeoff').textContent.includes('现金缓冲变化') && document.querySelector('#trace-id').textContent.includes('AUTO-0.12')";
 try {
   await send('Page.navigate', { url: (process.env.CURRENT_URL ?? b.url) + '/' });
-  await wait("document.querySelector('#plan-cross-flat')");
+  await wait("typeof document.querySelector('#plan-cross-flat')?.onchange === 'function'");
   await click('#plan-cross-flat');
   await wait(ready, 45000);
   // Read the result and its exact input together, in one browser event.
@@ -64,6 +64,16 @@ try {
   assert.equal(pending[2], '等待计算');
   await wait(ready + " && document.querySelector('#preference-info').textContent.startsWith('50%')", 40000);
   console.log('PREFERENCE', await text('#preference-info'));
+  await input('riskPreference', '100');
+  await wait(ready + " && document.querySelector('#preference-info').textContent.startsWith('100%')", 40000);
+  const cashView = await run(`(() => {
+    const txt=id=>document.getElementById(id).textContent;
+    return [txt('pf-summary'),txt('hl-summary'),txt('cash-plan'),txt('risk-tradeoff'),txt('search-coverage')];
+  })()`);
+  assert.ok(cashView[2].includes(cashView[0]) && cashView[2].includes(cashView[1]));
+  assert.match(cashView[3], /最低维持余量.*强平线距离变化.*杠杆变化/);
+  assert.match(cashView[4], /网格点.*剪枝次数.*ms/);
+  await input('riskPreference', '50');
   await input('quoteSkewMs', '0');
   await wait(
     "document.querySelector('#auto-search').textContent.includes('AUTO_DATA_BLOCKED') && document.querySelector('#calc-status').textContent.includes('行情熔断')",

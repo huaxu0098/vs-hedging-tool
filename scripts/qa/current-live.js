@@ -48,7 +48,7 @@ try {
   assert.match(await text('#size-plan'), /最差个人现金/);
   assert.match(await text('#cash-plan'), /最差个人现金/);
   assert.match(await text('#success-hl'), /考核利润不可分/);
-  assert.match(await text('#trace-id'), /AUTO-0.10/);
+  assert.match(await text('#trace-id'), /AUTO-0.12/);
   const leverageCheck = await run(`(() => {
     const rows = Array.from(document.querySelector('#leverage-grid').rows, r => Array.from(r.cells, c => c.textContent));
     return { rows, suggested: document.getElementById('suggested-leverage').textContent,
@@ -86,11 +86,12 @@ try {
     assert.ok(filename, '真实浏览器保存核算文件');
     const saved = JSON.parse(await readFile(path.join(downloadDir, filename), 'utf8'));
     assert.equal(filename, 'hedge-' + saved.id + '.json');
-    assert.equal(saved.model, 'AUTO-0.10');
+    assert.equal(saved.model, 'AUTO-0.12');
     assert.equal(saved.inputs.accounts.hl.equity, '409');
     assert.equal(saved.outputs.autoStatus, 'AUTO_PARTIAL');
     assert.ok(saved.outputs.conservative.candidate);
-    if (process.env.HEDGE_AUDIT_OUTPUT) await writeFile(process.env.HEDGE_AUDIT_OUTPUT, JSON.stringify(saved, null, 2) + '\n');
+    if (process.env.HEDGE_AUDIT_OUTPUT)
+      await writeFile(process.env.HEDGE_AUDIT_OUTPUT, JSON.stringify(saved, null, 2) + '\n');
     console.log('TRACE_DOWNLOAD', filename, saved.at);
   } finally {
     await rm(downloadDir, { recursive: true, force: true });
@@ -259,8 +260,9 @@ try {
       eligible
     );
   }
-  if (!fill) {
-    const observed = Date.parse('2026-11-19T10:01:01.423Z');
+  for (const receipt of ['2026-11-19T12:41:11.573Z', '2026-11-19T10:01:01.423Z']) {
+    if (fill) break;
+    const observed = Date.parse(receipt);
     fill = (
       await req({ type: 'userFillsByTime', user, startTime: observed - 1, endTime: observed + 1 })
     ).find(eligible);

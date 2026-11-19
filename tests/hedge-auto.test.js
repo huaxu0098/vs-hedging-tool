@@ -506,30 +506,35 @@ test('LEV07 只读账户新快照能改变可用档位，已用保证金只按�
   const user = '0x' + '1'.repeat(40),
     calls = [];
   async function snap(level) {
-    return accountSnapshot(user, 'BTC', async (body) => {
-      calls.push(body.type);
-      const summary = { accountValue: '120', totalMarginUsed: '0' };
-      const byType = {
-        clearinghouseState: {
-          time: t,
-          marginSummary: summary,
-          crossMarginSummary: summary,
-          assetPositions: [],
-          withdrawable: '120'
-        },
-        frontendOpenOrders: [],
-        userAbstraction: 'disabled',
-        activeAssetData: {
-          user,
-          coin: 'BTC',
-          leverage: { type: 'cross', value: level },
-          availableToTrade: ['120', '120'],
-          maxTradeSzs: ['100', '100']
-        },
-        userFees: {}
-      };
-      return byType[body.type];
-    });
+    return accountSnapshot(
+      user,
+      'BTC',
+      async (body) => {
+        calls.push(body.type);
+        const summary = { accountValue: '120', totalMarginUsed: '0' };
+        const byType = {
+          clearinghouseState: {
+            time: t,
+            marginSummary: summary,
+            crossMarginSummary: summary,
+            assetPositions: [],
+            withdrawable: '120'
+          },
+          frontendOpenOrders: [],
+          userAbstraction: 'disabled',
+          activeAssetData: {
+            user,
+            coin: 'BTC',
+            leverage: { type: 'cross', value: level },
+            availableToTrade: ['120', '120'],
+            maxTradeSzs: ['100', '100']
+          },
+          userFees: {}
+        };
+        return byType[body.type];
+      },
+      () => t
+    );
   }
   const f = fixture();
   f.a.hl = await snap(3);
@@ -721,7 +726,7 @@ test('OPT02 搜索范围记录双边方向、步长和数量上限，预算中�
   const partial = calculateCurrent(inputs, f.a, f.m, {}, t, { searchBudget: 1 });
   assert.equal(partial.search.complete, false);
   assert.ok(!partial.maximum?.complete);
-  assert.equal(full.trace.model, 'AUTO-0.10');
+  assert.equal(full.trace.model, 'AUTO-0.12');
 });
 test('OPT03 PF 虚拟保证金、目标 Hype 初始、其他占用及调仓后真实可用分别核验', () => {
   const f = fixture();
@@ -830,6 +835,55 @@ test('OPT08 规划空仓及权益不进入真实输入，混用来源也触发�
   const x = calc({}, f);
   assert.equal(x.autoStatus, 'AUTO_DATA_BLOCKED');
   assert.equal(x.candidate, undefined);
+});
+test('DATA01 时间差合格时仍分别拒绝过期盘口、缺少独立标记时间或倒挂深度', () => {
+  for (const field of ['bookAt', 'markAt']) {
+    const f = fixture();
+    f.m.hl[field] = new Date(t - 5100).toISOString();
+    f.m.pf.asOf = new Date(t - 4600).toISOString();
+    f.m.hl.asOf = f.m.pf.asOf;
+    const x = calc({}, f);
+    assert.ok(x.timing.quoteSkew < 3000);
+    assert.equal(x.autoStatus, 'AUTO_DATA_BLOCKED');
+    assert.equal(x.adjust, undefined);
+  }
+  const f = fixture();
+  f.m.hl.bookSource = 'Hyperliquid WebSocket · l2Book';
+  assert.equal(calc({}, f).candidate, undefined);
+  f.m.hl.markAt = at;
+  f.m.hl.levels = [[['102', '1']], [['101', '1']]];
+  assert.match(calc({}, f).issues.join(' '), /深度无效/);
+});
+test('UX02 LIQ01 LEV12 模型交点与实际账户参考独立，双端显示可比约束', () => {
+  const x = calc();
+  assert.equal(x.audit.mathMatches, true);
+  assert.match(x.audit.exchangeCheck, /未取得/);
+  assert.equal(x.configuredLeverage, null);
+  assert.ok(x.maximum.candidate.candidateLeverage);
+  const { maximum, conservative, comparison } = x;
+  assert.equal(
+    comparison.maintenanceChange,
+    out(dec(conservative.candidate.maintenanceMargin).minus(maximum.candidate.maintenanceMargin))
+  );
+  assert.equal(
+    comparison.hypeChange,
+    out(dec(conservative.candidate.hlNotional).minus(maximum.candidate.hlNotional))
+  );
+  assert.equal(
+    comparison.surplusChange,
+    out(dec(conservative.candidate.baseSurplus).minus(maximum.candidate.baseSurplus))
+  );
+  assert.notEqual(x.autoStatus, 'AUTO_FEASIBLE');
+});
+test('SEARCH01 有界证明披露原始数量对、实际精算、剪枝和预算退出', () => {
+  const f = fixture(),
+    x = calc({}, f);
+  assert.equal(x.search.gridPairs, '140');
+  assert.equal(x.search.method, 'branch_and_bound');
+  assert.ok(x.search.exactPairs > 0 && x.search.leverageRows >= x.search.exactPairs);
+  const y = calculateCurrent(inputs, f.a, f.m, {}, t, { searchBudget: 1 });
+  assert.equal(y.search.stoppedByBudget, true);
+  assert.equal(y.search.complete, false);
 });
 test('OPT09 迟滞仅保留最新快照上仍合法的目标，同时保留原始数学差额', () => {
   const f = fixture(),

@@ -54,7 +54,13 @@ export function vestQuoteReader(symbol, includeDepth = false) {
     if (!book || !ticker) return null;
     return {
       symbol,
-      ...(includeDepth ? { levels: book.levels } : {}),
+      ...(includeDepth
+        ? {
+            levels: book.levels,
+            bookAt: new Date(book.time).toISOString(),
+            markAt: new Date(ticker.time).toISOString()
+          }
+        : {}),
       bid: book.bid,
       ask: book.ask,
       mark: ticker.mark,

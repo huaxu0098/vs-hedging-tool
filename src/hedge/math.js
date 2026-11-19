@@ -84,10 +84,33 @@ export function endpointCash(p, h, failureUnit, successUnit, k = '0') {
     payout: out(payout)
   };
 }
+// For a given pair the PF's own execution drag changes the common-factor move
+// needed to reach its net boundary. The opposite leg bears h times that drag.
+export function fundingInterval(p, failCost = p.k ?? '0', passCost = p.k ?? '0') {
+  const terminal = ruleState(p);
+  if (terminal) return { code: terminal };
+  const loss = dec(p.E).minus(p.floor), gain = dec(p.target).minus(p.E);
+  return cashInterval(p, loss, gain, failCost, passCost);
+}
+function cashInterval(p, loss, gain, failCost, passCost) {
+  const personal = dec(p.C_hl).plus(nonnegative(p.C_external));
+  const protectedCash = nonnegative(p.B), retained = nonnegative(p.R);
+  const lower = max('0', protectedCash.minus(personal).plus(failCost).div(loss));
+  const upper = dec(p.C_hl).minus(retained).minus(passCost).div(gain);
+  const fail = h => personal.plus(loss.times(h)).minus(failCost);
+  const before = h => dec(p.C_hl).minus(gain.times(h)).minus(passCost);
+  return { code: lower.gt(upper) ? 'NO_CASH_INTERSECTION' : 'CASH_INTERSECTION',
+    B: p.B, C_H: p.C_hl, C_E: p.C_external, C_P: out(personal), R: p.R,
+    E: p.E, F: p.floor, T: p.target, loss: out(loss), gain: out(gain),
+    failCost, passCost, lower: out(lower), upper: out(upper),
+    successShortfallAtLower: out(max(0, dec(p.R).minus(before(lower)))),
+    failureShortfallAtUpper: upper.lt(0) ? null : out(max(0, dec(p.B).minus(fail(upper)))),
+    reserveShortfallAtZero: out(max(0, dec(p.R).minus(before(dec('0')))))
+  };
+}
+
 function bounds(p, loss, gain, k) {
-  const { hl, total, protect, payout } = amounts(p),
-    floor = nonnegative(p.B),
-    reserve = nonnegative(p.R),
+  const { total, payout } = amounts(p),
     required = nonnegative(p.g);
   if (loss.lte(0) || gain.lte(0))
     return {
@@ -97,8 +120,8 @@ function bounds(p, loss, gain, k) {
       successUnit: out(gain),
       searchComplete: true
     };
-  const low = max(0, floor.minus(protect).plus(k).div(loss)),
-    cash = hl.minus(reserve).minus(k).div(gain);
+  const interval = cashInterval(p, loss, gain, k, k);
+  const low = dec(interval.lower), cash = dec(interval.upper);
   const profit =
     p.stage === 'funded' && p.C_ref != null
       ? total
