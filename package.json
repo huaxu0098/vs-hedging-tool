@@ -19,6 +19,7 @@
     "test:hedge": "node --test tests/hedge-*.test.js",
     "test:hedge:funding": "node --test tests/hedge-funding-formula.test.js && node scripts/qa/current-funding.js",
     "test:hedge:ranges": "node --test --test-name-pattern='RANGE|PATH|AUTOSEL' tests/hedge-auto.test.js && node scripts/qa/current-ranges.js",
+    "test:hedge:vest": "node --test tests/hedge-vest-intake.test.js && node scripts/qa/current-vest-intake.js",
     "test:hedge:perp": "node --test tests/hedge-fx.test.js && node scripts/qa/current-product.js && node scripts/qa/current-stability.js",
     "test:hedge:fx": "node --test tests/hedge-fx.test.js && node scripts/qa/current-fx.js",
     "test:hedge:opt": "node scripts/qa/current-optimization.js",

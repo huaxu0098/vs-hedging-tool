@@ -55,16 +55,20 @@ try {
       complete: [x.maximum.complete, x.conservative.complete]
     })
   );
-  await click('#scan-config');
+  await run("document.getElementById('desk-details').open=true;document.getElementById('account-details').open=true");
   await click('#missing-list a[href="#jumpBps"]');
   assert.equal(await run('document.activeElement.id'), 'jumpBps');
-  const pending = await run(`(() => {const slider=document.querySelector('#riskPreference');slider.value='50';
+  const pending = await run(`(() => {
+    const desk=document.querySelector('#scan-desk'), slider=document.querySelector('#riskPreference');
+    const before=[desk.dataset.resultId,document.querySelector('#scan-fail-cash').textContent];
+    slider.value='50';
     slider.dispatchEvent(new Event('input',{bubbles:true}));
-    return [document.querySelector('#calc-status').textContent,document.querySelector('#legs').rows[1].cells[4].textContent,document.querySelector('#trace-id').textContent];
+    return {before,after:[desk.dataset.resultId,document.querySelector('#scan-fail-cash').textContent],
+      state:desk.dataset.state, label:document.querySelector('#advanced-frame').textContent};
   })()`);
-  assert.match(pending[0], /暂停/);
-  assert.equal(pending[1], '—');
-  assert.equal(pending[2], '等待计算');
+  assert.equal(pending.state, 'updating');
+  assert.match(pending.label, /更新中.*上次完成/);
+  assert.deepEqual(pending.after, pending.before);
   await wait(ready + " && document.querySelector('#preference-info').textContent.startsWith('50%')", 40000);
   console.log('PREFERENCE', await text('#preference-info'));
   await input('riskPreference', '100');

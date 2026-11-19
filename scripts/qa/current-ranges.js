@@ -38,7 +38,7 @@ async function record(label) {
 }
 try {
   await send('Page.navigate', { url: (process.env.CURRENT_URL ?? b.url) + '/' });
-  await wait("typeof document.querySelector('#scan-config')?.onclick==='function'");
+  await wait("!!document.querySelector('#desk-details > summary#scan-config')");
   assert.equal(await run("document.querySelector('#desk-details').open"), false);
   assert.ok(
     await run(
@@ -142,6 +142,7 @@ try {
     sets: Object.fromEntries(['protect', 'survive', 'both', 'profit'].map((k) => [k, sets[k]])),
     buckets
   });
+  await run("document.getElementById('desk-details').open=false");
   await click('#scan-config');
   assert.ok(await run("document.getElementById('desk-details').open"));
   await run(

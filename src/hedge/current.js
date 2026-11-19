@@ -598,7 +598,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
     }
     const q = (result.qty[k] = usable(k, 'qty') ? optional(a[k].qty) : null);
     const leg = currencies.legs?.[k];
-    const unit = leg && currencies.ok ? dec(leg.multiplier).times(leg.pointToLedger.mid) : null;
+    const unit = leg && !(k === 'pf' && data.errors?.spec) ? dec(leg.multiplier).times(leg.pointToLedger.mid) : null;
     result.cash[k] = usable(k, 'equity') ?
       (unit ? equityAt(a[k], q, quoteOK(k) ? data[k]?.mark : null, unit) : optional(a[k].equity)) : null;
     if (unit && q != null && quoteOK(k) && data[k]?.mark)
@@ -738,6 +738,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
       );
   }
   if (data.errors?.spec) issues.push(data.errors.spec);
+  if (data.errors?.specRisk) issues.unshift(data.errors.specRisk);
   if (market && !market.pf.open) issues.push('VS 合约休市');
   if (a.hl.unsupported) issues.push('Hype 资金池模式未验证');
   if (

@@ -475,6 +475,8 @@ function draw(result) {
       'scan-fail-cash',
       'scan-pass-cash',
       'scan-fail-net',
+      'scan-fail-summary',
+      'scan-pass-summary',
       'scan-pass-net',
       'scan-risk',
       'scan-deadline',
@@ -485,18 +487,26 @@ function draw(result) {
   }
 }
 export function renderScan(result, m, r, plan, status) {
+  const observed = result.observed ?? result;
+  const networkError = m.errors?.pf || m.errors?.hl;
+  const waitingForMarket = !networkError && !m.errors?.spec && m.source !== '手工确认盘口' &&
+    ((!m.pf || !m.hl) || (!m.spec && (!m.specStatus || m.specStatus === 'loading')));
+  const specError = m.errors?.spec || m.errors?.specRisk;
+  const unverifiedVest = !waitingForMarket && !networkError &&
+    (specError || /(?:VS 报价币|VS 标的)/.test(observed.currencies?.error ?? ''));
   for (const [key, title] of [
     ['pf', 'VS'],
     ['hl', 'Hype']
   ]) {
     const q = m[key];
-    const c = (result.observed ?? result).currencies?.[key];
+    const old = !q?.mark && result.retained?.prices?.[key];
+    const c = observed.currencies?.[key] ?? (old && {baseAsset:old.base, quoteAsset:old.quote, settleAsset:old.settle});
     write('scan-' + key + '-product', (key === 'pf' ? 'Vest ' : 'Hyperliquid ') + (m.asset ?? '') + ' Perp');
     write(
       'scan-' + key + '-unit',
       c?.quoteAsset && c?.baseAsset ? c.quoteAsset + '/' + c.baseAsset : '报价币待核实'
     );
-    write('scan-' + key + '-price', q?.mark == null ? '—' : fmt(q.mark));
+    write('scan-' + key + '-price', q?.mark == null ? (old ? fmt(old.mark) : '—') : fmt(q.mark));
     write(
       'scan-' + key + '-settle',
       c?.settleAsset ? c.settleAsset + (key === 'hl' ? ' 抵押/结算' : ' 结算') : ''
@@ -504,8 +514,9 @@ export function renderScan(result, m, r, plan, status) {
     write(
       'scan-' + key + '-quote',
       q?.levels
-        ? '买 ' + fmt(q.levels[0]?.[0]?.[0]) + ' / 卖 ' + fmt(q.levels[1]?.[0]?.[0]) + ' · ' + time(q.asOf)
-        : title + ' 等待盘口'
+        ? '买 ' + fmt(q.levels[0]?.[0]?.[0]) + ' / 卖 ' + fmt(q.levels[1]?.[0]?.[0]) + ' · ' + time(q.asOf) +
+          (m.errors?.[key] ? ' · ' + m.errors[key] : observed.timing?.clocks?.[key]?.ok === false ? ' · 报价过期或盘口无效' : '')
+        : old ? '历史 Mark · ' + new Date(old.markAt ?? old.asOf).toLocaleString('zh-CN') + ' · ' + (m.errors?.[key] || '等待新报价') : m.errors?.[key] || title + ' 正在连接盘口'
     );
   }
   const observation = result.observed ?? result;
@@ -515,7 +526,7 @@ export function renderScan(result, m, r, plan, status) {
     'scan-basis',
     comp
       ? fmt(comp.diff, 3) + ' ' + map.pf.quoteAsset + ' / ' + pct(comp.fraction)
-      : (map?.error?.split(' · ')[0] ?? '等待有效快照')
+      : networkError ? '行情中断，价差暂停' : waitingForMarket ? '正在连接行情' : (map?.error?.split(' · ')[0] ?? '价差暂不可算')
   );
   const displayed = result.ratioScan ? result : result.retained;
   const tr = displayed?.trace;
@@ -571,9 +582,9 @@ export function renderScan(result, m, r, plan, status) {
     );
   else if (!displayed?.ratioScan?.representative?.row?.funded)
     write('scan-funded', 'Funded 分成 · 等待有效快照，到账状态待核实');
-  const state = result.frameState ?? 'paused',
+  const state = waitingForMarket ? 'loading' : result.frameState ?? 'paused',
     id = tr?.id ?? '';
-  const stamp = tr ? '结果时间 ' + time(tr.at) : '';
+  const stamp = tr ? '结果时间 ' + new Date(tr.at).toLocaleDateString('zh-CN') + ' ' + time(tr.at) : '';
   const desk = $('scan-desk');
   const outdated = !!tr && state !== 'ready';
   desk.dataset.state = state;
@@ -590,8 +601,10 @@ export function renderScan(result, m, r, plan, status) {
           ]
             .filter(Boolean)
             .join(' · ')
-        : '暂停仓位建议 · ' + (result.issues?.[0] ?? status);
-  write('scan-status', [progress, outdated && '上次完成', stamp].filter(Boolean).join(' ｜ '));
+        : waitingForMarket ? '正在连接 Vest 与 Hyperliquid 公开行情'
+        : '暂停仓位建议 · ' + (networkError || specError || result.issues?.[0] || status) +
+          (unverifiedVest ? '。可在高级详情核对 Vest 合约规格。' : '');
+  write('scan-status', [progress, outdated && (state === 'updating' ? '上次完成' : '上次完成 · 历史结果，当前未验证'), stamp].filter(Boolean).join(' ｜ '));
   write(
     'scan-runtime',
     [
@@ -611,9 +624,13 @@ export function renderScan(result, m, r, plan, status) {
     draw(displayed ?? {});
     if (!displayed) frameKey = 'empty';
   }
+  if (!displayed) {
+    const message = waitingForMarket ? '连接中' : state === 'updating' ? '首次计算中' :
+      unverifiedVest ? '待核实 Vest 规格' : state === 'failed' ? '求解失败' : '暂不可计算';
+    for (const key of reportGroups) write('scan-' + key, message);
+  }
 }
-export function setupScan(onConfig) {
-  $('scan-config').onclick = onConfig;
+export function setupScan() {
   $('scan-detail').ontoggle = auditText;
   $('subset-detail').ontoggle = renderSubsets;
   for (const id of ['range-columns', 'bin-columns', 'subset-columns']) {

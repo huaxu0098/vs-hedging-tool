@@ -34,34 +34,53 @@ export function conversionBook(from, to, rates, now, ttl) {
   };
 }
 
+function verifiedLeg(side, c, data, rates, now, ttl) {
+  const venue = side === 'pf' ? 'VS' : 'Hype';
+  if (c?.metadataConflict) throw Error('CONTRACT_METADATA_UNVERIFIED · ' + venue + ' 官方规格字段相互冲突');
+  if (!c || !known.has(c.quoteAsset) || !known.has(c.settleAsset))
+    throw Error('QUOTE_CURRENCY_UNVERIFIED · ' + venue + ' 报价币或结算币未核实');
+  if (
+    (c.productType && c.productType !== 'perpetual') ||
+    (c.payoffType && c.payoffType !== 'linear') ||
+    !c.baseAsset ||
+    c.baseAsset !== data.asset ||
+    c.symbol !== data[side]?.symbol ||
+    ![c.baseAsset, 'contract'].includes(c.quantityUnit) ||
+    !c.contractMultiplier ||
+    !dec(String(c.contractMultiplier)).gt(0) ||
+    !['linear', 'quanto-1:1'].includes(c.settlement) ||
+    !c.source
+  )
+    throw Error('CONTRACT_UNVERIFIED · ' + venue + ' 标的、数量单位、乘数或每点结算规则未核实');
+  if (
+    side === 'hl' &&
+    c.standardCryptoPerp &&
+    (c.quoteAsset !== 'USDT' || c.settleAsset !== 'USDC' || c.settlement !== 'quanto-1:1')
+  )
+    throw Error('CONTRACT_METADATA_UNVERIFIED · 标准永续合约计价或结算规则冲突');
+  const settleToLedger = conversionBook(c.settleAsset, 'USDC', rates, now, ttl);
+  const pointToLedger =
+    c.settlement === 'quanto-1:1' ? settleToLedger : conversionBook(c.quoteAsset, 'USDC', rates, now, ttl);
+  return { pointToLedger, settleToLedger, multiplier: String(c.contractMultiplier) };
+}
 export function currencyMapping(data, rates, now, ttl, alertBps = '50') {
   const pf = data.spec?.contract,
     hl = data.hl?.contract;
-  const result = { pf, hl, ledger: 'USDC', spots: {}, warnings: [], alertBps, ok: false };
+  const result = { pf, hl, legs: {}, ledger: 'USDC', spots: {}, warnings: [], alertBps, ok: false };
   try {
     const threshold = nonnegative(String(alertBps));
-    for (const [venue, c] of [
-      ['VS', pf],
-      ['Hype', hl]
+    const legErrors = [];
+    for (const [side, c] of [
+      ['pf', pf],
+      ['hl', hl]
     ]) {
-      if (!c || !known.has(c.quoteAsset) || !known.has(c.settleAsset))
-        throw Error('QUOTE_CURRENCY_UNVERIFIED · ' + venue + ' 报价币或结算币未核实');
-      if (
-        (c.productType && c.productType !== 'perpetual') ||
-        (c.payoffType && c.payoffType !== 'linear') ||
-        !c.baseAsset ||
-        c.baseAsset !== data.asset ||
-        c.symbol !== (venue === 'VS' ? data.pf : data.hl)?.symbol ||
-        ![c.baseAsset, 'contract'].includes(c.quantityUnit) ||
-        !c.contractMultiplier ||
-        !dec(String(c.contractMultiplier)).gt(0) ||
-        !['linear', 'quanto-1:1'].includes(c.settlement) ||
-        !c.source
-      )
-        throw Error('CONTRACT_UNVERIFIED · ' + venue + ' 标的、数量单位、乘数或每点结算规则未核实');
+      try {
+        result.legs[side] = verifiedLeg(side, c, data, rates, now, ttl);
+      } catch (error) {
+        legErrors.push(error);
+      }
     }
-    if (hl.standardCryptoPerp && (hl.quoteAsset !== 'USDT' || hl.settleAsset !== 'USDC' || hl.settlement !== 'quanto-1:1'))
-      throw Error('CONTRACT_METADATA_UNVERIFIED · 标准永续合约计价或结算规则冲突');
+    if (legErrors.length) throw legErrors[0];
     for (const asset of new Set([pf.quoteAsset, hl.quoteAsset, pf.settleAsset, hl.settleAsset, 'USDC'])) {
       if (asset === 'USD') continue;
       try {
@@ -79,23 +98,16 @@ export function currencyMapping(data, rates, now, ttl, alertBps = '50') {
     // The BTC stress path moves both native prices by the same number of points.
     // The contract pays its native point PnL in USDC. Spot FX prices the reference
     // spread only; it cannot rescale this price path or the resulting cash flows.
-    result.nativeMovePerVestPoint = hl.settlement === 'quanto-1:1' ? '1' : rate(pf.quoteAsset, hl.quoteAsset).mid;
-    result.legs = {};
-    for (const [side, c] of [
-      ['pf', pf],
-      ['hl', hl]
-    ]) {
-      const settleToLedger = rate(c.settleAsset, 'USDC');
-      // A conventional linear payoff is denominated in quote. A fixed quanto
-      // pays one settlement unit per price point without converting the quote.
-      const pointToLedger = c.settlement === 'quanto-1:1' ? settleToLedger : rate(c.quoteAsset, 'USDC');
-      result.legs[side] = { pointToLedger, settleToLedger, multiplier: String(c.contractMultiplier) };
-    }
+    result.nativeMovePerVestPoint =
+      hl.settlement === 'quanto-1:1' ? '1' : rate(pf.quoteAsset, hl.quoteAsset).mid;
     result.ok = true;
   } catch (e) {
-    result.error = /^(QUOTE_CURRENCY_UNVERIFIED|CONTRACT_UNVERIFIED|CONTRACT_METADATA_UNVERIFIED|FX_STALE|FX_UNVERIFIED)/.test(e.message)
-      ? e.message
-      : 'FX_UNVERIFIED · 币种路径、汇率或合约数值无效';
+    result.error =
+      /^(QUOTE_CURRENCY_UNVERIFIED|CONTRACT_UNVERIFIED|CONTRACT_METADATA_UNVERIFIED|FX_STALE|FX_UNVERIFIED)/.test(
+        e.message
+      )
+        ? e.message
+        : 'FX_UNVERIFIED · 币种路径、汇率或合约数值无效';
   }
   return result;
 }

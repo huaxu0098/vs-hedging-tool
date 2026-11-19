@@ -10,6 +10,8 @@ import {
   reason as constraintReason
 } from './current.js';
 import { scanKeys, refreshDelay } from './scan-refresh.js';
+import { displayHistory } from './display-history.js';
+import { applyVestConfirmation, confirmVestSpec, riskFields } from './vest-confirmation.js';
 import { renderScan, setupScan } from './ratio-ui.js';
 import { ledgerLabels, presentLedger } from './settlement-ledger.js';
 import { captureScript } from '../vs-parser.js';
@@ -178,13 +180,17 @@ let feed = {},
   pending = null,
   feedVersion = 0,
   accountVersion = 0;
-let quoteTimer,
+let quoteTimer, rateTimer,
   accountTimer,
   lastCalculation = '',
   manualPrices = null;
 const useAPI = () => !planning() && $('hl-source').value === 'api';
 function market() {
-  if ($('quote-source').value !== 'manual') return { ...feed, source: 'Vest / Hyperliquid 公开行情' };
+  const data = quoteMarket();
+  return applyVestConfirmation(data, state.vestSpecs?.[asset()], r.stage);
+}
+function quoteMarket() {
+  if ($('quote-source').value !== 'manual') return { ...feed, asset:asset(), source: 'Vest / Hyperliquid 公开行情' };
   return {
     ...feed,
     asset: asset(),
@@ -223,7 +229,8 @@ function inputs() {
   $('investedCapital').parentElement.hidden = planning();
   for (const id of ['hl-source', 'wallet', 'paste', 'bridge-pair', 'leg-settings']) {
     const el = $(id);
-    const wrapper = el.closest('details:not(#desk-details)') ?? el.closest('.form');
+    const wrapper = ['wallet','hl-source'].includes(id) ? el.closest('label') :
+      el.closest('details:not(.desk-group):not(#desk-details)') ?? el.closest('.form');
     if (wrapper) wrapper.hidden = planning();
   }
   put('sync', planning() ? '立即刷新双边行情' : '立即刷新行情与账户');
@@ -415,10 +422,11 @@ function freshnessLabel(at, seconds) {
   if (!at) return '未确认';
   return fresh(at, Date.now(), Number(seconds) * 1000) ? '有效' : '过期';
 }
+const history = displayHistory(localStorage);
 let worker = null, running = null, completed = null, lastGood = null, failure = null;
 let version = 0, wantedKey = null, lastStart = -Infinity, wakeTimer, workerTimer;
 function scanScope() {
-  return JSON.stringify([asset(), state.fundingView, useAPI() ? $('wallet').value.trim().toLowerCase() : 'manual']);
+  return JSON.stringify([asset(), state.fundingView, useAPI() ? $('wallet').value.trim().toLowerCase() : 'manual', r.stage]);
 }
 function cancelAuto() {
   clearTimeout(workerTimer);
@@ -491,7 +499,7 @@ function currentFrame(a, m, t) {
         // Recheck the original clocks, account and eligibility before publication.
         // A long worker task may have crossed a deadline or a quote TTL.
         const eligible = calculateCurrent(r, a, m, frameRates, Date.now(), {deferAuto:true}).needsSearch;
-        if (eligible) lastGood = completed;
+        if (eligible) { lastGood = completed; history.record(scope, completed.result); }
         else completed = null;
       }
       render();
@@ -978,7 +986,9 @@ function render() {
           : '已验算所设保证金条件')
       : result.issues[0] || result.notices.at(-1) || '等待当前快照';
   const plan = planning();
-  renderScan(result, live, r, plan, status);
+  const retained = result.retained ?? (!result.ratioScan && history.read(scanScope()));
+  renderScan(retained ? {...result, retained} : result, live, r, plan, status);
+  if ($('vest-spec-details').open) showVestSpec(live);
   put('advanced-frame', $('scan-status').textContent);
   if (result.refreshPending) $('trace-download').disabled = true;
   if (!$('desk-details').open) return;
@@ -1994,30 +2004,52 @@ function render() {
         : '当前使用手工账户快照，公开行情独立更新。'
   );
 }
-async function refreshMarket() {
-  const version = ++feedVersion,
-    symbol = asset();
+function refreshMarket() {
+  const version = ++feedVersion, symbol = asset();
   clearTimeout(quoteTimer);
-  const res = await Promise.allSettled(
-    ['/api/current-market?asset=' + encodeURIComponent(symbol), '/api/usd-rates'].map(async (url) => {
-      const resp = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(6000) });
-      if (!resp.ok) throw Error('HTTP ' + resp.status);
-      return resp.json();
-    })
-  );
-  if (version !== feedVersion) return;
-  if (res[0].status === 'fulfilled' && res[0].value.asset === symbol) {
-    feed = res[0].value;
-    quoteError = Object.values(feed.errors ?? {})
-      .filter(Boolean)
-      .join(' · ');
-  } else {
-    quoteError = '本地行情连接断开';
-    feed = { ...feed, errors: { ...feed.errors, pf: quoteError, hl: quoteError } };
+  clearTimeout(rateTimer);
+  const active = () => version === feedVersion && asset() === symbol;
+  async function read(url) {
+    const resp = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(6000) });
+    if (!resp.ok) throw Error('HTTP ' + resp.status);
+    return resp.json();
   }
-  rates = res[1].status === 'fulfilled' ? res[1].value.rates ?? {} : {};
-  render();
-  quoteTimer = setTimeout(refreshMarket, 1250);
+  async function pollQuotes() {
+    try {
+      const data = await read('/api/current-market?asset=' + encodeURIComponent(symbol) + '&partial=1');
+      if (!active()) return;
+      if (data.asset !== symbol) throw Error('返回合约不一致');
+      const next = {...data, errors:{...data.errors}};
+      // Last-seen native quotes retain their source timestamps, and a missing
+      // leg blocks new trade calculations until that venue actually responds.
+      for (const k of ['pf','hl']) if (!next[k] && feed.asset === symbol && feed[k]) {
+        next[k] = feed[k];
+        next.errors[k] ||= (k === 'pf' ? 'Vest' : 'Hyperliquid') + ' 本次缺少报价';
+      }
+      feed = next;
+      quoteError = Object.values(next.errors).filter(Boolean).join(' · ');
+    } catch (error) {
+      if (!active()) return;
+      quoteError = '本地行情连接失败 · ' + error.message;
+      feed = {...feed, asset:symbol, errors:{...feed.errors, pf:quoteError, hl:quoteError}};
+    }
+    if (active()) {
+      quoteTimer = setTimeout(pollQuotes, 1250);
+      render();
+    }
+  }
+  async function pollRates() {
+    let next = {};
+    try { next = (await read('/api/usd-rates')).rates ?? {}; }
+    catch { /* Missing FX is reported separately from native quotes. */ }
+    if (active()) {
+      rates = next;
+      rateTimer = setTimeout(pollRates, 1250);
+      render();
+    }
+  }
+  void pollQuotes();
+  void pollRates();
 }
 async function refreshAccount() {
   const version = ++accountVersion;
@@ -2461,7 +2493,7 @@ window.addEventListener('storage', (event) => {
   if (event.key !== key) return;
   const next = JSON.parse(localStorage.getItem(key) || 'null');
   if (next?.version !== 1) return;
-  Object.assign(state, { assets: next.assets, shared: next.shared, asset: next.asset });
+  Object.assign(state, { assets: next.assets, shared: next.shared, asset: next.asset, vestSpecs: next.vestSpecs });
   state.rules = { ...rules, ...splitReserves(next.rules) };
   state.planRules = { ...rules, ...planDefaults, ...splitReserves(next.planRules) };
   r = planning() ? state.planRules : state.rules;
@@ -2550,10 +2582,55 @@ $('confirm-quote').onclick = () => {
   }
 };
 $('desk-details').addEventListener('toggle', () => { if ($('desk-details').open) render(); });
-setupScan(() => {
-  $('desk-details').open = true;
-  $('quick-entry').click();
-});
+let specEditorAsset, specEditorDirty = false;
+function showVestSpec(m) {
+  const form = $('vest-spec-form'), symbol = asset() + '-PERP';
+  const saved = state.vestSpecs?.[asset()];
+  const c = m.spec?.contract;
+  if (specEditorAsset !== asset()) {
+    specEditorAsset = asset();
+    specEditorDirty = false;
+    put('vest-spec-feedback', '');
+  }
+  put('vest-spec-source', [symbol, ...[
+    ['baseAsset','标的'],['quoteAsset','报价'],['settleAsset','结算'],['contractMultiplier','乘数']
+  ].map(([k,label]) => label + ' ' + (c?.[k] ?? '待确认') +
+    (c?.evidence?.[k] ? '（' + c.evidence[k] + '）' : '')),
+    m.specAt && '接口读取时间 ' + m.specAt, saved && '本机确认时间 ' + saved.confirmedAt, m.errors?.spec || m.errors?.specRisk].filter(Boolean).join(' · '));
+  $('vest-spec-clear').disabled = !saved;
+  if (specEditorDirty) return;
+  const values = {...feed.spec?.contract, ...saved, symbol};
+  for (const k of ['symbol','baseAsset','quoteAsset','settleAsset','contractMultiplier','quantityUnit',...riskFields]) {
+    const input = form.elements.namedItem(k);
+    const value = k === 'quantityUnit' && values[k] === asset() ? 'base' : String(values[k] ?? '');
+    if (input.value !== value) input.value = value;
+    if (riskFields.includes(k)) input.placeholder = feed.spec?.[k] == null ? '待核对' : 'API ' + feed.spec[k];
+  }
+}
+$('vest-spec-details').addEventListener('toggle', () => { if ($('vest-spec-details').open) showVestSpec(market()); });
+$('vest-spec-form').oninput = () => { specEditorDirty = true; };
+$('vest-spec-form').onsubmit = event => {
+  event.preventDefault();
+  try {
+    const fields = Object.fromEntries(new FormData(event.currentTarget));
+    if (fields.quantityUnit === 'base') fields.quantityUnit = asset();
+    const confirmed = confirmVestSpec(asset(), fields, now());
+    const pending = applyVestConfirmation(quoteMarket(), confirmed, r.stage);
+    if (pending.specStatus === 'unlisted' || /冲突|不符|无效/.test(pending.errors?.spec ?? ''))
+      throw Error(pending.errors.spec);
+    (state.vestSpecs ??= {})[asset()] = confirmed;
+    save(); specEditorDirty = false;
+    put('vest-spec-feedback', '已保存 ' + confirmed.symbol + ' 的本机确认');
+    render();
+  } catch (e) { put('vest-spec-feedback', e.message); }
+};
+$('vest-spec-clear').onclick = () => {
+  if (state.vestSpecs) delete state.vestSpecs[asset()];
+  save(); specEditorDirty = false;
+  put('vest-spec-feedback', '已撤销，当前使用公开规格');
+  render();
+};
+setupScan();
 inputs();
 render();
 refreshMarket();

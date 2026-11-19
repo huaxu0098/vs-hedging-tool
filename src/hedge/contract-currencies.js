@@ -5,19 +5,41 @@ const nativeCrypto = new Set(['BTC', 'ETH', 'SOL']);
 const field = (raw, key, documented) => (Object.hasOwn(raw, key) ? raw[key] : documented);
 
 export function vestContract(raw) {
+  const base = raw.baseAsset || raw.base || null;
+  const quote = raw.quoteAsset || raw.quote || null;
   const documented =
-    raw.asset === 'crypto' && nativeCrypto.has(raw.base) && raw.symbol === raw.base + '-PERP';
-  const quote = field(raw, 'quoteAsset', raw.quote);
+    raw.asset === 'crypto' &&
+    nativeCrypto.has(base) &&
+    raw.symbol === base + '-PERP' &&
+    !raw.isInverse &&
+    (!raw.productType || raw.productType === 'perpetual') &&
+    (!raw.payoffType || raw.payoffType === 'linear');
   const settle = field(raw, 'settleAsset', documented ? 'USDC' : null);
+  const evidence = {
+    baseAsset: base ? (raw.baseAsset ? 'exchangeInfo.baseAsset' : 'exchangeInfo.base') : null,
+    quoteAsset: quote ? (raw.quoteAsset ? 'exchangeInfo.quoteAsset' : 'exchangeInfo.quote') : null,
+    settleAsset: settle ? (raw.settleAsset ? 'exchangeInfo.settleAsset' : 'Vest 官方永续结算规格') : null,
+    contractMultiplier:
+      raw.contractMultiplier != null
+        ? 'exchangeInfo.contractMultiplier'
+        : documented
+          ? 'Vest 官方线性 1:1 规格'
+          : null
+  };
   return {
+    evidence,
+    metadataConflict: !!(
+      (raw.baseAsset && raw.base && raw.baseAsset !== raw.base) ||
+      (raw.quoteAsset && raw.quote && raw.quoteAsset !== raw.quote)
+    ),
     productType: field(raw, 'productType', 'perpetual'),
     payoffType: field(raw, 'payoffType', raw.isInverse ? 'inverse' : 'linear'),
     symbol: raw.symbol,
-    baseAsset: field(raw, 'baseAsset', raw.base),
+    baseAsset: base,
     quoteAsset: quote,
     settleAsset: settle,
     contractMultiplier: field(raw, 'contractMultiplier', documented ? '1' : null),
-    quantityUnit: field(raw, 'quantityUnit', documented ? raw.base : null),
+    quantityUnit: field(raw, 'quantityUnit', documented ? base : null),
     settlement: field(
       raw,
       'settlement',

@@ -564,3 +564,7 @@ label input[type='checkbox'] {
 
 .scan-quotes .price-line strong {display:inline-block}
 .settle-tag {font-size:12px;color:var(--muted);white-space:nowrap}
+
+#desk-details > .desk-group { margin: 4px 0; padding: 6px 12px; border: 1px solid var(--line); border-radius: 4px }
+#desk-details > .desk-group > summary { cursor: pointer; font-weight: 600 }
+#vest-spec-source { white-space: pre-line }

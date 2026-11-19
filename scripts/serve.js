@@ -39,7 +39,7 @@ const server = createServer(async (request, response) => {
   if (hedge && url.pathname === '/api/current-market' && request.method === 'GET') {
     try {
       const { currentMarket } = await import('./current-market.js');
-      const data = await currentMarket(url.searchParams.get('asset'));
+      const data = await currentMarket(url.searchParams.get('asset'), { partial: url.searchParams.get('partial') === '1' });
       response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(data));
     } catch {
       response.writeHead(503).end();

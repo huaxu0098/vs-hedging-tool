@@ -20,8 +20,10 @@ function fingerprint(json) {
   return [a, b].map((n) => (n >>> 0).toString(16).padStart(8, '0')).join('');
 }
 
+export const modelVersion = 'AUTO-0.21.1';
+
 export function calculationTrace(rules, accounts, market, rates, at, settings = {}) {
-  const model = 'AUTO-0.21.1';
+  const model = modelVersion;
   const options = Object.fromEntries(
     ['cashSearchBudget', 'priorTarget', 'seedTargets', 'searchBudget', 'scanRatios']
       .filter((k) => settings[k] != null)
