@@ -14,7 +14,7 @@ async function readFrame(label, condition = 'true', feasible = true) {
   while (Date.now() < until) {
     const packet = await run(`(() => {
       const el = id => document.getElementById(id), txt = id => el(id).textContent;
-      if (!txt('trace-id').startsWith('AUTO-0.15') || !(${condition}) ||
+      if (!txt('trace-id').startsWith('AUTO-0.17') || !(${condition}) ||
           !txt('auto-search').includes('${feasible ? 'AUTO_PARTIAL' : 'AUTO_INFEASIBLE'}')) return null;
       const detail=el('trace-inputs').parentElement; detail.open=true; detail.ontoggle();
       return { rows:[...el('path-rows').querySelectorAll('tr')].filter(row=>row.dataset.posting||row.dataset.total).map(row=>[row.dataset.posting??'total',...[...row.cells].slice(1).map(c=>c.textContent)]), input:JSON.parse(txt('trace-inputs')), time:txt('trace-sources').match(/计算于 (\\S+)/)[1], id:txt('trace-id'),
@@ -117,7 +117,7 @@ async function edit(id, value) {
 try {
   await send('Page.navigate', { url: (process.env.CURRENT_URL ?? browser.url) + '/' });
   await wait("typeof document.querySelector('#plan-cross-flat')?.onchange === 'function'");
-  await click('#plan-cross-flat');
+  assert.equal(await run("document.getElementById('plan-cross-flat').checked"), true);
   const start = await readFrame('预设500/409/100');
   await run("document.querySelector('#ledger-exact').click()");
   await edit('R_free', '100');

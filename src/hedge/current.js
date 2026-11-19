@@ -1,4 +1,4 @@
-import { scanContext, buildRatioScan, ratioSlice } from './ratio-scan.js';
+import { scanContext, buildRatioScan, ratioSlice, inspectRatio } from './ratio-scan.js';
 import {
   dec,
   out,
@@ -387,6 +387,7 @@ export function splitReserves(saved = {}) {
 export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(), options = {}) {
   r = splitReserves(r);
   const result = computeCurrent(r, a, data, fxData, now, options);
+  if (result.ratioScan) attachRepresentative(result, r);
   result.missingFields = [];
   const add = (id, label) => {
     if (!result.missingFields.some((x) => x.label === label)) result.missingFields.push({ id, label });
@@ -417,6 +418,69 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
   }
   if (!result.needsSearch) result.trace = calculationTrace(r, a, data, fxData, now, options);
   return result;
+}
+
+function attachRepresentative(result, r) {
+  const scan = result.ratioScan,
+    candidate = result.candidate;
+  const { market } = scan.ctx;
+  let point, group, objective;
+  if (candidate?.code === 'FEASIBLE') {
+    const i = dec(candidate.vsTargetQuantity).abs().div(market.pf.step).toNumber();
+    const j = dec(candidate.hlTargetQuantity).abs().div(market.hl.step).toNumber();
+    const sign = dec(candidate.vsTargetQuantity).cmp(0);
+    if (ratioSlice(scan, sign, i, 'both').some(([lo, hi]) => lo <= j && j <= hi)) {
+      point = { i, j, sign };
+      group = 'both';
+      objective = result.preference?.objective ?? 'fixed';
+    }
+  }
+  if (!point) {
+    group = ['both', 'protect', 'survive', 'risk'].find((k) => scan.sets[k].count);
+    if (!group) return;
+    point = scan.sets[group].largest;
+    objective = 'diagnostic';
+  }
+  const row = inspectRatio(scan.ctx, point);
+  if (!row.physical || (group === 'both' && !row.both)) throw Error('自动代表方案与网格风控结果不一致');
+  const segment = scan.buckets.findIndex(
+    ({ throughLots: end }) => !end || BigInt(point.j) * BigInt(end.i) <= BigInt(end.j) * BigInt(point.i)
+  );
+  const segmentRange = scan.buckets[segment]?.range;
+  if (!segmentRange) throw Error('自动代表方案缺少完整分段记录');
+  for (const range of [scan.sets[group].range, segmentRange].filter(Boolean)) {
+    for (const [key, amount] of [
+      ['failure', row.fail],
+      ['success', row.successPersonal],
+      ['pfValue', row.pfValue],
+      ['hlValue', row.hypeValue],
+      ['pfQty', dec(row.pf).abs()],
+      ['hlQty', dec(row.hl).abs()]
+    ]) {
+      const [lo, hi] = range[key];
+      if (dec(lo).minus(amount).gt('1e-12') || dec(amount).minus(hi).gt('1e-12'))
+        throw Error('自动代表方案超出所属区间 · ' + key);
+    }
+    if (
+      row.initial != null &&
+      (range.maxMargin == null || dec(row.initial).minus(range.maxMargin).gt('1e-12'))
+    )
+      throw Error('代表方案初始保证金超出分段统计');
+    if (row.buffer != null && (range.minBuffer == null || dec(range.minBuffer).minus(row.buffer).gt('1e-12')))
+      throw Error('代表方案清算距离与分段统计不符');
+  }
+  const buffer = nonnegative(r.recoveryBuffer || '0');
+  if (objective !== 'diagnostic' && dec(row.failureVsProtection).lt(buffer))
+    throw Error('自动方案未达到额外回收缓冲');
+  scan.defaultPoint = point;
+  scan.representative = {
+    row,
+    group,
+    segment,
+    objective,
+    buffer: out(buffer),
+    complete: !!result.search?.complete && scan.complete
+  };
 }
 
 function computeCurrent(r, a, data, fxData, now, options) {
@@ -973,12 +1037,15 @@ function computeCurrent(r, a, data, fxData, now, options) {
     result.autoStatus = 'AUTO_PAYOUT_PENDING';
     return result;
   }
+  const solverBook = { ...book, B: out(dec(book.B).plus(nonnegative(r.recoveryBuffer || '0'))) };
   let solved =
-    r.mode === 'auto' ? solveAuto(book, market, params, checks) : solve(book, market, params, checks);
+    r.mode === 'auto'
+      ? solveAuto(solverBook, market, params, checks)
+      : solve(solverBook, market, params, checks);
   if (r.mode === 'auto' && solved.selected) {
     const size = solved;
     const cash = solveAuto(
-      book,
+      solverBook,
       market,
       { ...params, objective: 'cash' },
       { ...checks, seeds: size.candidates, searchBudget: options.cashSearchBudget ?? 1400 }
@@ -1006,7 +1073,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
       );
       solved = preference.eq(100)
         ? cash
-        : solveAuto(book, market, params, { ...checks, seeds: [cash.selected] });
+        : solveAuto(solverBook, market, params, { ...checks, seeds: [cash.selected] });
     }
     result.preference = {
       percent: out(preference),
@@ -1152,17 +1219,6 @@ function computeCurrent(r, a, data, fxData, now, options) {
     c.availableAfter = c.constraints.find((x) => x.code === 'hl_FREE_RESERVE')?.actual ?? null;
   }
   result.candidate = c;
-  if (result.ratioScan) {
-    const s = result.ratioScan,
-      point = {
-        i: dec(c.vsTargetQuantity).abs().div(market.pf.step).toNumber(),
-        j: dec(c.hlTargetQuantity).abs().div(market.hl.step).toNumber(),
-        sign: dec(c.vsTargetQuantity).cmp(0)
-      };
-    const containsPoint = (kind) =>
-      ratioSlice(s, point.sign, point.i, kind).some(([lo, hi]) => point.j >= lo && point.j <= hi);
-    if (containsPoint(s.sets.both.count ? 'both' : 'legal')) s.defaultPoint = point;
-  }
   if (dec(c.hlTargetQuantity).eq(0)) result.notices.push('Hype 目标为空仓，PF 保留单边敞口');
   const verified = solved.candidates.filter((x) => x.code === 'FEASIBLE');
   if (verified.length) {

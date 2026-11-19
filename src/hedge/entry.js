@@ -34,7 +34,7 @@ if (state.stressVersion !== 1) {
   for (const k of Object.keys(stressFields)) if (state.rules[k] === '0') delete state.rules[k];
   state.stressVersion = 1;
 }
-const planDefaults = { planCapital: '500', planPF: '10000', planFundedCash: '101.50' };
+const planDefaults = { planCrossFlat: true, planCapital: '500', planPF: '10000', planFundedCash: '101.50' };
 const planning = () => state.fundingView === 'plan';
 state.fundingView ??= 'plan';
 state.rules = { ...rules, ...splitReserves(state.rules) };
@@ -80,6 +80,7 @@ const ruleFields = {
   fundingDebit: '持有期间资金费支出压力（U）',
   adverseBps: 'Hype 不利基差及汇率偏移（基点，1 基点 = 0.01%）',
   externalFx: '每单位外币的已确认 USDC 估值（选填）',
+  recoveryBuffer: '失败回本之外要求的额外安全缓冲（U，选填）',
   registration: '本金中已支付的报名费（U）',
   investedCapital: '净收益核算的实际总投入（含报名费及已投入的外部资金，U）',
   outsideCosts: '本金之外另需收回的历史成本（U）',
@@ -1109,7 +1110,7 @@ function render() {
             money(r.registration) +
             ' = Hype 起始资金 ' +
             money(a.hl.equity)) +
-          (r.planCrossFlat ? '。规划条件已确认。' : '。请确认下方规划条件以计算目标。')
+          (r.planCrossFlat ? '。按规划全仓、空仓且无挂单计算。' : '。请确认下方规划条件以计算目标。')
       : ''
   );
   put('plan-heading', r.stage === 'funded' ? '首次分成资金规划' : '开考前资金规划');
@@ -1189,7 +1190,7 @@ function render() {
       'fund-source',
       '预设 Hype 权益 ' + money(result.cash.hl) + ' ＋ 规划外部已到账 ' + money(result.externalValue)
     );
-    put('collateral-source', r.planCrossFlat ? '按已确认的全仓规划计算' : '等待确认规划起点');
+    put('collateral-source', r.planCrossFlat ? '按全仓空仓规划计算' : '等待确认规划起点');
   }
   put(
     'summary-status',

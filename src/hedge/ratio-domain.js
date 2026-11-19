@@ -125,7 +125,34 @@ export function legalSegments(ctx, venue, sign) {
         );
       if (venue === 'hl' && Number(l.configuredLeverage) > 0 && Number(l.configuredLeverage) <= cap)
         levels.add(Number(l.configuredLeverage));
-      const intervals = [];
+      const intervals = [],
+        marginBands = [];
+      // Lowest individually admissible setting is the solver's tie-break for identical risk.
+      if (venue === 'hl') {
+        let uncovered = [[lo, hi]];
+        for (let lev = 1; lev <= cap && uncovered.length; lev++) {
+          const v = clipStatic(
+            lo,
+            hi,
+            entryChecks(ctx, venue, sign, lo, lev),
+            entryChecks(ctx, venue, sign, hi, lev)
+          );
+          if (!v) continue;
+          const remaining = [];
+          for (const [a, b] of uncovered) {
+            const from = Math.max(a, v[0]),
+              to = Math.min(b, v[1]);
+            if (from > to) {
+              remaining.push([a, b]);
+              continue;
+            }
+            marginBands.push({ from, to, lev });
+            if (a < from) remaining.push([a, from - 1]);
+            if (to < b) remaining.push([to + 1, b]);
+          }
+          uncovered = remaining;
+        }
+      }
       for (const n of levels) {
         const v = clipStatic(
           lo,
@@ -151,8 +178,10 @@ export function legalSegments(ctx, venue, sign) {
           lo: from,
           hi: to,
           sign,
+          marginBands,
           marked: line('marked'),
           settled: line('settled'),
+          entry: line('entry'),
           exit: line('exit'),
           absDelta: [
             base.delta.abs().minus(tail.delta.abs().minus(base.delta.abs()).times(lo)),

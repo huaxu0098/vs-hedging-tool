@@ -736,7 +736,7 @@ test('OPT02 搜索范围记录双边方向、步长和数量上限，预算中�
   const partial = calculateCurrent(inputs, f.a, f.m, {}, t, { searchBudget: 1 });
   assert.equal(partial.search.complete, false);
   assert.ok(!partial.maximum?.complete);
-  assert.equal(full.trace.model, 'AUTO-0.15');
+  assert.equal(full.trace.model, 'AUTO-0.17');
 });
 test('OPT03 PF 虚拟保证金、目标 Hype 初始、其他占用及调仓后真实可用分别核验', () => {
   const f = fixture();
@@ -1185,11 +1185,11 @@ test('RANGE02 买卖盘、深度及标记价重算相同数量的现金、费用
   assert.equal(a.h, b.h);
   assert.ok(dec(b.paths.fail.hl.exitSlippage).gt(0));
 });
-test('RANGE03 小网格逐点穷举对照整段扫描，方向、现仓、费用、压力、Funded 和多档维持保证金', () => {
-  for (const variant of ['flat', 'fees', 'stress', 'held', 'tier', 'funded']) {
+test('RANGE03 / AUTOSEL08 小网格逐点穷举对照整段扫描，方向、现仓、费用、压力、Funded 和多档维持保证金', () => {
+  for (const variant of ['flat', 'fees', 'stress', 'held', 'tier', 'funded', 'combined']) {
     const f = fixture(),
       r = {};
-    if (['fees', 'stress', 'tier'].includes(variant)) {
+    if (['fees', 'stress', 'tier', 'combined'].includes(variant)) {
       f.m.hl.levels = [
         [
           ['99.99', '0.25'],
@@ -1203,7 +1203,7 @@ test('RANGE03 小网格逐点穷举对照整段扫描，方向、现仓、费用
       r.pfFee = '0.0001';
       r.hlFee = '0.0005';
     }
-    if (variant === 'stress')
+    if (['stress', 'combined'].includes(variant))
       Object.assign(r, {
         jumpBps: '25',
         delayBps: '10',
@@ -1211,16 +1211,23 @@ test('RANGE03 小网格逐点穷举对照整段扫描，方向、现仓、费用
         minBuffer: '0.2',
         minMaintenanceSurplus: '5'
       });
-    if (variant === 'held') {
+    if (['held', 'combined'].includes(variant)) {
       f.a.pf.qty = '-2';
       f.a.hl.qty = '1';
       f.a.hl.currentMarginCredit = '20';
       f.a.hl.free = '100';
     }
-    if (variant === 'tier') f.m.hl.marginTiers.push({ lowerBound: '350', maxLeverage: 5 });
+    if (['tier', 'combined'].includes(variant))
+      f.m.hl.marginTiers.push({ lowerBound: '350', maxLeverage: 5 });
+    if (variant === 'combined') {
+      f.m.spec.contractMultiplier = '1.5';
+      f.m.hl.settlementToUSDC = '0.95';
+      Object.assign(r, { fx: '1.07', external: '80', externalAt: at });
+    }
     if (variant === 'funded') Object.assign(r, { stage: 'funded', fundedTarget: '1100', fundedFloor: '900' });
     const s = scanFixture(r, f).ratioScan;
     assert.ok(s.complete);
+    const verifiedRows = [];
     const counts = {
       risk: 0,
       protect: 0,
@@ -1242,6 +1249,7 @@ test('RANGE03 小网格逐点穷举对照整段扫描，方向、现仓、费用
             assert.match(err.message, /INVALID_PRICE_ENDPOINT|数值必须大于零/);
             continue;
           }
+          if (row.physical) verifiedRows.push(row);
           const flags = {
             risk: row.physical,
             protect: row.physical && row.covers,
@@ -1263,6 +1271,78 @@ test('RANGE03 小网格逐点穷举对照整段扫描，方向、现仓、费用
           }
         }
     for (const [key, n] of Object.entries(counts)) assert.equal(s.sets[key].count, n);
+    for (const [key, set] of Object.entries({
+      protect: s.sets.protect,
+      survive: s.sets.survive,
+      both: s.sets.both,
+      profit: s.sets.profit,
+      ...Object.fromEntries(s.buckets.map((b, n) => ['bin' + n, b]))
+    })) {
+      const rows = verifiedRows.filter((row) =>
+        key.startsWith('bin')
+          ? (set.above == null || dec(row.h).gt(set.above)) &&
+            (set.through == null || dec(row.h).lte(set.through))
+          : row[{ protect: 'covers', survive: 'survives', both: 'both', profit: 'profitable' }[key]]
+      );
+      const range = set.range;
+      if (!rows.length) {
+        assert.equal(range, null);
+        continue;
+      }
+      assert.equal(range.count, rows.length);
+      const fees = (row, path) => {
+        const ledgers = row.paths[path];
+        const leg = s.ctx.market.hl;
+        return dec(ledgers.hl.entryFee)
+          .plus(ledgers.hl.exitFee)
+          .plus(ledgers.pf.entryFee)
+          .plus(ledgers.pf.exitFee)
+          .plus(
+            dec(row.stress?.priceShock ?? '0')
+              .times(dec(row.hl).abs())
+              .times(leg.multiplier)
+              .times(leg.fx)
+              .times(leg.rate)
+          );
+      };
+      const values = {
+        failure: (r) => r.fail,
+        success: (r) => r.successPersonal,
+        pfQty: (r) => dec(r.pf).abs(),
+        hlQty: (r) => dec(r.hl).abs(),
+        pfValue: (r) => r.pfValue,
+        hlValue: (r) => r.hypeValue,
+        failureFee: (r) => fees(r, 'fail'),
+        successFee: (r) => fees(r, 'pass'),
+        gapRate: (r) => r.gapRate,
+        consumption: (r) => r.consumption,
+        maxMargin: (r) => r.initial,
+        minBuffer: (r) => r.buffer
+      };
+      for (const [metric, get] of Object.entries(values)) {
+        const vals = rows
+          .map(get)
+          .filter((v) => v != null)
+          .map(dec)
+          .sort((a, b) => a.cmp(b));
+        const checks =
+          metric === 'maxMargin'
+            ? [[range.maxMargin, vals.at(-1)]]
+            : metric === 'minBuffer'
+              ? [[range.minBuffer, vals[0]]]
+              : [
+                  [range[metric][0], vals[0]],
+                  [range[metric][1], vals.at(-1)]
+                ];
+        for (const [got, want] of checks)
+          if (want == null) assert.equal(got, null);
+          else
+            assert.ok(
+              got != null && want.minus(got).abs().lt('1e-11'),
+              [variant, key, metric, got, want].join('/')
+            );
+      }
+    }
   }
 });
 test('RANGE04 本金保护可行，考核成功全平时无净盈利比例', () => {
@@ -1478,4 +1558,24 @@ test('PATH03 先强平的路径标出中断，分开另一端的结算', () => {
   assert.match(row.passStop, /Hype/);
   assert.equal(row.failStop, null);
   assert.ok(!row.both && !row.profitable);
+});
+
+test('AUTOSEL02/04 自动代表来自同一资金门槛交集，安全缓冲只调整求解条件', () => {
+  const original = scanFixture(),
+    guarded = scanFixture({ recoveryBuffer: '6' }),
+    unreachable = scanFixture({ recoveryBuffer: '1000' });
+  for (const x of [original, guarded]) {
+    const { representative: rep, sets } = x.ratioScan;
+    assert.equal(rep.group, 'both');
+    assert.notEqual(rep.objective, 'diagnostic');
+    assert.ok(rep.row.both && dec(rep.row.failureVsProtection).gte(rep.buffer));
+    assert.ok(dec(rep.row.fail).gte(sets.both.range.failure[0]));
+  }
+  assert.deepEqual(original.ratioScan.sets.both, guarded.ratioScan.sets.both);
+  assert.equal(unreachable.ratioScan.representative.objective, 'diagnostic');
+});
+test('AUTOSEL05 500.0018U 仅高出 0.0018U，缓冲率 0.00036%', async () => {
+  const { recoveryCushion } = await import('../src/hedge/range-report.js');
+  assert.deepEqual(recoveryCushion('500.0018', '500'), { amount: '0.0018', rate: '0.0000036', thin: true });
+  assert.equal(recoveryCushion('499.9999', '500').thin, false);
 });

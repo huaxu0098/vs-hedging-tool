@@ -1,5 +1,14 @@
 import { dec, out, max, profitSplit, normalizeExposure } from './math.js';
 import { legalSegments, position, unit } from './ratio-domain.js';
+import {
+  pathMetrics,
+  metricRow,
+  newReport,
+  includeBand,
+  finishReport,
+  reportGroups,
+  recoveryCushion
+} from './range-report.js';
 import { evaluateLeverageGrid } from './leverage.js';
 import { profileInputs, validateMargin, projectSettlementEquity } from './solver.js';
 
@@ -245,6 +254,7 @@ function cell(ctx, p, pfSegment, hypeSegment, common) {
     )
   );
   return {
+    metrics: pathMetrics(ctx, pfSegment, hypeSegment, common, feesLine, debit, nonflat ? shock : decimal(0)),
     sign: pfSegment.sign,
     from: pfSegment.lo,
     to: pfSegment.hi,
@@ -396,6 +406,7 @@ export function inspectRatio(ctx, point) {
     successNet: successNet == null ? null : out(successNet),
     successPersonal: out(successPersonal),
     failureVsProtection: out(fail.minus(p.B)),
+    cushion: recoveryCushion(out(fail), p.B),
     successCoversPrincipal: successPersonal.gte(p.B),
     funded,
     deadline: deadlinePath(ctx, c, p),
@@ -442,25 +453,7 @@ export function buildRatioScan(ctx, { maxVisits = 3500000 } = {}) {
   );
   const sets = Object.fromEntries([...keys, 'high'].map((k) => [k, empty()])),
     cells = [];
-  // Reporting bins only. Counts retain direction and both integer lot indices.
-  const thresholds = [decimal(0)];
-  for (const [amount, distance] of [
-    [decimal(p.B).minus(p.C_hl).minus(ctx.book.external), decimal(p.E).minus(p.floor)],
-    [decimal(p.C_hl).minus(p.R), decimal(p.target).minus(p.E)]
-  ])
-    if (distance.gt(0) && amount.gt(0)) thresholds.push(amount.div(distance));
-  const cuts = [...new Set(thresholds.map(out))].map(decimal).sort((a, b) => a.cmp(b));
-  const counted = ['legal', 'protect', 'survive', 'both', 'profit'];
-  const buckets = [...cuts, null].map((end, n) => ({
-    above: n ? out(cuts[n - 1]) : null,
-    through: end == null ? null : out(end),
-    ...Object.fromEntries(counted.map((k) => [k, 0]))
-  }));
-  const boundaries = cuts.map((bound) => {
-    const places = Math.max(constant.decimalPlaces(), bound.decimalPlaces());
-    const scale = decimal(10).pow(places);
-    return [BigInt(bound.times(scale).toFixed(0)), BigInt(constant.times(scale).toFixed(0))];
-  });
+  const reports = Object.fromEntries(reportGroups.map((k) => [k, newReport()]));
   let visits = 0,
     complete = true;
   const old = position(ctx.book, 'hl');
@@ -493,18 +486,10 @@ export function buildRatioScan(ctx, { maxVisits = 3500000 } = {}) {
           }
           c.scannedTo = i;
           const bands = slices(c, i);
-          const limits = boundaries.map(([a, b]) => Number((a * BigInt(i)) / b));
-          for (const k of counted) {
-            if (!bands[k]) continue;
-            const [from, to] = bands[k];
-            let lo = from;
-            for (let n = 0; n < buckets.length && lo <= to; n++) {
-              const hi = Math.min(to, limits[n] ?? to);
-              if (hi >= lo) {
-                buckets[n][k] += hi - lo + 1;
-                lo = hi + 1;
-              }
-            }
+          if (bands.risk) {
+            const row = metricRow(c.metrics, i);
+            for (const key of reportGroups)
+              if (bands[key]) includeBand(reports[key], row, i, ...bands[key], sign);
           }
           for (const k of keys) if (bands[k]) add(sets[k], ...bands[k], i, sign);
           for (const band of highRiskBands(bands)) add(sets.high, ...band, i, sign);
@@ -512,11 +497,13 @@ export function buildRatioScan(ctx, { maxVisits = 3500000 } = {}) {
       }
     }
   }
+  for (const key of reportGroups) sets[key].range = finishReport(reports[key], ctx, p);
   for (const set of Object.values(sets)) {
     if (!Number.isSafeInteger(set.count)) throw Error('扫描数量超过安全计数范围');
     for (const side of ['min', 'max'])
       if (set[side]) set[side].h = out(constant.times(set[side].j).div(set[side].i));
   }
+  const buckets = reportBuckets(ctx, p, sets, cells);
   return {
     buckets,
     constant: out(constant),
@@ -527,6 +514,48 @@ export function buildRatioScan(ctx, { maxVisits = 3500000 } = {}) {
     ctx,
     defaultPoint: sets.both.largest ?? sets.protect.min ?? sets.risk.min ?? sets.legal.min
   };
+}
+// Actual executable fractions, including zero, partition the already scanned domain.
+// Boundaries are compared as lot-index fractions, without rounding to the displayed %.
+function reportBuckets(ctx, p, sets, cells) {
+  const edges = [
+    { i: 1, j: 0, h: '0' },
+    ...reportGroups.flatMap((k) => [sets[k].min, sets[k].max]).filter(Boolean)
+  ];
+  const cmp = (a, b) => Number(BigInt(a.j) * BigInt(b.i) - BigInt(b.j) * BigInt(a.i));
+  edges.sort(cmp);
+  const cuts = edges.filter((point, k) => k === 0 || cmp(point, edges[k - 1]) !== 0);
+  const counted = ['legal', ...reportGroups];
+  const buckets = [...cuts, null].map((edge, n) => ({
+    above: cuts[n - 1]?.h ?? null,
+    through: edge?.h ?? null,
+    throughLots: edge ? { i: edge.i, j: edge.j } : null,
+    ...Object.fromEntries(counted.map((k) => [k, 0])),
+    stats: newReport()
+  }));
+  const ratios = cuts.map((c) => [BigInt(c.j), BigInt(c.i)]);
+  for (const cell of cells) {
+    for (let i = cell.from; i <= cell.scannedTo; i++) {
+      const bands = slices(cell, i);
+      if (!bands.legal) continue;
+      const limits = ratios.map(([a, b]) => Number((a * BigInt(i)) / b));
+      const row = bands.risk ? metricRow(cell.metrics, i) : null;
+      for (const key of [...counted, 'risk']) {
+        if (!bands[key]) continue;
+        const [lo, hi] = bands[key];
+        let start = lo;
+        for (let n = 0; n < buckets.length && start <= hi; n++) {
+          const end = Math.min(hi, limits[n] ?? hi);
+          if (end < start) continue;
+          if (key === 'risk') includeBand(buckets[n].stats, row, i, start, end, cell.sign);
+          else buckets[n][key] += end - start + 1;
+          start = end + 1;
+        }
+      }
+    }
+    delete cell.metrics;
+  }
+  return buckets.map(({ stats, ...bin }) => ({ ...bin, range: finishReport(stats, ctx, p) }));
 }
 export function ratioSlice(scan, sign, i, kind = 'legal') {
   const bands = [];

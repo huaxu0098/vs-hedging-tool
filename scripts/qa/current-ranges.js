@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
+import { calculateCurrent } from '../../src/hedge/current.js';
+import { dec } from '../../src/hedge/math.js';
 import { openTestBrowser } from './chrome.js';
 const b = await openTestBrowser({ current: true });
 const { run, wait, click, set, send, text } = b;
@@ -18,7 +20,7 @@ async function ready(condition = 'true') {
 }
 async function record(label) {
   const x = await run(
-    `(()=>{const t=id=>document.getElementById(id).textContent;return Object.fromEntries(['scan-status','scan-clock','scan-pf-quote','scan-hl-quote','scan-capital','scan-protect','scan-survive','scan-both','scan-both-count','scan-funded','scan-deadline','scan-profit','scan-profit-count','scan-intersection','scan-selected','scan-cash','scan-fail-cash','scan-pass-cash','scan-pass-net','scan-risk','scan-buckets','scan-rows','trace-id'].map(k=>[k,t(k)]));})()`
+    `(()=>{const t=id=>document.getElementById(id).textContent;return Object.fromEntries(['scan-status','scan-clock','scan-pf-quote','scan-hl-quote','scan-capital','scan-protect','scan-survive','scan-both','scan-both-count','scan-funded','scan-deadline','scan-profit','scan-profit-count','scan-intersection','scan-representative','scan-position','scan-cash','scan-fail-cash','scan-pass-cash','scan-pass-net','scan-risk','scan-buckets','scan-rows','trace-id'].map(k=>[k,t(k)]));})()`
   );
   evidence.push({ label, ...x });
   console.log(
@@ -28,7 +30,7 @@ async function record(label) {
       x['scan-survive'],
       x['scan-profit'],
       x['scan-intersection'],
-      x['scan-selected'],
+      x['scan-position'],
       x['scan-cash'],
       x['trace-id']
     ])
@@ -44,60 +46,86 @@ try {
     )
   );
   console.log('RANGE12 极简首页与折叠详情通过');
-  await click('#scan-config');
-  assert.equal(await run("document.querySelector('#desk-details').open"), true);
+  await ready("document.getElementById('scan-representative').textContent.includes('自动计算代表方案')");
+  assert.ok(
+    await run(`['scan-percent','scan-find','scan-reset','scan-slider','scan-smaller','scan-larger','scan-scale','scan-filter','scan-endpoint'].every(x=>!document.getElementById(x)) &&
+    !document.getElementById('desk-details').open && !document.getElementById('scan-desk').innerText.includes('已选') &&
+    !document.querySelector('#scan-desk input,#scan-desk select,#scan-rows [tabindex]')`)
+  );
+  assert.match(await text('#scan-capital'), /预设资金规划/);
+  assert.equal(await text('#scan-profit'), '当前条件下无净盈利比例');
+  assert.ok(await run("document.getElementById('profit-panel').classList.contains('no-profit')"));
   assert.ok(
     await run(
-      "document.querySelector('#plan-cross-flat').getBoundingClientRect().width>0 && !document.querySelector('#desk-details').hidden"
+      "document.querySelectorAll('#scan-buckets .representative-range').length===1 && document.querySelector('#scan-buckets .representative-range').textContent.includes('含代表方案')"
     )
   );
-  await click('#plan-cross-flat');
-  await run("document.querySelector('#desk-details').open=false");
-  await ready();
-  assert.equal(
-    await run(
-      "document.querySelector('#scan-endpoint')===null && !document.body.innerText.includes('选择条件路径')"
-    ),
-    true
-  );
-  assert.match(await text('#scan-pf-quote'), /\d{2}:\d{2}:\d{2}\.\d{3}/);
-  await ready("document.querySelector('#scan-both').textContent.includes('%')");
-  assert.match(await text('#scan-funded'), /不适用/);
+  assert.match(await text('#scan-funded'), /当前阶段不适用/);
   assert.match(await text('#scan-deadline'), /到期结果未知/);
-  assert.match(await text('#scan-profit'), /当前已定义路径下无净盈利比例/);
-  await record('PATH01/02/05/07 · 规划资金和主网双边实时行情，默认并行结算');
-  await set('#scan-percent', '15.3739');
-  await click('#scan-find');
-  await ready("document.querySelector('#scan-rows tr[aria-selected=true]')?.dataset.both==='true'");
-  const point = await run(
-    "(()=>{const t=id=>document.getElementById(id).textContent;return [t('scan-selected'),parseFloat(t('scan-fail-cash')),parseFloat(t('scan-pass-cash')),t('scan-pass-net')]})()"
+  assert.match(
+    await text('#scan-pass-net'),
+    /假设 PF 自身净结算达到 12000.00 U.*满足 100.00 U 最低留存.*尚差/
   );
-  assert.ok(point[1] >= 500 && point[2] >= 100 && point[3].includes('相对总投入 -'));
-
-  assert.ok(await run("document.querySelector('#scan-buckets').rows.length>=2"));
-  assert.match(point[0], /15\.3739%/);
-  assert.match(await text('#scan-fail-net'), /在此路径下，收回保护本金/);
-  assert.match(point[3], /未收回保护本金.*达到最低留存/);
-  await record('PATH03/04/08 · 定位请求 15.3739%，本次报价最近的双路径保护仓位');
-  await set('#scan-filter', 'both');
-  await ready();
-  assert.ok(
-    await run("[...document.querySelector('#scan-rows').rows].every(row=>row.dataset.both==='true')")
+  assert.match(await text('#scan-intersection'), /500.00 U.*100.00 U/);
+  await record('AUTOSEL01—AUTOSEL07 · 首次打开即自动展示两端与四个区间');
+  const captured =
+    await run(`(()=>{const el=id=>document.getElementById(id), doc=el('trace-inputs').parentElement;doc.open=true;doc.ontoggle();
+    return {input:JSON.parse(el('trace-inputs').textContent), time:el('trace-sources').textContent.match(/计算于 (\\S+)/)[1],id:el('trace-id').textContent,
+      rows:[...el('scan-rows').rows].map(tr=>[...tr.cells].map(td=>td.textContent)),
+      rep:el('scan-representative').textContent,fail:el('scan-fail-cash').textContent,success:el('scan-pass-cash').textContent,
+      cushion:el('scan-fail-net').textContent,thin:el('scan-fail-net').classList.contains('thin-buffer')};})()`);
+  const { rules, accounts, market, rates, options } = captured.input;
+  const x = calculateCurrent(rules, accounts, market, rates, Date.parse(captured.time), options);
+  assert.ok(captured.id.endsWith(x.trace.id));
+  const { sets, representative, buckets } = x.ratioScan;
+  assert.equal(representative.group, 'both');
+  assert.equal(representative.objective, 'max_pf');
+  assert.ok(captured.rep.includes(dec(representative.row.h).times(100).toFixed(4) + '%'));
+  assert.equal(captured.fail, dec(representative.row.fail).toFixed(4) + ' U');
+  assert.equal(captured.success, dec(representative.row.successPersonal).toFixed(4) + ' U');
+  assert.equal(captured.thin, representative.row.cushion.thin);
+  assert.ok(captured.cushion.includes('未设额外安全缓冲'));
+  if (captured.thin) assert.match(captured.cushion, /极薄缓冲.*压力未验证/);
+  for (const [n, k] of ['protect', 'survive', 'both', 'profit'].entries()) {
+    assert.equal(
+      buckets.reduce((acc, bin) => acc + bin[k], 0),
+      sets[k].count
+    );
+    const range = sets[k].range;
+    if (!range) {
+      assert.ok(captured.rows[n][1].includes('无'));
+      continue;
+    }
+    assert.equal(range.count, sets[k].count);
+    assert.ok(captured.rows[n][0].includes(range.count.toLocaleString('en-US')));
+    assert.ok(captured.rows[n][1].includes(range.pfQty.join(' – ')));
+    assert.ok(captured.rows[n][2].includes(range.hlQty.join(' – ')));
+    assert.ok(captured.rows[n][3].includes(dec(range.failure[1]).toFixed(4) + ' U'));
+    assert.ok(captured.rows[n][4].includes(dec(range.successFee[1]).toFixed(4) + ' U'));
+  }
+  evidence.push({
+    label: 'AUTOSEL08 · 同帧资金快照与全部范围复算',
+    trace: captured.id,
+    representative: {
+      h: representative.row.h,
+      pf: representative.row.pf,
+      hl: representative.row.hl,
+      pfValue: representative.row.pfValue,
+      hypeValue: representative.row.hypeValue,
+      failure: representative.row.fail,
+      success: representative.row.successPersonal,
+      cushion: representative.row.cushion
+    },
+    sets: Object.fromEntries(['protect', 'survive', 'both', 'profit'].map((k) => [k, sets[k]])),
+    buckets
+  });
+  await click('#scan-config');
+  assert.ok(await run("document.getElementById('desk-details').open"));
+  await run(
+    "document.getElementById('scan-detail').open=true;document.getElementById('scan-detail').ontoggle()"
   );
-  await set('#scan-filter', 'protect');
-  await ready();
-  const upper = await run(`(()=>{const rows=[...document.querySelector('#scan-rows').rows];
-    const hi=Number(document.getElementById('scan-survive').textContent.split('–').at(-1).replace('%','').trim());
-    const row=rows.find(r=>parseFloat(r.cells[0].textContent)>hi && r.dataset.both==='false');
-    if(row)row.click();return row?.cells[0].textContent})()`);
-  assert.match(upper, /仅失败回本/);
-  await record('PATH04 · 成功留存上限之外的失败回本仓位');
-  await set('#scan-filter', 'profit');
-  await wait(
-    "document.querySelector('#scan-rows').rows.length===0 && document.querySelector('#scan-focus').hidden"
-  );
-  await set('#scan-filter', 'legal');
-  await ready();
+  assert.match(await text('#scan-audit'), /调仓深度滑点/);
+  await run("document.getElementById('desk-details').open=false");
   await send('Emulation.setDeviceMetricsOverride', {
     width: 390,
     height: 844,
@@ -118,27 +146,16 @@ try {
     const shot = await send('Page.captureScreenshot', { format: 'png' });
     await writeFile(process.env.RANGE_CAPTURE, Buffer.from(shot.data, 'base64'));
   }
-  await run("document.querySelector('#scan-rows tr:last-child').click()");
-  await set('#scan-slider', '1', 'input');
-  await set('#scan-percent', '16');
-  await click('#scan-find');
-  await ready("document.querySelector('#scan-selected').textContent.includes('16.0000%')");
-  await record('直接定位 16%');
-  const scale = await run(`(()=>{const el=id=>document.getElementById(id);
-    el('scan-side').value='1';el('scan-size').value='0.05';el('scan-scale').click();
-    const selected=()=>el('scan-rows').querySelector('[aria-selected=true]')?.dataset.point;
-    const before=selected();el('scan-larger').click();return [before,selected()]})()`);
-  assert.ok(scale[0] && scale[1]);
-  const [[side, i, j], [nextSide, ii, jj]] = scale.map((key) => key.split('/').map(Number));
-  assert.ok(nextSide === side && ii > i && j * ii === jj * i, '同向仓位增加且精确数量比不变');
-  await record('PATH08 · 同方向同一精确比例的另一个仓位规模');
-  await wait(
-    "(()=>{const el=document.querySelector('#scan-detail');if(!el.open&&!document.querySelector('#scan-results').inert)el.querySelector('summary').click();return el.open&&document.querySelector('#scan-audit').textContent.includes('调仓深度滑点')})()",
-    30000
-  );
   const prior = await text('#trace-id');
   await ready("document.querySelector('#trace-id').textContent!==" + JSON.stringify(prior));
   await record('PATH06 · 下一帧主网行情');
+  await set('#recoveryBuffer', '1', 'input');
+  await ready("document.getElementById('scan-fail-net').textContent.includes('额外缓冲要求 1.00 U')");
+  const phr = await text('#scan-position');
+  if (!phr.includes('仅作路径对照')) assert.ok(parseFloat(await text('#scan-fail-cash')) >= 501);
+  await record('安全缓冲改为 1 U 后重新求解');
+  await set('#recoveryBuffer', '', 'input');
+  await ready();
   await set('#R_success', '106', 'input');
   await ready("document.querySelector('#scan-capital').textContent.includes('106.00 U')");
   await record('PATH06 · 最低留存改为 106 U');
