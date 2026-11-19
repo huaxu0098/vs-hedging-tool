@@ -5,7 +5,7 @@ const b = await openTestBrowser({ current: true });
 const { send, run, wait, click, text } = b;
 const input = (id, v) => b.set('#' + id, v, 'input');
 const ready =
-  "document.querySelector('#plan-tradeoff').textContent.includes('现金缓冲变化') && document.querySelector('#trace-id').textContent.includes('AUTO-0.14')";
+  "document.querySelector('#plan-tradeoff').textContent.includes('现金缓冲变化') && document.querySelector('#trace-id').textContent.includes('AUTO-0.15')";
 try {
   await send('Page.navigate', { url: (process.env.CURRENT_URL ?? b.url) + '/' });
   await wait("typeof document.querySelector('#plan-cross-flat')?.onchange === 'function'");

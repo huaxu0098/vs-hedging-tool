@@ -1,12 +1,22 @@
-import { dec, out, max, normalizeExposure, profitSplit } from './math.js';
+import { dec, out, max, profitSplit, normalizeExposure } from './math.js';
 import { legalSegments, position, unit } from './ratio-domain.js';
 import { evaluateLeverageGrid } from './leverage.js';
-import { profileInputs, validateMargin } from './solver.js';
+import { profileInputs, validateMargin, projectSettlementEquity } from './solver.js';
 
 const decimal = (v) => dec(String(v));
 const lotValue = (leg) => unit(leg).times(leg.step);
-const paths = ['fail', 'pass', 'paid'];
-const keys = ['legal', 'risk', 'protect', 'survive', 'both', 'loss', 'profit', 'joint'];
+const keys = [
+  'legal',
+  'risk',
+  'protect',
+  'survive',
+  'both',
+  'loss',
+  'profit',
+  'failProfit',
+  'passProfit',
+  'afterCreditProfit'
+];
 export function scanContext(book, market, params, checks) {
   return {
     book,
@@ -126,7 +136,7 @@ function pfBoundary(ctx, pf, p) {
   }
   return { denominator, shifts, valid, risk };
 }
-function cell(ctx, p, endpoint, pfSegment, hypeSegment, common) {
+function cell(ctx, p, pfSegment, hypeSegment, common) {
   const { book, market, checks } = ctx,
     l = market.hl,
     { denominator, shifts } = common;
@@ -162,16 +172,15 @@ function cell(ctx, p, endpoint, pfSegment, hypeSegment, common) {
     risk = [...common.risk],
     protect = [],
     survive = [],
-    profit = [],
-    loss = [],
-    round = [];
+    failProfit = [],
+    passProfit = [],
+    afterCreditProfit = [],
+    loss = [];
   const feesLine = hypeSegment.settled.map((v, k) => v.minus(k === 0 ? extra : 0));
-  const successPayout =
-    p.stage === 'funded' ? decimal(profitSplit(p.target, p.baseline, p.share).user) : decimal(0);
+  const payout = p.stage === 'funded' ? profitSplit(p.target, p.baseline, p.share).user : null;
   const threshold = decimal(p.B).minus(book.external);
   const costBasis =
     ctx.params.profitBasis == null ? null : decimal(ctx.params.profitBasis).minus(book.external);
-  const selected = endpoint === 'fail' ? 0 : 1;
   for (const k of [0, 1]) {
     for (const stressed of [false, true]) {
       const s = shiftPx(shifts[k], stressed && nonflat ? shock : 0);
@@ -182,19 +191,9 @@ function cell(ctx, p, endpoint, pfSegment, hypeSegment, common) {
         const n = cash(costBasis);
         loss.push(n.map((v, i) => (i === 0 ? -v - 1n : -v)));
       }
-      if (k === selected && paths.includes(endpoint))
-        profit.push(cash(costBasis.minus(endpoint === 'paid' ? successPayout : 0), true));
-      if (k === 1 && p.stage === 'funded' && book.ref != null)
-        round.push(
-          cash(
-            decimal(book.ref)
-              .plus(p.g)
-              .plus(book.roundIn)
-              .minus(book.roundOut)
-              .minus(book.external)
-              .minus(successPayout)
-          )
-        );
+      if (costBasis != null) (k === 0 ? failProfit : passProfit).push(cash(costBasis, true));
+      if (k === 1 && costBasis != null && payout != null)
+        afterCreditProfit.push(cash(costBasis.minus(payout), true));
       valid.push(plane([s[0], denominator.times(l.mark).plus(s[1]), 0, 0], true));
       if (nonflat) valid.push(project(hypeSegment.exit, u, s, 0, true));
     }
@@ -238,12 +237,12 @@ function cell(ctx, p, endpoint, pfSegment, hypeSegment, common) {
       );
     }
   }
-  if (costBasis == null) loss.push([-1n, 0n, 0n, 0n]);
+  if (costBasis == null) for (const group of [loss, failProfit, passProfit]) group.push([-1n, 0n, 0n, 0n]);
+  if (costBasis == null || payout == null) afterCreditProfit.push([-1n, 0n, 0n, 0n]);
   const groups = Object.fromEntries(
-    Object.entries({ valid, risk, protect, survive, profit, loss, round }).map(([k, v]) => [
-      k,
-      compact(v, pfSegment, hypeSegment)
-    ])
+    Object.entries({ valid, risk, protect, survive, failProfit, passProfit, afterCreditProfit, loss }).map(
+      ([k, v]) => [k, compact(v, pfSegment, hypeSegment)]
+    )
   );
   return {
     sign: pfSegment.sign,
@@ -254,19 +253,30 @@ function cell(ctx, p, endpoint, pfSegment, hypeSegment, common) {
     ...groups
   };
 }
-function slices(c, i, endpoint) {
+function slices(c, i) {
   const n = BigInt(i);
   const legal = applyBands([c.lo, c.hi], c.valid, n),
     risk = applyBands(legal, c.risk, n);
   const protect = applyBands(risk, c.protect, n),
     survive = applyBands(risk, c.survive, n);
-  const profit = endpoint ? applyBands(risk, c.profit, n) : null;
-  const both = applyBands(applyBands(protect, c.survive, n), c.round, n),
-    loss = applyBands(risk, c.loss, n);
-  const joint = endpoint
-    ? applyBands(applyBands(applyBands(profit, c.protect, n), c.survive, n), c.round, n)
-    : null;
-  return { legal, risk, protect, survive, both, loss, profit, joint };
+  const intersect = (a, b) =>
+    a && b && Math.max(a[0], b[0]) <= Math.min(a[1], b[1])
+      ? [Math.max(a[0], b[0]), Math.min(a[1], b[1])]
+      : null;
+  const failProfit = applyBands(risk, c.failProfit, n),
+    passProfit = applyBands(risk, c.passProfit, n);
+  return {
+    legal,
+    risk,
+    protect,
+    survive,
+    both: intersect(protect, survive),
+    afterCreditProfit: applyBands(risk, c.afterCreditProfit, n),
+    loss: applyBands(risk, c.loss, n),
+    failProfit,
+    passProfit,
+    profit: intersect(failProfit, passProfit)
+  };
 }
 function highRiskBands({ legal, both }) {
   if (!legal) return [];
@@ -290,7 +300,57 @@ function add(set, lo, hi, i, sign) {
   if (!set.min || cmp(lo, set.min) < 0) set.min = { i, j: lo, sign };
   if (!set.max || cmp(hi, set.max) > 0) set.max = { i, j: hi, sign };
 }
-export function inspectRatio(ctx, point, endpoint) {
+function deadlinePath(ctx, c, p) {
+  if (p.stage === 'funded') return { status: 'notApplicable' };
+  const price = ctx.params.deadlineMark;
+  if (!ctx.book.challengeDeadlineAt || price == null) return { status: 'unknown' };
+  if (c.code !== 'FEASIBLE') return { status: 'risk' };
+  const shift = decimal(price).minus(ctx.market.pf.mark).div(ctx.market.pf.factor);
+  for (const key of ['fail', 'pass']) {
+    const boundary = decimal(c.lines[key]);
+    if (shift.times(boundary).gt(0) && shift.abs().gte(boundary.abs()))
+      return { status: 'firstBoundary', key };
+  }
+  const stress = c.endpointStress;
+  const hlShift = shift.plus(decimal(stress?.priceShock ?? 0).div(ctx.market.hl.factor));
+  const hl = projectSettlementEquity(ctx.book, ctx.market, 'hl', c.hlTargetQuantity, out(hlShift))
+    .minus(p.k ?? 0)
+    .minus(stress?.delayDebit ?? 0)
+    .minus(stress?.fundingDebit ?? 0);
+  return {
+    status: 'scenario',
+    at: ctx.book.challengeDeadlineAt,
+    mark: price,
+    cash: out(hl.plus(ctx.book.external))
+  };
+}
+function stoppedBeforeExit(ctx, c, key) {
+  if (c.code === 'FEASIBLE') return null;
+  const shift = c.lines[key],
+    stress = c.endpointStress;
+  const adjusted = decimal(shift).plus(decimal(stress?.priceShock ?? 0).div(ctx.market.hl.factor));
+  const root = c.stressLiqMark ?? c.liqMark;
+  const signed = decimal(c.hlTargetQuantity).cmp(0);
+  const exitMark = decimal(ctx.market.hl.mark).plus(adjusted.times(ctx.market.hl.factor));
+  if (signed && root != null && exitMark.minus(root).times(signed).lte(0)) return 'Hype 先触强平线';
+  for (const [venue, quantity, endpoint, debit] of [
+    ['pf', c.vsTargetQuantity, shift, '0'],
+    [
+      'hl',
+      c.hlTargetQuantity,
+      out(adjusted),
+      out(decimal(stress?.delayDebit ?? 0).plus(stress?.fundingDebit ?? 0))
+    ]
+  ]) {
+    if (decimal(quantity).isZero()) continue;
+    const path = validateMargin(ctx.book, ctx.market, venue, quantity, ['0', endpoint], undefined, debit).at(
+      -1
+    );
+    if (path.status === 'fail') return (venue === 'pf' ? 'PF' : 'Hype') + ' 先触维持保证金线';
+  }
+  return null;
+}
+export function inspectRatio(ctx, point) {
   const { market, book, checks, params } = ctx,
     p = profileInputs(book, params, market);
   const pf = out(decimal(market.pf.step).times(point.i).times(point.sign)),
@@ -302,16 +362,6 @@ export function inspectRatio(ctx, point, endpoint) {
   const basis = params.profitBasis;
   const successNet = basis == null ? null : success.plus(book.external).minus(basis),
     failNet = basis == null ? null : fail.minus(basis);
-  const selected =
-    basis == null
-      ? null
-      : endpoint === 'fail'
-        ? failNet
-        : endpoint === 'pass'
-          ? successNet
-          : endpoint === 'paid' && p.stage === 'funded'
-            ? successNet.plus(c.expectedUserPayout)
-            : null;
   const short = max(0, decimal(p.B).minus(fail));
   const ratio = (val, base) => (val == null || !decimal(base).gt(0) ? null : out(decimal(val).div(base)));
   const excess = c.stressedSurplus ?? c.baseSurplus,
@@ -320,16 +370,17 @@ export function inspectRatio(ctx, point, endpoint) {
   const physical = c.code === 'FEASIBLE';
   const covers = fail.gte(p.B),
     survives = success.gte(p.R);
-  const roundOk =
-    book.ref == null ||
-    p.stage !== 'funded' ||
-    success
-      .plus(book.external)
-      .plus(c.expectedUserPayout)
-      .minus(book.ref)
-      .minus(book.roundIn)
-      .plus(book.roundOut)
-      .gte(p.g);
+  const successPersonal = success.plus(book.external);
+  const funded =
+    p.stage === 'funded'
+      ? {
+          eligible: c.expectedUserPayout,
+          ifCredited: out(successPersonal.plus(c.expectedUserPayout)),
+          ifCreditedNet: successNet == null ? null : out(successNet.plus(c.expectedUserPayout)),
+          pending: params.pendingPayout ?? null,
+          received: params.receivedPayout ?? null
+        }
+      : null;
   return {
     ...point,
     pf,
@@ -337,11 +388,17 @@ export function inspectRatio(ctx, point, endpoint) {
     h: c.actualRatio,
     pfValue: c.vsNotional,
     hypeValue: c.hlNotional,
+    failStop: stoppedBeforeExit(ctx, c, 'fail'),
+    passStop: stoppedBeforeExit(ctx, c, 'pass'),
     fail: out(fail),
     success: out(success),
     failNet: failNet == null ? null : out(failNet),
     successNet: successNet == null ? null : out(successNet),
-    net: selected == null ? null : out(selected),
+    successPersonal: out(successPersonal),
+    failureVsProtection: out(fail.minus(p.B)),
+    successCoversPrincipal: successPersonal.gte(p.B),
+    funded,
+    deadline: deadlinePath(ctx, c, p),
     successChange: out(success.minus(p.C_hl)),
     shortfall: out(short),
     gapRate: ratio(short, p.B),
@@ -360,26 +417,50 @@ export function inspectRatio(ctx, point, endpoint) {
     physical,
     covers,
     survives,
-    profitable: physical && selected != null && selected.gt(0),
-    joint: physical && covers && survives && roundOk && selected != null && selected.gt(0),
+    both: physical && covers && survives,
+    failProfitable: physical && failNet != null && failNet.gt(0),
+    passProfitable: physical && successNet != null && successNet.gt(0),
+    profitable: physical && failNet != null && failNet.gt(0) && successNet.gt(0),
     reason: c.constraints.find((x) => x.status !== 'pass'),
     paths: c.paths,
     stress: path
   };
 }
-export function buildRatioScan(ctx, requested = '', preferred = null, { maxVisits = 3500000 } = {}) {
+function scanSegments(ctx, venue, sign) {
+  const segments = legalSegments(ctx, venue, sign);
+  if (ctx.params.mode !== (venue === 'pf' ? 'keepPF' : 'keepHL')) return segments;
+  const index = position(ctx.book, venue).times(sign).div(ctx.market[venue].step);
+  if (!index.isInteger() || index.lt(0) || !Number.isSafeInteger(index.toNumber())) return [];
+  const lot = index.toNumber();
+  return segments.filter((s) => s.lo <= lot && lot <= s.hi).map((s) => ({ ...s, lo: lot, hi: lot }));
+}
+
+export function buildRatioScan(ctx, { maxVisits = 3500000 } = {}) {
   const p = profileInputs(ctx.book, ctx.params, ctx.market);
-  const endpoint =
-    ctx.params.profitBasis != null &&
-    paths.includes(requested) &&
-    (requested !== 'paid' || p.stage === 'funded')
-      ? requested
-      : '';
   const constant = decimal(normalizeExposure(ctx.market.hl.step, ctx.market.hl)).div(
     normalizeExposure(ctx.market.pf.step, ctx.market.pf)
   );
   const sets = Object.fromEntries([...keys, 'high'].map((k) => [k, empty()])),
     cells = [];
+  // Reporting bins only. Counts retain direction and both integer lot indices.
+  const thresholds = [decimal(0)];
+  for (const [amount, distance] of [
+    [decimal(p.B).minus(p.C_hl).minus(ctx.book.external), decimal(p.E).minus(p.floor)],
+    [decimal(p.C_hl).minus(p.R), decimal(p.target).minus(p.E)]
+  ])
+    if (distance.gt(0) && amount.gt(0)) thresholds.push(amount.div(distance));
+  const cuts = [...new Set(thresholds.map(out))].map(decimal).sort((a, b) => a.cmp(b));
+  const counted = ['legal', 'protect', 'survive', 'both', 'profit'];
+  const buckets = [...cuts, null].map((end, n) => ({
+    above: n ? out(cuts[n - 1]) : null,
+    through: end == null ? null : out(end),
+    ...Object.fromEntries(counted.map((k) => [k, 0]))
+  }));
+  const boundaries = cuts.map((bound) => {
+    const places = Math.max(constant.decimalPlaces(), bound.decimalPlaces());
+    const scale = decimal(10).pow(places);
+    return [BigInt(bound.times(scale).toFixed(0)), BigInt(constant.times(scale).toFixed(0))];
+  });
   let visits = 0,
     complete = true;
   const old = position(ctx.book, 'hl');
@@ -391,11 +472,11 @@ export function buildRatioScan(ctx, requested = '', preferred = null, { maxVisit
     ? validateMargin(ctx.book, ctx.market, 'hl', out(old), ['0', out(delay), out(delay.neg())]).at(-1)
     : null;
   for (const sign of [1, -1]) {
-    const hypeSegment = legalSegments(ctx, 'hl', -sign);
-    for (const pfSegment of legalSegments(ctx, 'pf', sign)) {
+    const hypeSegment = scanSegments(ctx, 'hl', -sign);
+    for (const pfSegment of scanSegments(ctx, 'pf', sign)) {
       const common = pfBoundary(ctx, pfSegment, p);
       for (const h of hypeSegment) {
-        const c = cell(ctx, p, endpoint, pfSegment, h, common);
+        const c = cell(ctx, p, pfSegment, h, common);
         if (
           oldPath &&
           (oldPath.status !== 'pass' ||
@@ -411,7 +492,20 @@ export function buildRatioScan(ctx, requested = '', preferred = null, { maxVisit
             break;
           }
           c.scannedTo = i;
-          const bands = slices(c, i, endpoint);
+          const bands = slices(c, i);
+          const limits = boundaries.map(([a, b]) => Number((a * BigInt(i)) / b));
+          for (const k of counted) {
+            if (!bands[k]) continue;
+            const [from, to] = bands[k];
+            let lo = from;
+            for (let n = 0; n < buckets.length && lo <= to; n++) {
+              const hi = Math.min(to, limits[n] ?? to);
+              if (hi >= lo) {
+                buckets[n][k] += hi - lo + 1;
+                lo = hi + 1;
+              }
+            }
+          }
           for (const k of keys) if (bands[k]) add(sets[k], ...bands[k], i, sign);
           for (const band of highRiskBands(bands)) add(sets.high, ...band, i, sign);
         }
@@ -423,34 +517,49 @@ export function buildRatioScan(ctx, requested = '', preferred = null, { maxVisit
     for (const side of ['min', 'max'])
       if (set[side]) set[side].h = out(constant.times(set[side].j).div(set[side].i));
   }
-  const target = preferred
-    ? {
-        i: decimal(preferred.vsTargetQuantity).abs().div(ctx.market.pf.step).toNumber(),
-        j: decimal(preferred.hlTargetQuantity).abs().div(ctx.market.hl.step).toNumber(),
-        sign: decimal(preferred.vsTargetQuantity).cmp(0)
-      }
-    : null;
   return {
-    endpoint,
+    buckets,
     constant: out(constant),
     sets,
     cells,
     complete,
     visits,
     ctx,
-    defaultPoint:
-      target ?? sets.joint.largest ?? sets.both.largest ?? sets.protect.min ?? sets.risk.min ?? sets.legal.min
+    defaultPoint: sets.both.largest ?? sets.protect.min ?? sets.risk.min ?? sets.legal.min
   };
 }
 export function ratioSlice(scan, sign, i, kind = 'legal') {
   const bands = [];
   for (const c of scan.cells) {
-    if (c.sign !== sign || i < c.from || i > c.to) continue;
-    const all = slices(c, i, scan.endpoint);
+    if (c.sign !== sign || i < c.from || i > c.scannedTo) continue;
+    const all = slices(c, i);
     if (kind === 'high') bands.push(...highRiskBands(all));
     else if (all[kind]) bands.push(all[kind]);
   }
   return bands.sort((a, b) => a[0] - b[0]);
+}
+
+// Integer multiples of the reduced pair retain the exact same sensitivity ratio.
+export function adjacentScale(scan, point, direction, kind = 'legal') {
+  if (![1, -1].includes(direction)) throw Error('规模方向无效');
+  const divisor = Number(gcd(BigInt(point.i), BigInt(point.j)));
+  const pfLots = point.i / divisor,
+    hlLots = point.j / divisor;
+  const maxPF = scan.cells.reduce(
+    (limit, c) => (c.sign === point.sign ? Math.max(limit, c.scannedTo) : limit),
+    0
+  );
+  for (
+    let multiple = divisor + direction;
+    multiple > 0 && multiple <= Math.floor(maxPF / pfLots);
+    multiple += direction
+  ) {
+    const i = multiple * pfLots,
+      j = multiple * hlLots;
+    if (ratioSlice(scan, point.sign, i, kind).some(([lo, hi]) => lo <= j && j <= hi))
+      return { sign: point.sign, i, j };
+  }
+  return null;
 }
 
 // For each PF lot and each admissible Hype interval the closest sensitivity is
@@ -464,9 +573,7 @@ export function nearestRatio(scan, ratio, kind = 'legal') {
   for (const cell of scan.cells) {
     for (let i = cell.from; i <= cell.scannedTo; i++) {
       const groups =
-        kind === 'legal'
-          ? { legal: applyBands([cell.lo, cell.hi], cell.valid, BigInt(i)) }
-          : slices(cell, i, scan.endpoint);
+        kind === 'legal' ? { legal: applyBands([cell.lo, cell.hi], cell.valid, BigInt(i)) } : slices(cell, i);
       for (const band of kind === 'high' ? highRiskBands(groups) : [groups[kind]]) {
         if (!band) continue;
         const k = n * i;

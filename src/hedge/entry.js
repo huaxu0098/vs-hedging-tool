@@ -94,6 +94,8 @@ const ruleFields = {
   external: '已到账且确认归属的外部资金（原币）',
   inTransit: '在途金额（U，仅展示）',
   receivable: '分成待到账（U）',
+  receivedPayout: '本轮实际到账分成（U，已计入收款账户，未知留空）',
+  deadlineMark: '截止时 PF 标记价（明确压力终点，按当前品种与截止时间）',
   k: '额外终点摩擦预算（U，已计成交费勿重复填）',
   ref: '本轮起点 C_ref（未知留空）',
   g: '本轮最低收益要求（U）',
@@ -225,7 +227,11 @@ function inputs() {
   put('sync', planning() ? '立即刷新双边行情' : '立即刷新行情与账户');
   $('flat-entry').hidden = $('confirm-balances').hidden = $('quick-margin').hidden = planning();
   for (const k of Object.keys(planFields)) $(k).value = r[k] ?? '';
+  $('receiptSource').parentElement.hidden = $('receivedPayout').parentElement.hidden =
+    planning() || r.stage !== 'funded';
+  $('deadlineMark').parentElement.hidden = r.stage === 'funded';
   $('planFundedCash').parentElement.hidden = r.stage !== 'funded';
+  $('receiptSource').value = r.receiptSource ?? 'external';
   $('asset').value = asset();
   for (const k of [
     'mode',
@@ -237,7 +243,10 @@ function inputs() {
     'externalCurrency',
     ...Object.keys(ruleFields)
   ])
-    $(k).value = r[k] ?? '';
+    $(k).value =
+      k === 'deadlineMark' && (r.deadlineAsset !== asset() || r.deadlineBound !== r.deadline)
+        ? ''
+        : (r[k] ?? '');
 
   for (const side of ['pf', 'hl']) {
     const a = account(side);
@@ -517,6 +526,8 @@ function currentFrame(a, m, t) {
     autoStatus: 'AUTO_PARTIAL',
     refreshPending: true,
     lastFinished,
+    priorError:
+      completed?.context === context && !completed.result.ratioScan ? completed.result.issues?.[0] : null,
     trigger: running?.trigger,
     since: running?.since,
     issues: ['当前快照正在重算，仓位调整建议已暂停']
@@ -528,6 +539,8 @@ const autoLabels = {
   AUTO_DATA_BLOCKED: '数据待补或过期',
   AUTO_INFEASIBLE: '完整搜索无解',
   AUTO_DEADLINE_EXIT_REQUIRED: '考核已到期，待退出',
+  AUTO_PAYOUT_PENDING: '首笔分成待到账',
+  AUTO_CYCLE_SETTLED: '首笔分成已到账，本轮结束',
   AUTO_HOLD: '保持现仓'
 };
 function updateDeadline() {
@@ -1078,6 +1091,9 @@ function render() {
   if ($('leverage-grid').textContent !== levRows.map((x) => x.textContent).join(''))
     $('leverage-grid').replaceChildren(...levRows);
 
+  $('receiptSource').parentElement.hidden = $('receivedPayout').parentElement.hidden =
+    planning() || r.stage !== 'funded';
+  $('deadlineMark').parentElement.hidden = r.stage === 'funded';
   $('planFundedCash').parentElement.hidden = r.stage !== 'funded';
   put('account-heading', plan ? '规划起点与计算条件' : '当前账户与持仓');
   put('protection-label', plan ? '规划个人保护资金' : '已确认个人保护资金');
@@ -2240,6 +2256,7 @@ for (const k of [
   'R_success',
   'R_free',
   'riskPreference',
+  'receiptSource',
   'externalCurrency',
   ...Object.keys(ruleFields)
 ]) {
@@ -2247,7 +2264,16 @@ for (const k of [
     r[k] = $(k).value.trim();
     if (k === 'mode' && r.mode !== 'auto') $('desk-details').open = true;
     r.editedAt = now();
-    if (planning() && ['stage', 'registration'].includes(k)) inputs();
+    if (k === 'stage' || (planning() && k === 'registration')) inputs();
+    if (k === 'deadlineMark') {
+      r.deadlineAsset = asset();
+      r.deadlineBound = r.deadline;
+    }
+    if (k === 'deadline') {
+      r.deadlineMark = '';
+      $('deadlineMark').value = '';
+    }
+    if (k === 'receivedPayout' || k === 'receiptSource') r.receivedPayoutAt = r.editedAt;
     if (k === 'external' || k === 'externalCurrency') r.externalAt = r.editedAt;
     if (k === 'externalFx') r.externalFxAt = now();
     if (k === 'externalCurrency') {
@@ -2515,18 +2541,10 @@ $('confirm-quote').onclick = () => {
     put('manual-status', e.message);
   }
 };
-setupScan(
-  (path) => {
-    r.scanEndpoint = path;
-    r.editedAt = now();
-    save();
-    render();
-  },
-  () => {
-    $('desk-details').open = true;
-    $('quick-entry').click();
-  }
-);
+setupScan(() => {
+  $('desk-details').open = true;
+  $('quick-entry').click();
+});
 inputs();
 render();
 refreshMarket();

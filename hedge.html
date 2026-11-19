@@ -50,15 +50,25 @@
       <section id="scan-desk" aria-label="实时比例扫描">
         <div class="scan-quotes"><div>VS 标记价<strong id="scan-pf-price">—</strong><small id="scan-pf-quote"></small></div><div>Hyperliquid 标记价<strong id="scan-hl-price">—</strong><small id="scan-hl-quote"></small></div><div>换汇后价差 · Hype − VS<strong id="scan-basis">—</strong><small id="scan-clock"></small></div></div>
         <div class="scan-tools"><span id="scan-capital"></span><button type="button" id="scan-config">账户与资金规则</button></div>
-        <div class="scan-sets"><article><h2>本金保护比例</h2><strong id="scan-protect">—</strong><small id="scan-protect-count"></small></article><article><h2>成功端现金承受比例</h2><strong id="scan-survive">—</strong><small id="scan-survive-count"></small></article><article><h2>路径净盈利比例</h2><strong id="scan-profit">待选择终点</strong><small id="scan-profit-count"></small></article></div>
-        <div class="scan-tools"><label>净收益结算终点 <select id="scan-endpoint"><option value="">选择条件路径</option><option value="fail">VS 失败 · 双边平仓</option><option value="pass">VS 成功 · 分成到账前</option><option value="paid">Funded · 首次分成实际到账时</option></select></label><span id="scan-intersection"></span></div>
-        <div id="scan-focus" hidden><p id="scan-selected"></p><p id="scan-cash"></p><p id="scan-risk"></p></div><p id="scan-status" role="status"></p>
+        <div class="scan-sets">
+          <article><h2>失败端本金回收区间</h2><strong id="scan-protect">—</strong><small id="scan-protect-count"></small></article>
+          <article><h2>成功端现金承受区间</h2><strong id="scan-survive">—</strong><small id="scan-survive-count"></small></article>
+          <article><h2>双路径保护交集</h2><strong id="scan-both">—</strong><small id="scan-both-count"></small></article>
+          <article><h2>个人净盈利区间</h2><strong id="scan-profit">—</strong><small id="scan-profit-count"></small></article>
+        </div>
+        <div id="scan-focus" hidden><p id="scan-selected"></p>
+          <div id="scan-cash" class="scan-paths">
+            <article><h2>若 VS 先失败 · 个人回收</h2><strong id="scan-fail-cash">—</strong><small id="scan-fail-net"></small></article>
+            <article><h2 id="scan-pass-title">若 VS 先通过 · 个人剩余</h2><strong id="scan-pass-cash">—</strong><small id="scan-pass-net"></small></article>
+            <article><h2>两日截止</h2><strong id="scan-deadline">到期结果未知</strong><small id="scan-deadline-note"></small></article>
+          </div><p id="scan-risk"></p>
+        </div><p id="scan-funded"></p><p id="scan-status" role="status"></p>
         <div id="scan-results" hidden>
-          <div class="scan-tools"><h2>比例与双边目标仓位</h2><label>定位范围 <select id="scan-filter"><option value="legal">全部合法数量</option><option value="both">保护本金及留存</option><option value="joint">三项交集</option><option value="profit">选定路径净盈利</option><option value="protect">失败端保本金</option><option value="survive">成功端满足留存</option><option value="loss">成功端相对本金亏损</option><option value="high">高风险或资金缺口</option></select></label><label>查看比例（%） <input id="scan-percent" type="number" min="0" step="any" placeholder="输入比例，定位最近网格" /></label><button id="scan-find" type="button">定位比例</button><button id="scan-reset" type="button">回到默认候选</button></div>
-          <div class="table-wrap"><table><thead><tr><th>实际 h</th><th>PF 价值 / 数量</th><th>Hype 价值 / 数量</th><th>失败缺口率</th><th>成功端权益变化</th><th>所选终点净收益</th><th>初始保证金占用率 / 风险</th></tr></thead><tbody id="scan-rows"></tbody></table></div>
+          <div class="scan-tools"><h2>双边目标仓位 · 代表样本</h2><label>定位范围 <select id="scan-filter"><option value="legal">全部合法数量</option><option value="both">保护本金及留存</option><option value="profit">双路径均净盈利</option><option value="protect">失败端保本金</option><option value="survive">成功端满足留存</option><option value="loss">成功端相对本金亏损</option><option value="high">高风险或资金缺口</option></select></label><label>查看比例（%） <input id="scan-percent" type="number" min="0" step="any" placeholder="输入比例，定位最近网格" /></label><button id="scan-find" type="button">定位比例</button><button id="scan-reset" type="button">回到默认候选</button></div>
+          <div class="table-wrap"><table><thead><tr><th>实际 h / 保护结果</th><th>PF 方向 / 目标仓位</th><th>Hype 方向 / 目标仓位</th><th>失败回收 / 本金缺口</th><th>成功后个人剩余 / 净变化</th><th>缺口率 / 消耗率</th><th>保证金占用率 / 维持余量 / 强平距离</th></tr></thead><tbody id="scan-rows"></tbody></table></div>
           <label class="scan-slider">在所选 PF 仓位上逐个查看 Hype 数量步长<input id="scan-slider" type="range" min="0" max="0" value="0" step="1" /></label>
-          <details><summary>查看同一比例的其他 PF 规模</summary><div class="scan-tools"><label>PF 方向<select id="scan-side"><option value="1">多</option><option value="-1">空</option></select></label><label>PF 数量<input type="number" id="scan-size" min="0" step="any" /></label><button type="button" id="scan-scale">定位这组仓位</button></div></details><p id="scan-bands"></p>
-          <p id="scan-loss"></p><details id="scan-detail"><summary>所选比例的价格路径、费用流水与清算依据</summary><pre id="scan-audit"></pre></details>
+          <details><summary>查看同一比例的其他 PF 规模</summary><div class="scan-tools"><button type="button" id="scan-smaller">同一比例 · 上一规模</button><button type="button" id="scan-larger">同一比例 · 下一规模</button><label>PF 方向<select id="scan-side"><option value="1">多</option><option value="-1">空</option></select></label><label>PF 数量<input type="number" id="scan-size" min="0" step="any" /></label><button type="button" id="scan-scale">按数量定位最近比例</button></div></details><p id="scan-bands"></p>
+          <details><summary>全部比例分桶统计与路径口径</summary><p id="scan-intersection"></p><p id="scan-loss"></p><div class="table-wrap"><table><thead><tr><th>比例分桶</th><th>合法仓位</th><th>失败回本</th><th>成功留存</th><th>双路径保护</th><th>双路径净盈利</th></tr></thead><tbody id="scan-buckets"></tbody></table></div></details><details id="scan-detail"><summary>所选比例的价格路径、费用流水与清算依据</summary><pre id="scan-audit"></pre></details>
         </div>
       </section>
       <details id="desk-details"><summary>账户、资金规则与计算详情</summary>
@@ -415,7 +425,7 @@
           <p>四项均为本机用户假设。基差或跳价取对 Hype 不利的一侧，两者取较大变动；延迟按调仓差额计损，资金费按持有期间的支出扣减。空白表示未配置，手工填 0 表示明确采用零压力。</p>
           <div class="form" id="stress-fields"></div>
         </details>
-        <div class="form" id="rule-fields"></div>
+        <div class="form" id="rule-fields"><label hidden>分成收款账户<select id="receiptSource"><option value="external">已到账外部资金</option><option value="hl">Hype 权益</option></select></label></div>
         <p>
           现金范围按当前权益计算。条件仓位按双边盘口、差额成交费及数量步长核算，假设到达边界期间标的同步变动；未来基差、滑点变化和资金费待核实。
         </p>

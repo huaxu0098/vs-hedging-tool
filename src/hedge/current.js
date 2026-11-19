@@ -381,7 +381,7 @@ function heldOutcomes(book, market, p, pf, hl) {
 
 // An old R was entered as a success-path reserve. The new collateral floor is independent.
 export function splitReserves(saved = {}) {
-  const { R, ...rest } = saved;
+  const { R, scanEndpoint: obsoletePath, ...rest } = saved;
   return { ...rest, R_success: rest.R_success ?? R ?? rules.R_success, R_free: rest.R_free ?? rules.R_free };
 }
 export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(), options = {}) {
@@ -434,7 +434,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
     funded = stage === 'funded',
     target = funded ? r.fundedTarget : r.challengeTarget;
   const floor = funded ? r.fundedFloor : r.challengeFloor;
-  const pending = specified(r.receivable) && nonnegative(r.receivable).gt(0);
+  const pending = funded && specified(r.receivable) && nonnegative(r.receivable).gt(0);
   if (pending) result.notices.push('有分成待到账 ' + r.receivable + ' U，核对平台回执');
   const expired = !funded && r.deadline && Date.parse(r.deadline) <= now;
   if (expired) result.notices.push('考核已到期，待核对实际退出');
@@ -740,10 +740,55 @@ function computeCurrent(r, a, data, fxData, now, options) {
     const net = dec(result.cash.hl)
       .plus(f ? dec(q).times(l.multiplier).times(l.fx).times(dec(f.price).minus(l.mark)) : 0)
       .minus(f ? dec(f.notional).times(l.fx).times(l.rate) : 0);
-    result.deadlineExit = out(net.plus(external));
+    if (
+      quotes.length === 4 &&
+      quotes.every((at) => at === Date.parse(r.deadline)) &&
+      ['pf', 'hl'].every(
+        (k) =>
+          planning ||
+          ['equity', 'qty'].every((field) => Date.parse(fieldTime(a[k], field)) <= Date.parse(r.deadline))
+      )
+    ) {
+      result.deadlineExit = out(net.plus(external));
+    }
     result.notices.push('按本次可见盘口退出，个人现金约 ' + net.plus(external).toFixed(2) + ' U，待实际结算');
   }
-  if (issues.length || terminal || expired || pending) return result;
+  const receiptEntered = !planning && funded && specified(r.receivedPayout);
+  const receiptSource = r.receiptSource === 'hl' ? 'hl' : 'external';
+  const receiptBalance =
+    receiptSource === 'hl' ? result.cash.hl : conversion && externalFresh ? external : null;
+  const receipt =
+    receiptEntered &&
+    Date.parse(r.receivedPayoutAt) <= now &&
+    receiptBalance != null &&
+    nonnegative(r.receivedPayout).lte(receiptBalance)
+      ? out(nonnegative(r.receivedPayout))
+      : null;
+  result.receipt =
+    receipt == null
+      ? null
+      : {
+          amount: receipt,
+          at: r.receivedPayoutAt,
+          source: receiptSource,
+          cash: result.protect,
+          net:
+            result.protect == null || !specified(r.investedCapital)
+              ? null
+              : out(
+                  dec(result.protect)
+                    .minus(r.investedCapital)
+                    .minus(r.outsideCosts ?? '0')
+                )
+        };
+  if (receiptEntered && receipt == null) issues.push('请核对实际分成回执时间和收款账户快照');
+  if (receipt != null && dec(receipt).gt(0)) {
+    result.notices.push('首笔分成到账，本轮结束。到账金额已计入收款账户。');
+    if (r.mode === 'auto') result.autoStatus = 'AUTO_CYCLE_SETTLED';
+    return result;
+  }
+  if (issues.length || terminal || expired) return result;
+  if (pending && (r.mode !== 'auto' || (!options.scanRatios && !options.deferAuto))) return result;
   const pos = {};
   const book = {
     mode: 'live_readonly',
@@ -806,6 +851,16 @@ function computeCurrent(r, a, data, fxData, now, options) {
     g: r.g,
     k: r.k,
     objective: 'size',
+    externalPriced: !!conversion || externalAmount.isZero(),
+    pendingPayout: funded && specified(r.receivable) ? out(nonnegative(r.receivable)) : null,
+    receivedPayout: receipt,
+    deadlineMark:
+      result.deadline &&
+      r.deadlineAsset === data.asset &&
+      r.deadlineBound === r.deadline &&
+      specified(r.deadlineMark)
+        ? out(positive(r.deadlineMark))
+        : null,
     movePct: result.deadline && specified(r.movePct) ? out(nonnegative(r.movePct)) : null
   };
   const checks = {
@@ -823,7 +878,9 @@ function computeCurrent(r, a, data, fxData, now, options) {
       delayBps: r.delayBps || '0',
       fundingDebit: r.fundingDebit || '0'
     };
-  if (r.mode === 'auto') {
+  const fixedScan = ['keepPF', 'keepHL'].includes(r.mode) && (options.deferAuto || options.scanRatios);
+  let canScan = r.mode === 'auto' || fixedScan;
+  if (canScan) {
     result.leverageStatus = 'LEVERAGE_UNVERIFIED';
     const missing = [];
     for (const [key, label] of [
@@ -870,9 +927,13 @@ function computeCurrent(r, a, data, fxData, now, options) {
     }
 
     if (missing.length) {
-      result.autoStatus = 'AUTO_PARTIAL';
-      issues.push('资金比例可算，待确认 ' + missing.join('、'));
-      return result;
+      if (!fixedScan) {
+        result.autoStatus = 'AUTO_PARTIAL';
+        issues.push('资金比例可算，待确认 ' + missing.join('、'));
+        return result;
+      }
+      canScan = false;
+      result.notices.push('固定侧比例网格待确认 ' + missing.join('、'));
     }
     result.leverageStatus =
       !planning &&
@@ -887,7 +948,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
       !!market.hl.capacity &&
       a.hl.fee != null &&
       !a.pf.otherPositions;
-    if (options.deferAuto) {
+    if (options.deferAuto && canScan) {
       result.needsSearch = true;
       return result;
     }
@@ -895,18 +956,22 @@ function computeCurrent(r, a, data, fxData, now, options) {
   if (options.searchBudget != null) checks.searchBudget = options.searchBudget;
   if (
     options.scanRatios &&
-    r.mode === 'auto' &&
+    canScan &&
     market.hl.marginMode === 'cross' &&
     market.hl.tiers?.length &&
     market.pf.tiers?.length
   ) {
     const ctx = scanContext(book, market, params, checks);
-    const scan = (result.ratioScan = buildRatioScan(ctx, r.scanEndpoint));
+    const scan = (result.ratioScan = buildRatioScan(ctx));
     const feasible = scan.sets.both;
     checks.seeds = [feasible.largest, feasible.min, feasible.max].filter(Boolean).map((point) => ({
       vsTargetQuantity: out(dec(market.pf.step).times(point.i).times(point.sign)),
       hlTargetQuantity: out(dec(market.hl.step).times(point.j).times(-point.sign))
     }));
+  }
+  if (pending) {
+    result.autoStatus = 'AUTO_PAYOUT_PENDING';
+    return result;
   }
   let solved =
     r.mode === 'auto' ? solveAuto(book, market, params, checks) : solve(book, market, params, checks);
@@ -1094,11 +1159,9 @@ function computeCurrent(r, a, data, fxData, now, options) {
         j: dec(c.hlTargetQuantity).abs().div(market.hl.step).toNumber(),
         sign: dec(c.vsTargetQuantity).cmp(0)
       };
-    s.defaultPoint =
-      s.sets.joint.count &&
-      !ratioSlice(s, point.sign, point.i, 'joint').some(([lo, hi]) => point.j >= lo && point.j <= hi)
-        ? s.sets.joint.largest
-        : point;
+    const containsPoint = (kind) =>
+      ratioSlice(s, point.sign, point.i, kind).some(([lo, hi]) => point.j >= lo && point.j <= hi);
+    if (containsPoint(s.sets.both.count ? 'both' : 'legal')) s.defaultPoint = point;
   }
   if (dec(c.hlTargetQuantity).eq(0)) result.notices.push('Hype 目标为空仓，PF 保留单边敞口');
   const verified = solved.candidates.filter((x) => x.code === 'FEASIBLE');

@@ -510,3 +510,13 @@ label input[type='checkbox'] {
 #scan-focus {padding:10px 16px;border-left:3px solid #31846d;background:#e9f4ef}
 #scan-focus p {margin:2px 0}
 .scan-stale #scan-focus {opacity:.55}
+
+.scan-sets {grid-template-columns:repeat(4,minmax(0,1fr))}
+.scan-sets strong {font-size:clamp(15px,1.45vw,23px);font-variant-numeric:tabular-nums}
+.scan-paths {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:10px 0}
+.scan-paths article {padding:8px 0}
+.scan-paths strong,.scan-paths small {display:block}
+.scan-paths strong {font-size:clamp(18px,1.8vw,26px);font-variant-numeric:tabular-nums}
+.scan-paths small,#scan-funded {color:var(--muted)}
+#scan-funded {margin:0}
+@media(max-width:760px){.scan-sets{grid-template-columns:repeat(2,minmax(0,1fr))}.scan-paths{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.scan-paths article:last-child{grid-column:1/-1}.scan-paths article{padding:3px 0}}

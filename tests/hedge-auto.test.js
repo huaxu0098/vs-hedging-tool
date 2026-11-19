@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRatioScan, inspectRatio, nearestRatio, ratioSlice } from '../src/hedge/ratio-scan.js';
+import {
+  buildRatioScan,
+  inspectRatio,
+  nearestRatio,
+  ratioSlice,
+  adjacentScale
+} from '../src/hedge/ratio-scan.js';
 import { sumPostings, presentLedger, reconcilePostings } from '../src/hedge/settlement-ledger.js';
 import { calculateCurrent, rules, splitReserves } from '../src/hedge/current.js';
 import { solveAuto, compareAuto, compareConservative } from '../src/hedge/auto.js';
@@ -730,7 +736,7 @@ test('OPT02 搜索范围记录双边方向、步长和数量上限，预算中�
   const partial = calculateCurrent(inputs, f.a, f.m, {}, t, { searchBudget: 1 });
   assert.equal(partial.search.complete, false);
   assert.ok(!partial.maximum?.complete);
-  assert.equal(full.trace.model, 'AUTO-0.14');
+  assert.equal(full.trace.model, 'AUTO-0.15');
 });
 test('OPT03 PF 虚拟保证金、目标 Hype 初始、其他占用及调仓后真实可用分别核验', () => {
   const f = fixture();
@@ -1131,14 +1137,14 @@ function scanFixture(overrides = {}, f = fixture()) {
   return calculateCurrent({ ...inputs, ...overrides }, f.a, f.m, {}, t, { scanRatios: true });
 }
 test('RANGE01 修改六个资金条件使比例集合与仓位风险随同一快照重算', () => {
-  const x = scanFixture({ scanEndpoint: 'fail' });
+  const x = scanFixture({});
   for (const patch of [
     { B: '189' },
     { challengeFloor: '935' },
     { challengeTarget: '1240' },
     { R_success: '100' }
   ]) {
-    const n = scanFixture({ ...patch, scanEndpoint: 'fail' });
+    const n = scanFixture({ ...patch });
     assert.notEqual(n.trace.id, x.trace.id);
     assert.notDeepEqual(n.ratioScan.sets, x.ratioScan.sets);
   }
@@ -1148,7 +1154,7 @@ test('RANGE01 修改六个资金条件使比例集合与仓位风险随同一快
   ]) {
     const f = fixture();
     f.a[side].equity = value;
-    const n = scanFixture({ scanEndpoint: 'fail' }, f);
+    const n = scanFixture({}, f);
     assert.notDeepEqual(n.ratioScan.sets, x.ratioScan.sets);
   }
 });
@@ -1182,7 +1188,7 @@ test('RANGE02 买卖盘、深度及标记价重算相同数量的现金、费用
 test('RANGE03 小网格逐点穷举对照整段扫描，方向、现仓、费用、压力、Funded 和多档维持保证金', () => {
   for (const variant of ['flat', 'fees', 'stress', 'held', 'tier', 'funded']) {
     const f = fixture(),
-      r = { scanEndpoint: 'fail' };
+      r = {};
     if (['fees', 'stress', 'tier'].includes(variant)) {
       f.m.hl.levels = [
         [
@@ -1212,17 +1218,26 @@ test('RANGE03 小网格逐点穷举对照整段扫描，方向、现仓、费用
       f.a.hl.free = '100';
     }
     if (variant === 'tier') f.m.hl.marginTiers.push({ lowerBound: '350', maxLeverage: 5 });
-    if (variant === 'funded')
-      Object.assign(r, { stage: 'funded', fundedTarget: '1100', fundedFloor: '900', scanEndpoint: 'paid' });
+    if (variant === 'funded') Object.assign(r, { stage: 'funded', fundedTarget: '1100', fundedFloor: '900' });
     const s = scanFixture(r, f).ratioScan;
     assert.ok(s.complete);
-    const counts = { risk: 0, protect: 0, survive: 0, profit: 0, joint: 0, loss: 0 };
+    const counts = {
+      risk: 0,
+      protect: 0,
+      survive: 0,
+      profit: 0,
+      both: 0,
+      failProfit: 0,
+      passProfit: 0,
+      afterCreditProfit: 0,
+      loss: 0
+    };
     for (const sign of [-1, 1])
       for (let i = 1; i <= 10; i++)
         for (let j = 0; j <= 6; j++) {
           let row;
           try {
-            row = inspectRatio(s.ctx, { sign, i, j }, s.endpoint);
+            row = inspectRatio(s.ctx, { sign, i, j });
           } catch (err) {
             assert.match(err.message, /INVALID_PRICE_ENDPOINT|数值必须大于零/);
             continue;
@@ -1232,7 +1247,10 @@ test('RANGE03 小网格逐点穷举对照整段扫描，方向、现仓、费用
             protect: row.physical && row.covers,
             survive: row.physical && row.survives,
             profit: row.profitable,
-            joint: row.joint,
+            both: row.physical && row.covers && row.survives,
+            failProfit: row.failProfitable,
+            passProfit: row.passProfitable,
+            afterCreditProfit: row.physical && row.funded != null && dec(row.funded.ifCreditedNet).gt(0),
             loss: row.physical && dec(row.successNet).lt(0)
           };
           for (const [key, v] of Object.entries(flags)) {
@@ -1248,19 +1266,19 @@ test('RANGE03 小网格逐点穷举对照整段扫描，方向、现仓、费用
   }
 });
 test('RANGE04 本金保护可行，考核成功全平时无净盈利比例', () => {
-  const s = scanFixture({ scanEndpoint: 'pass' }).ratioScan;
+  const s = scanFixture({}).ratioScan;
   assert.ok(s.sets.protect.count > 0);
   assert.equal(s.sets.profit.count, 0);
-  assert.equal(s.sets.joint.min, null);
+  assert.equal(s.sets.passProfit.min, null);
 });
 test('RANGE05 失败平仓路径严格正收益；恰好收回本金不计盈利', () => {
-  const s = scanFixture({ scanEndpoint: 'fail' }).ratioScan;
-  assert.ok(s.sets.profit.count > 0);
-  const row = inspectRatio(s.ctx, s.sets.profit.min, 'fail');
-  assert.ok(dec(row.net).gt(0));
+  const s = scanFixture({}).ratioScan;
+  assert.ok(s.sets.failProfit.count > 0);
+  const row = inspectRatio(s.ctx, s.sets.failProfit.min);
+  assert.ok(dec(row.failNet).gt(0));
   assert.ok(row.paths.fail.hl.exitPrice);
-  assert.ok(s.sets.protect.count > s.sets.profit.count);
-  const lowerProtection = scanFixture({ B: '130', scanEndpoint: 'pass' }).ratioScan;
+  assert.ok(s.sets.protect.count > s.sets.failProfit.count);
+  const lowerProtection = scanFixture({ B: '130' }).ratioScan;
   assert.equal(lowerProtection.sets.profit.count, 0);
   assert.equal(
     lowerProtection.sets.high.count + lowerProtection.sets.both.count,
@@ -1268,30 +1286,30 @@ test('RANGE05 失败平仓路径严格正收益；恰好收回本金不计盈利
   );
 });
 test('RANGE06 任意 h 定位合法步长；同一 h 的不同规模可以分别查看', () => {
-  const s = scanFixture({ scanEndpoint: 'fail' }).ratioScan;
+  const s = scanFixture({}).ratioScan;
   const p = nearestRatio(s, '0.5', 'both'),
-    r = inspectRatio(s.ctx, p, s.endpoint);
+    r = inspectRatio(s.ctx, p);
   assert.equal(r.h, '0.5');
   assert.ok(r.physical && r.survives && r.covers);
-  const other = inspectRatio(s.ctx, { i: 4, j: 2, sign: p.sign }, s.endpoint);
+  const other = inspectRatio(s.ctx, { i: 4, j: 2, sign: p.sign });
   assert.equal(other.h, r.h);
   assert.notEqual(other.hypeValue, r.hypeValue);
   assert.ok(r.initial && r.bufferRate && r.imRate);
   const near = nearestRatio(s, '0.501');
-  assert.equal(inspectRatio(s.ctx, near, s.endpoint).h, '0.5');
+  assert.equal(inspectRatio(s.ctx, near).h, '0.5');
 });
 test('RANGE07 无保护和现金交集时仍可检查淘汰比例与缺口', () => {
-  const s = scanFixture({ scanEndpoint: 'pass', B: '300' }).ratioScan;
+  const s = scanFixture({ B: '300' }).ratioScan;
   assert.equal(s.sets.both.count, 0);
-  assert.equal(s.sets.joint.count, 0);
-  const r = inspectRatio(s.ctx, s.sets.risk.min, s.endpoint);
+  assert.equal(s.sets.profit.count, 0);
+  const r = inspectRatio(s.ctx, s.sets.risk.min);
   assert.ok(dec(r.shortfall).gt(0));
 });
-test('RANGE08 搜索预算耗尽不得宣布全局无解，快照版本区分路径', () => {
+test('RANGE08 搜索预算耗尽不得宣布全局无解，忽略旧版保存的路径选择', () => {
   const x = scanFixture(),
-    a = buildRatioScan(x.ratioScan.ctx, 'fail', null, { maxVisits: 1 });
+    a = buildRatioScan(x.ratioScan.ctx, { maxVisits: 1 });
   assert.equal(a.complete, false);
-  assert.notEqual(scanFixture({ scanEndpoint: 'fail' }).trace.id, x.trace.id);
+  assert.equal(scanFixture({ scanEndpoint: 'fail' }).trace.id, x.trace.id);
 });
 test('RANGE09 规划与实际快照独立，未确认空仓或权益时不可产生扫描结果', () => {
   const f = fixture();
@@ -1300,30 +1318,164 @@ test('RANGE09 规划与实际快照独立，未确认空仓或权益时不可产
   const x = scanFixture();
   assert.equal(x.autoStatus, 'AUTO_PARTIAL');
   assert.equal(x.ratioScan.ctx.book.hl, '120');
-  const unconfirmed = scanFixture({ scanEndpoint: 'fail', investedCapital: '' }).ratioScan;
-  assert.equal(unconfirmed.endpoint, '');
+  const unconfirmed = scanFixture({ investedCapital: '' }).ratioScan;
+  assert.equal(unconfirmed.sets.profit.count, 0);
   assert.ok(unconfirmed.sets.protect.count);
-  assert.equal(inspectRatio(unconfirmed.ctx, unconfirmed.defaultPoint, 'paid').net, null);
+  assert.equal(inspectRatio(unconfirmed.ctx, unconfirmed.defaultPoint).successNet, null);
 });
-test('RANGE10 考核 PF 利润不进入个人账户，未选定终点不给盈利结论', () => {
+test('RANGE10 / PATH01、PATH02 考核两端自动结算并排除 PF 虚拟盈利', () => {
   const s = scanFixture().ratioScan;
-  const p = inspectRatio(s.ctx, s.defaultPoint, 'pass');
-  assert.equal(p.payout, '0');
-  assert.equal(p.net, out(dec(p.success).minus(s.ctx.book.B)));
-  assert.equal(s.endpoint, '');
-  assert.equal(inspectRatio(s.ctx, s.defaultPoint, '').net, null);
+  const row = inspectRatio(s.ctx, s.defaultPoint);
+  assert.equal(row.funded, null);
+  assert.equal(row.payout, '0');
+  assert.equal(row.successNet, out(dec(row.success).minus(s.ctx.book.B)));
+  assert.equal(row.failNet, out(dec(row.fail).minus(s.ctx.book.B)));
+  assert.equal(row.paths.pass.pf.settled, inputs.challengeTarget);
 });
-test('RANGE11 Funded 首次到账与到账前分开，分成只算超过基线的部分', () => {
-  const s = scanFixture({
-    stage: 'funded',
-    fundedTarget: '1100',
-    fundedFloor: '900',
-    scanEndpoint: 'paid'
-  }).ratioScan;
-  const a = inspectRatio(s.ctx, s.defaultPoint, 'pass'),
-    b = inspectRatio(s.ctx, s.defaultPoint, 'paid');
-  assert.equal(b.success, a.success);
-  assert.equal(b.payout, '80');
-  assert.ok(dec(b.net).minus(a.net).eq(80));
-  assert.ok(s.sets.profit.count);
+test('RANGE11 Funded 自动提供分成到账条件，实际回执未知时不增加个人现金', () => {
+  const rules = { stage: 'funded', fundedTarget: '1100', fundedFloor: '900' };
+  const s = scanFixture(rules).ratioScan;
+  const a = inspectRatio(s.ctx, s.defaultPoint);
+  assert.equal(a.funded.eligible, '80');
+  assert.equal(a.funded.received, null);
+  assert.ok(s.sets.afterCreditProfit.count > s.sets.profit.count);
+  assert.ok(dec(a.funded.ifCreditedNet).minus(a.successNet).eq(80));
+  assert.equal(a.deadline.status, 'notApplicable');
+  const waiting = scanFixture({ ...rules, receivable: '80' });
+  assert.ok(waiting.ratioScan && !waiting.candidate);
+  const paid = scanFixture({
+    ...rules,
+    receivedPayout: '80',
+    receivedPayoutAt: at,
+    external: '80',
+    externalAt: at
+  });
+  assert.equal(paid.autoStatus, 'AUTO_CYCLE_SETTLED');
+  assert.equal(paid.receipt.cash, '200');
+  assert.equal(paid.marginHL, '120');
+  const receivedHL = scanFixture({
+    ...rules,
+    receivedPayout: '80',
+    receivedPayoutAt: at,
+    receiptSource: 'hl'
+  });
+  assert.equal(receivedHL.receipt.cash, '120');
+  assert.equal(receivedHL.receipt.net, '-40');
+  assert.equal(receivedHL.marginHL, '120');
+});
+test('PATH03 在同一笔 15.3739% 仓位同时核算两端，不将失败回本归类为净盈利', () => {
+  const orig = scanFixture().ratioScan.ctx;
+  const market = structuredClone(orig.market);
+  for (const l of [market.pf, market.hl]) {
+    Object.assign(l, {
+      mark: '100',
+      bids: [['100', '200']],
+      asks: [['100', '200']],
+      step: '0.0001',
+      free: l === market.pf ? '10000' : '409',
+      maxQty: '200'
+    });
+  }
+  const ctx = {
+    ...orig,
+    market,
+    book: {
+      ...orig.book,
+      pf: '10000',
+      hl: '409',
+      B: '500',
+      challengeFloor: '9400',
+      challengeTarget: '12000'
+    },
+    params: { ...orig.params, profitBasis: '500', R: '100', k: '1.24' }
+  };
+  const row = inspectRatio(ctx, { sign: -1, i: 1000000, j: 153739 });
+  assert.equal(row.h, '0.153739');
+  assert.ok(dec(row.fail).minus('500').abs().lt('0.01'));
+  assert.ok(dec(row.success).minus('100').abs().lt('1'));
+  assert.ok(dec(row.successNet).lt('-399'));
+  assert.ok(row.both && row.covers && !row.successCoversPrincipal && !row.profitable);
+});
+test('PATH04、PATH05 双路径交集为同组仓位的精确交集，单侧回本不算盈利', () => {
+  const s = scanFixture().ratioScan;
+  assert.ok(s.sets.both.count && s.sets.failProfit.count && !s.sets.profit.count);
+  assert.ok(dec(s.sets.both.max.h).lte(s.sets.survive.max.h));
+  for (const sign of [-1, 1])
+    for (let i = 1; i <= 10; i++)
+      for (let j = 0; j <= 6; j++) {
+        const has = (k) => ratioSlice(s, sign, i, k).some(([lo, hi]) => lo <= j && j <= hi);
+        assert.equal(has('both'), has('protect') && has('survive'));
+        assert.equal(has('profit'), has('failProfit') && has('passProfit'));
+      }
+  const earning = scanFixture({ investedCapital: '100' }).ratioScan;
+  assert.ok(earning.sets.profit.count > 0);
+});
+test('PATH06 换资金或行情即重建四个集合及每组仓位结算', () => {
+  const before = scanFixture();
+  const f = fixture();
+  f.m.hl.mark = '101';
+  const after = scanFixture({ R_success: '110', investedCapital: '90', B: '150' }, f);
+  assert.notEqual(after.trace.id, before.trace.id);
+  for (const k of ['protect', 'survive', 'both', 'profit'])
+    assert.notDeepEqual(after.ratioScan.sets[k], before.ratioScan.sets[k], k);
+  const q = { i: 10, j: 4, sign: 1 };
+  assert.notEqual(
+    inspectRatio(before.ratioScan.ctx, q).hypeValue,
+    inspectRatio(after.ratioScan.ctx, q).hypeValue
+  );
+});
+test('PATH07 到期价格未知保持未知，明确截止压力路径才结算，先触线即终止', () => {
+  const row = (rules = {}) => {
+    const s = scanFixture(rules).ratioScan;
+    return inspectRatio(s.ctx, s.defaultPoint);
+  };
+  assert.equal(row({ movePct: '5' }).deadline.status, 'unknown');
+  const endpoint = { deadlineMark: '100', deadlineAsset: 'BTC', deadlineBound: inputs.deadline };
+  assert.equal(row(endpoint).deadline.cash, '120');
+  assert.equal(row({ ...endpoint, deadlineAsset: 'ETH' }).deadline.status, 'unknown');
+  assert.equal(row({ ...endpoint, deadlineMark: '200' }).deadline.status, 'firstBoundary');
+  assert.equal(calc({ deadline: new Date(t - 1000).toISOString() }).deadlineExit, undefined);
+});
+test('PATH08 分桶覆盖每个方向和规模，同一比例的不同仓位独立计数', () => {
+  const s = scanFixture().ratioScan;
+  for (const key of ['legal', 'protect', 'survive', 'both', 'profit'])
+    assert.equal(
+      s.buckets.reduce((n, b) => n + b[key], 0),
+      s.sets[key].count
+    );
+  for (const b of s.buckets) assert.ok(b.both <= b.survive && b.both <= b.protect);
+  const a = inspectRatio(s.ctx, { sign: 1, i: 4, j: 2 }),
+    b = inspectRatio(s.ctx, { sign: 1, i: 8, j: 4 });
+  assert.equal(a.h, b.h);
+  assert.notEqual(a.hypeValue, b.hypeValue);
+  const next = adjacentScale(s, { sign: 1, i: 4, j: 2 }, 1);
+  assert.deepEqual(next, { sign: 1, i: 6, j: 3 });
+  assert.deepEqual(adjacentScale(s, next, -1), { sign: 1, i: 4, j: 2 });
+});
+
+test('PATH01 固定现仓仍自动结算两端，范围仅包含所固定的方向与数量', () => {
+  const f = fixture();
+  f.a.pf.qty = '4';
+  f.a.hl.qty = '-2';
+  f.a.hl.currentMarginCredit = '40';
+  for (const mode of ['keepPF', 'keepHL']) {
+    const s = scanFixture({ mode }, f).ratioScan;
+    assert.ok(s.complete && s.sets.legal.count);
+    const row = inspectRatio(s.ctx, s.defaultPoint);
+    assert.ok(row.fail && row.success && row.sign === 1);
+    assert.equal(mode === 'keepPF' ? row.pf : row.hl, mode === 'keepPF' ? '4' : '-2');
+    assert.ok(
+      s.cells.every(
+        (c) => c.sign === 1 && (mode === 'keepPF' ? c.from === 4 && c.to === 4 : c.lo === 2 && c.hi === 2)
+      )
+    );
+  }
+});
+
+test('PATH03 先强平的路径标出中断，分开另一端的结算', () => {
+  const s = scanFixture().ratioScan;
+  const row = inspectRatio(s.ctx, { sign: 1, i: 2, j: 6 });
+  assert.match(row.passStop, /Hype/);
+  assert.equal(row.failStop, null);
+  assert.ok(!row.both && !row.profitable);
 });
