@@ -33,7 +33,7 @@ try {
   await wait("document.querySelector('#calc-status')?.textContent");
   assert.equal(await val('pf-equity'), '');
   assert.equal(await val('hl-qty'), '');
-  assert.equal(await val('mode'), 'keepPF');
+  assert.equal(await val('mode'), 'auto');
   assert.doesNotMatch(await run('document.body.innerText'), /模拟开仓|推进回放|默认考核模拟/);
   done('R01', [await run('document.title'), await text('#calc-status')]);
   await set('pf-equity', '10000');
@@ -41,6 +41,7 @@ try {
   assert.match(await text('#range'), /15.167% – 15.450%/);
   assert.match(await text('#legs'), /未知/);
   done('R02', await text('#bounds-detail'));
+  await set('mode', 'keepPF');
   await position('0.08', '-0.005');
   await wait(candidate, 35000);
   assert.equal(await run("document.querySelector('#legs').rows[0].cells[3].textContent"), '保持 0');
@@ -178,10 +179,6 @@ try {
   await set('deadline', '');
   await set('receivable', '');
   await set('pf-equity', '10000');
-  await set('mode', 'joint');
-  await set('sizes', '4000,5000');
-  await wait(candidate, 20000);
-  console.log('联合搜索', await row());
   await b.set('#hl-source', 'api');
   await set('wallet', user);
   await wait("document.querySelector('#sync-status').textContent.includes('返回账户价值')", 25000);
@@ -227,22 +224,93 @@ try {
     await text('#risk-values'),
     await text('#costs')
   );
-  if (process.env.DESK_SCREENSHOT) {
-    const { writeFile } = await import('node:fs/promises');
-    await run('window.scrollTo(0,0)');
-    const image = await send('Page.captureScreenshot', { format: 'png' });
-    await writeFile(process.env.DESK_SCREENSHOT, Buffer.from(image.data, 'base64'));
-  }
   await set('hl-qty', '-0.01225');
   await set('mode', 'keepHL');
   await wait(recommended, 20000);
   assert.equal((await row())[3], '保持 0');
   assert.equal(await run("document.querySelector('#costs').rows[1].cells[1].textContent"), '0.00 U');
   console.log('固定 Hype 验算', await text('#target-h'), await text('#legs'));
-  await set('sizes', '');
-  await set('mode', 'joint');
-  await wait(recommended, 20000);
-  console.log('自动联合搜索', await text('#legs'), await text('#verified-range'));
+  const future = await run(
+    'new Date(Date.now()+3600000-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16)'
+  );
+  await set('deadline', future);
+  await set('pf-qty', '0');
+  await set('hl-qty', '0');
+  await set('mode', 'auto');
+  await wait(recommended, 25000);
+  assert.match(await text('#auto-search'), /AUTO_FEASIBLE/);
+  assert.match(await text('#two-day'), /未验证/);
+  console.log(
+    'AUTO 实时双空仓',
+    await text('#auto-search'),
+    await text('#legs'),
+    await text('#cash-results'),
+    await text('#rejected-auto')
+  );
+  console.log(
+    'AUTO_FRAME',
+    JSON.stringify(
+      await run(
+        `Object.fromEntries(['pf-summary','hl-summary','pf-change','hl-change','fail-summary','pass-summary','current-h','range','target-h','verified-range','protect-funds','margin-funds','summary-buffer','auto-search','times'].map(id=>[id,document.getElementById(id).textContent]))`
+      )
+    )
+  );
+  if (process.env.DESK_SCREENSHOT) {
+    const { writeFile } = await import('node:fs/promises');
+    await run('window.scrollTo(0,0)');
+    const image = await send('Page.captureScreenshot', { format: 'png' });
+    await writeFile(process.env.DESK_SCREENSHOT, Buffer.from(image.data, 'base64'));
+  }
+  const free = await text('#margin-funds');
+  await set('external', '100');
+  await wait(recommended, 25000);
+  assert.equal(await text('#margin-funds'), free);
+  assert.match(await text('#protect-funds'), /509.00/);
+  await set('movePct', '3');
+  await wait("document.querySelector('#two-day').textContent.includes('五档') && " + recommended, 25000);
+  console.log('AUTO both / 两日', await text('#protect-funds'), free, await text('#two-day'));
+  const output = (documentId) =>
+    'document.querySelector(' + JSON.stringify('#' + documentId) + ').textContent';
+  await set('hlUtil', '1');
+  await set('hlUtil', '100');
+  await wait(recommended, 25000);
+  const beforeFrame = await text('#times'),
+    beforeQuote = await text('#quotes');
+  await wait(
+    output('times') +
+      '!== ' +
+      JSON.stringify(beforeFrame) +
+      ' && ' +
+      output('quotes') +
+      '!== ' +
+      JSON.stringify(beforeQuote) +
+      ' && ' +
+      recommended,
+    25000
+  );
+  await set('objective', 'cash');
+  await wait("document.querySelector('#auto-search').textContent.includes('AUTO_FEASIBLE')", 30000);
+  console.log('AUTO 保守排序', await text('#auto-search'), await text('#top-auto'));
+  await send('Network.emulateNetworkConditions', {
+    offline: true,
+    latency: 0,
+    downloadThroughput: 0,
+    uploadThroughput: 0
+  });
+  await wait("document.querySelector('#auto-search').textContent.includes('AUTO_DATA_BLOCKED')", 20000);
+  assert.equal(await text('#hl-summary'), '—');
+  console.log('AUTO 熔断', await text('#auto-search'), await text('#calc-status'));
+  await send('Network.emulateNetworkConditions', {
+    offline: false,
+    latency: 0,
+    downloadThroughput: -1,
+    uploadThroughput: -1
+  });
+  await click('#sync');
+  await wait("document.querySelector('#auto-search').textContent.includes('AUTO_FEASIBLE')", 30000);
+  await set('deadline', '2020-01-01T00:00');
+  assert.match(await text('#auto-search'), /AUTO_DEADLINE_EXIT_REQUIRED/);
+  assert.match(await text('#rule-events'), /退出/);
   await send('Emulation.setDeviceMetricsOverride', {
     width: 390,
     height: 844,
@@ -252,7 +320,9 @@ try {
   assert.ok(await run('document.documentElement.scrollWidth<=innerWidth+1'), 'mobile overflow');
   // Independent local service keeps the user's active VS pairing untouched.
   await send('Page.navigate', { url: b.url + '/' });
-  await wait("document.querySelector('#bridge-pair')");
+  await wait(
+    "document.querySelector('#bridge-pair')?.onclick && document.querySelector('#order-detail').textContent"
+  );
   await click('#bridge-pair');
   await wait("document.querySelector('#bridge-script').value.length > 0");
   const script = await val('bridge-script');

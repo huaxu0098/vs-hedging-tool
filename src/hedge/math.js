@@ -1,4 +1,4 @@
-import Decimal from 'decimal.js';
+import Decimal from '../../node_modules/decimal.js/decimal.mjs';
 
 export const D = Decimal.clone({
   precision: 48,

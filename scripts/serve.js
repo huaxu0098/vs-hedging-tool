@@ -52,6 +52,7 @@ const server = createServer(async (request, response) => {
       '/': internal ? 'fixtures/internal-hedge.html' : 'hedge.html',
       '/dev/replay': 'fixtures/hedge-replay.html',
       '/hedge.css': 'hedge.css',
+      '/node_modules/decimal.js/decimal.mjs': 'node_modules/decimal.js/decimal.mjs',
       '/vendor/decimal.mjs': 'node_modules/decimal.js/decimal.mjs'
     };
     const file = Object.hasOwn(files, path)

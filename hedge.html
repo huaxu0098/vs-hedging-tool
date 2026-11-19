@@ -33,9 +33,15 @@
           >
           <label
             >计算方式<select id="mode">
+              <option value="auto">自动联合求解</option>
               <option value="keepPF">固定 VS 现仓，计算 Hype</option>
               <option value="keepHL">固定 Hype 现仓，计算 VS</option>
-              <option value="joint">联合搜索两边仓位</option>
+            </select></label
+          >
+          <label id="objective-label"
+            >优化目标<select id="objective">
+              <option value="size">最大可行 PF 仓位</option>
+              <option value="cash">保守现金优先</option>
             </select></label
           >
         </div>
@@ -57,6 +63,28 @@
           <h2 id="pass-heading">VS 通过后个人资金</h2>
           <strong id="pass-summary">—</strong><span id="pass-change"></span>
         </article>
+        <article>
+          <h2>已确认个人保护资金</h2>
+          <strong id="protect-funds">—</strong><span>Hype 权益＋其他账户已到账资金</span>
+        </article>
+        <article>
+          <h2>Hype 可用抵押品</h2>
+          <strong id="margin-funds">—</strong><span>账户可开仓保证金</span>
+        </article>
+        <article>
+          <h2>成功端到账前 Hype 现金</h2>
+          <strong id="success-hl">—</strong><span id="summary-margin"></span>
+        </article>
+        <article>
+          <h2>两日条件可达性</h2>
+          <strong id="reach-label">未验证</strong><span id="summary-buffer"></span>
+        </article>
+        <div class="desk-ratios">
+          <div>当前实际对冲比例<strong id="current-h">—</strong></div>
+          <div>理论区间 · 现金约束<strong id="range">—</strong></div>
+          <div>目标对冲比例<strong id="target-h">—</strong></div>
+        </div>
+        <p id="verified-range"></p>
         <p id="summary-status" role="status"></p>
       </section>
       <section class="card" id="snapshot">
@@ -113,24 +141,35 @@
             ><label>成功时 Hype 至少留存 R（U）<input id="R" inputmode="decimal" /></label>
           </div>
         </div>
-        <div id="joint-fields" hidden>
-          <label
-            >联合搜索 PF 名义额（U，逗号分隔）<input id="sizes" placeholder="留空按当前可用仓位自动搜索"
-          /></label>
-        </div>
       </section>
       <section class="card" aria-labelledby="result-heading">
         <h2 id="result-heading">持仓比例与本次调整</h2>
         <p id="calc-status" role="status">等待当前快照</p>
-        <div class="metrics">
-          <div>当前实际 h<strong id="current-h">—</strong></div>
-          <div>理论区间 · 现金约束<strong id="range">—</strong></div>
-          <div>目标对冲比例<strong id="target-h">—</strong></div>
-        </div>
-        <p id="verified-range"></p>
         <details id="ratio-points" hidden>
           <summary>查看已验证的比例点</summary>
           <p id="points"></p>
+        </details>
+        <p id="auto-search"></p>
+        <p id="two-day"></p>
+        <details id="alternatives">
+          <summary>候选仓位与淘汰原因</summary>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>PF 目标数量 / 名义额</th>
+                  <th>Hype 目标数量 / 名义额</th>
+                  <th>比例</th>
+                  <th>最差压力现金</th>
+                  <th>强平距离</th>
+                  <th>保证金占用</th>
+                </tr>
+              </thead>
+              <tbody id="top-auto"></tbody>
+            </table>
+          </div>
+          <p id="rejected-auto"></p>
+          <p id="flat-option"></p>
         </details>
         <p id="basis"></p>
         <p id="bounds-detail"></p>
@@ -162,6 +201,7 @@
         <h2>强平距离与成交成本</h2>
         <p id="risk-status"></p>
         <p id="cost-sources"></p>
+        <p id="stress-assumptions"></p>
         <dl id="risk-values"></dl>
         <div class="table-wrap">
           <table>
@@ -256,6 +296,15 @@
         <h2>账户规则与测算口径</h2>
         <p>以下为用户规则，可按当前账户修改。所有资金按 USDC 等值（U）核算。</p>
         <p id="profile-source"></p>
+        <label
+          >已到账外部资金币种<select id="externalCurrency">
+            <option>USDC</option>
+            <option>USD</option>
+            <option>USDT</option>
+            <option value="OTHER">其他（手工估值）</option>
+          </select></label
+        >
+        <p id="external-value"></p>
         <div class="form" id="rule-fields"></div>
         <p>
           现金范围按当前权益计算。条件仓位按双边盘口、差额成交费及数量步长核算，假设到达边界期间标的同步变动；未来基差、滑点变化和资金费待核实。

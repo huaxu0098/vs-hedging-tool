@@ -14,6 +14,10 @@ try {
   /* Keep the original until a user edit. */
 }
 const state = saved?.version === 1 ? saved : { version: 1, asset: 'BTC', rules: {}, assets: {}, shared: {} };
+if (state.autoVersion !== 12) {
+  state.rules = { ...state.rules, mode: 'auto' };
+  state.autoVersion = 12;
+}
 const r = (state.rules = { ...rules, ...state.rules });
 const save = () => localStorage.setItem(key, JSON.stringify(state));
 const fmt = (x, n = 2) => {
@@ -43,6 +47,14 @@ const put = (id, str) => {
 const asset = () => state.asset;
 const local = () => (state.assets[asset()] ??= { pf: {}, hl: {} });
 const ruleFields = {
+  pfUtil: 'VS 最大保证金占权益（%）',
+  hlUtil: 'Hype 最大保证金占权益（%）',
+  movePct: '假定两日内有利价格变动（%，选填）',
+  jumpBps: '不利跳价（基点）',
+  delayBps: 'Hype 调仓延迟期间不利变动（基点）',
+  fundingDebit: '持有期间资金费支出压力（U）',
+  adverseBps: 'Hype 不利基差及汇率偏移（基点，1 基点 = 0.01%）',
+  externalFx: '每单位外币的已确认 USDC 估值（选填）',
   registration: '本金中已支付的报名费（U）',
   outsideCosts: '本金之外另需收回的历史成本（U）',
   minBuffer: '成功线到 Hype 强平线的最低价格距离',
@@ -52,8 +64,8 @@ const ruleFields = {
   fundedTarget: '首次分成参考净值（U）',
   baseline: '分成基线（U）',
   share: '个人分成比例（0 至 1）',
-  external: '外部已到账（U）',
-  inTransit: '在途资金（U）',
+  external: '已到账且确认归属的外部资金（原币）',
+  inTransit: '在途金额（U，仅展示）',
   receivable: '分成待到账（U）',
   k: '额外终点摩擦预算（U，已计成交费勿重复填）',
   ref: '本轮起点 C_ref（未知留空）',
@@ -68,6 +80,7 @@ const ruleFields = {
   fx: '手工 USDC/USDT 汇率（选填）'
 };
 const legFields = {
+  maxQty: '平台另设总数量上限（如有）',
   anchor: '权益对应的标记价',
   free: '剩余可开仓保证金（U）',
   otherHold: '其他仓位与挂单保留额（U，未知留空）',
@@ -182,8 +195,9 @@ function approvedOrders(v) {
 }
 function inputs() {
   $('asset').value = asset();
-  for (const k of ['mode', 'stage', 'B', 'R', 'sizes', ...Object.keys(ruleFields)]) $(k).value = r[k] ?? '';
-  $('joint-fields').hidden = r.mode !== 'joint';
+  for (const k of ['mode', 'stage', 'B', 'R', 'objective', 'externalCurrency', ...Object.keys(ruleFields)])
+    $(k).value = r[k] ?? '';
+  $('objective-label').hidden = r.mode !== 'auto';
   for (const side of ['pf', 'hl']) {
     const a = account(side);
     for (const k of ['equity', 'qty', ...Object.keys(legFields), 'leverage', 'marginMode']) {
@@ -270,9 +284,11 @@ function renderRisk(result, accounts, market) {
       'Hype 目标仓强平标记价',
       c?.liqMark
         ? fmt(c.liqMark) + ' · ' + c.liqSource
-        : c && c.buffer != null && !dec(c.hlTargetQuantity).isZero()
-          ? '模型内无正价格强平点'
-          : '未验证'
+        : c && dec(c.hlTargetQuantity).isZero()
+          ? 'Hype 空仓，无强平价'
+          : c && c.buffer != null
+            ? '模型内无正价格强平点'
+            : '未验证'
     ],
     [
       '当前仓平台参考强平价',
@@ -305,28 +321,114 @@ function freshnessLabel(at, seconds) {
   if (!at) return '未确认';
   return fresh(at, Date.now(), Number(seconds) * 1000) ? '有效' : '过期';
 }
+let worker = null,
+  version = 0,
+  pendingKey = '',
+  response = null,
+  displayed = null;
+function cancelAuto() {
+  if (worker) {
+    worker.terminate();
+    worker = null;
+  }
+  pendingKey = '';
+  response = null;
+  displayed = null;
+  version++;
+}
+function currentFrame(a, m, t) {
+  const base = calculateCurrent(r, a, m, rates, t, { deferAuto: true });
+  if (!base.needsSearch) {
+    if (pendingKey) cancelAuto();
+    return base;
+  }
+  const context = JSON.stringify([r, a, m.asset, useAPI()]);
+  const signature = JSON.stringify([context, m, rates]);
+  if (signature !== pendingKey) {
+    if (worker && !response) {
+      worker.terminate();
+      worker = null;
+    }
+    pendingKey = signature;
+    response = null;
+    const revision = ++version;
+    if (!worker) worker = new Worker('/src/hedge/auto-worker.js', { type: 'module' });
+    worker.onmessage = ({ data }) => {
+      if (revision !== version || data.version !== version) return;
+      response = data.error
+        ? { ...base, autoStatus: 'AUTO_PARTIAL', issues: [data.error] }
+        : { ...data.result, stateVersion: data.version };
+      render();
+    };
+    worker.onerror = () => {
+      if (revision === version) {
+        worker.terminate();
+        worker = null;
+        response = { ...base, autoStatus: 'AUTO_PARTIAL', issues: ['后台计算失败，请刷新重试'] };
+        render();
+      }
+    };
+    worker.postMessage({ version, r, a, m, rates, t });
+  }
+  if (response) {
+    displayed = { context, stamps: [m.pf.asOf, m.hl.asOf, m.hl.markAt].filter(Boolean) };
+    return response;
+  }
+  if (
+    displayed?.context === context &&
+    displayed.stamps.every((at) => fresh(at, t, Number(r.quoteSecs) * 1000))
+  ) {
+    put('summary-status', '行情已更新，正在核算。当前展示上一帧及其计算时间。');
+    return null;
+  }
+  return { ...base, autoStatus: 'AUTO_PARTIAL', issues: ['正在检查双边合法仓位'] };
+}
+const autoLabels = {
+  AUTO_FEASIBLE: '有可行仓位',
+  AUTO_PARTIAL: '部分可算',
+  AUTO_DATA_BLOCKED: '数据待补或过期',
+  AUTO_INFEASIBLE: '完整搜索无解',
+  AUTO_DEADLINE_EXIT_REQUIRED: '考核已到期，待退出',
+  AUTO_HOLD: '保持现仓'
+};
 function render() {
   const m = market(),
     a = { pf: account('pf'), hl: account('hl') };
   let result;
   try {
-    result = calculateCurrent(r, a, m, rates, Date.now());
+    result = currentFrame(a, m, Date.now());
+    if (!result) return;
   } catch (e) {
-    result = { issues: [e.message], notices: [], cash: {}, qty: { pf: null, hl: null }, currentNotional: {} };
+    cancelAuto();
+    result = {
+      autoStatus: r.mode === 'auto' ? 'AUTO_DATA_BLOCKED' : null,
+      issues: [e.message],
+      notices: [],
+      cash: {},
+      qty: { pf: null, hl: null },
+      currentNotional: {}
+    };
   }
   const c = result.candidate,
     b = result.range,
     stale = result.issues.some((x) => /过期|请求失败|断开|未连接/.test(x));
-  const status = c
-    ? '按当前现金规则计算，' + (c.code === 'MARGIN_UNVERIFIED' ? '保证金条件待验证' : '已验算所设保证金条件')
-    : result.issues[0] || result.notices.at(-1) || '等待当前快照';
+  const status = result.autoStatus
+    ? autoLabels[result.autoStatus] +
+      ' · ' +
+      (result.issues[0] ?? result.notices.at(-1) ?? '按当前资金和保证金规则计算')
+    : c
+      ? '按当前现金规则计算，' +
+        (c.code === 'MARGIN_UNVERIFIED' ? '保证金条件待验证' : '已验算所设保证金条件')
+      : result.issues[0] || result.notices.at(-1) || '等待当前快照';
   put('calc-status', status);
   put(
     'summary-status',
-    c
-      ? (c.code === 'FEASIBLE' ? '当前规则已验算' : '条件测算 · 保证金待验证') +
+    result.autoStatus
+      ? status
+      : c
+        ? (c.code === 'FEASIBLE' ? '当前规则已验算' : '条件测算 · 保证金待验证') +
           ' · 两种现金结果均假设先触及对应 VS 边界'
-      : status + (result.heldCash ? ' · 现金按现仓保持不动计算' : '')
+        : status + (result.heldCash ? ' · 现金按现仓保持不动计算' : '')
   );
   for (const [key, qty, delta, amount] of [
     ['pf', c?.vsTargetQuantity, c?.vsDeltaQuantity, c?.vsNotional],
@@ -345,6 +447,161 @@ function render() {
     put(key + '-change', q == null ? '' : q.abs().toString() + ' ' + asset() + ' · ' + hint);
   }
   const projection = c ?? result.heldCash;
+  put('protect-funds', money(result.protect));
+  put(
+    'margin-funds',
+    Array.isArray(result.marginHL)
+      ? '买 ' + money(result.marginHL[0]) + ' / 卖 ' + money(result.marginHL[1])
+      : money(result.marginHL)
+  );
+  put('success-hl', money(projection?.hlBeforePayout));
+  put(
+    'summary-margin',
+    c?.initialMargin?.length === 2
+      ? '初始保证金 VS ' + money(c.initialMargin[0]) + ' / Hype ' + money(c.initialMargin[1])
+      : ''
+  );
+  put(
+    'summary-buffer',
+    c?.priceBuffer != null
+      ? '强平距离 ' + fmt(c.priceBuffer) + ' 价格单位'
+      : c && dec(c.hlTargetQuantity).isZero()
+        ? 'Hype 空仓，无强平价'
+        : ''
+  );
+  const goalReached = result.stressedEquity != null && dec(result.stressedEquity).gte(r.challengeTarget);
+  put(
+    'reach-label',
+    r.stage === 'funded'
+      ? '出金阶段'
+      : result.stressedEquity == null
+        ? '未验证'
+        : goalReached
+          ? '条件下达到'
+          : '条件下未到'
+  );
+  const stressNote =
+    r.stage === 'funded'
+      ? '两日考核压力仅用于考核阶段。'
+      : !r.movePct
+        ? '未验证两日触线可达性。'
+        : !result.pressure
+          ? '等待可计算的当前快照。'
+          : '条件情景：假设两日有利变动 ' +
+            r.movePct +
+            '%。' +
+            [1, -1]
+              .map(
+                (d) =>
+                  (d === 1 ? '做多' : '做空') +
+                  '至少需 ' +
+                  money(result.pressure[d]?.amount) +
+                  '（' +
+                  result.pressure[d]?.source +
+                  '）'
+              )
+              .join('，') +
+            (result.maximum?.amount
+              ? '。' +
+                (result.maximum.complete ? '最大可行 PF ' : '本次已验最大 PF ') +
+                money(result.maximum.amount)
+              : '') +
+            (c
+              ? '。所选 PF ' + money(c.vsNotional) + '，条件净结算权益 ' + money(result.stressedEquity) + '。'
+              : '');
+  put('two-day', stressNote);
+  put(
+    'external-value',
+    '计入个人保护的外部资金 ' +
+      money(result.externalValue) +
+      ' · 每单位原币 ' +
+      (result.externalRate ?? '待核实') +
+      ' USDC（' +
+      (result.externalSource ?? '待核实') +
+      '） · 在途 ' +
+      money(r.inTransit) +
+      ' · 待到账分成 ' +
+      money(r.receivable ?? '0')
+  );
+  $('alternatives').hidden = r.mode !== 'auto';
+  const rowsAuto = (result.top ?? []).map((c) =>
+    cellRow([
+      signed(c.vsTargetQuantity) + ' / ' + money(c.vsNotional),
+      signed(c.hlTargetQuantity) + ' / ' + money(c.hlNotional),
+      pct(c.actualRatio),
+      money(c.worstCash),
+      fmt(c.priceBuffer),
+      money(c.initialMargin.reduce((sum, x) => sum.plus(x), dec('0')).toString())
+    ])
+  );
+  if ($('top-auto').textContent !== rowsAuto.map((x) => x.textContent).join(''))
+    $('top-auto').replaceChildren(...rowsAuto);
+  put(
+    'flat-option',
+    result.waiting?.personalCash != null
+      ? '双边目标均为零时，按当前盘口平掉现仓后的个人现金 ' +
+          money(result.waiting.personalCash) +
+          '，其中 Hype ' +
+          money(result.waiting.hlCash) +
+          '；VS / Hype 差额成交费 ' +
+          result.waiting.deltaFees.map(money).join(' / ') +
+          '。空仓等待期间没有 VS 触线目标。'
+      : ''
+  );
+  const rejected = result.eliminated;
+  put(
+    'rejected-auto',
+    rejected
+      ? '淘汰：PF ' +
+          signed(rejected.pf) +
+          '，Hype ' +
+          signed(rejected.hl) +
+          ' · ' +
+          rejected.why +
+          (rejected.check
+            ? '，实算 ' +
+              fmt(rejected.check.actual) +
+              ' / 要求 ' +
+              fmt(rejected.check.required) +
+              '，差 ' +
+              fmt(rejected.check.shortfall) +
+              ' ' +
+              rejected.check.unit +
+              '（' +
+              rejected.check.source +
+              '）'
+            : '')
+      : result.issues.join(' · ')
+  );
+  put(
+    'stress-assumptions',
+    '压力设置：基差及汇率 ' +
+      r.adverseBps +
+      ' 基点，跳价 ' +
+      r.jumpBps +
+      ' 基点，延迟 ' +
+      r.delayBps +
+      ' 基点，资金费 ' +
+      money(r.fundingDebit) +
+      '。按较大不利价格偏移并计入延迟与资金费核算。'
+  );
+  put(
+    'auto-search',
+    result.search
+      ? (result.search.complete ? '已完成合法网格最优性检查' : '搜索未穷尽，仅展示已验证候选') +
+          ' · 精算 ' +
+          result.search.evaluations +
+          ' 组 · ' +
+          result.autoStatus +
+          ' · 版本 ' +
+          result.stateVersion
+      : (result.autoStatus ?? '')
+  );
+  if (result.flatHold)
+    for (const k of ['pf', 'hl']) {
+      put(k + '-summary', '空仓 0.00 U');
+      put(k + '-change', '保持等待');
+    }
   put('fail-summary', money(projection?.failureCash));
   put('pass-summary', money(projection?.pressureCashAfter));
   put('pass-heading', r.stage === 'funded' ? '首笔分成到账后个人资金' : 'VS 通过后个人资金');
@@ -366,7 +623,17 @@ function render() {
   put('range', b?.min == null ? '—' : dec(b.max).lt(b.min) ? '无交集' : pct(b.min) + ' – ' + pct(b.max));
   const budgetOnly =
     !c && !result.heldCash && b?.selected && !result.notices.some((n) => /已到期|待到账|待平台/.test(n));
-  put('target-h', c ? pct(c.actualRatio) + (c.code === 'FEASIBLE' ? ' · 推荐' : ' · 待验证') : '—');
+  put(
+    'target-h',
+    c
+      ? pct(c.actualRatio) +
+          (c.code === 'FEASIBLE' && result.autoStatus !== 'AUTO_PARTIAL'
+            ? result.search && !result.search.complete
+              ? ' · 已验候选'
+              : ' · 推荐'
+            : ' · 待验证')
+      : '—'
+  );
   const verified = result.verified;
   put(
     'verified-range',
@@ -384,9 +651,12 @@ function render() {
   put('points', (result.points ?? []).map((x) => dec(x).times(100).toFixed(5) + '%').join('、'));
   put(
     'basis',
-    c
-      ? '按标的每变动一单位的双边盈亏换算比例。在覆盖失败端保护金、成功端留存和已知保证金约束的候选中，优先成功端剩余现金最高，再选 Hype 名义额较小者。'
-      : ''
+    r.mode === 'auto'
+      ? (r.objective === 'cash'
+          ? '优先最差压力情景个人剩余现金，再比较 PF 仓位。'
+          : '优先最大可行 PF 名义额，再比较最差压力情景个人剩余现金。') +
+          '并列时优先较大强平缓冲、较低保证金占用。'
+      : '固定所选一侧的已成交仓位，在可行候选中优先成功端剩余现金。'
   );
   put(
     'profile-source',
@@ -519,7 +789,7 @@ function render() {
     !stale && budgetOnly && !result.issues.some((x) => /无解|没有满足|没有可行/.test(x)) ? b.atMinimum : null;
   const lines = [
     ['失败端个人现金', money(projection?.failureCash ?? budget?.fail)],
-    ['成功端分成到账前', money(projection?.cashBeforePayout ?? budget?.before)],
+    ['成功端分成到账前个人资金（含外部已到账）', money(projection?.cashBeforePayout ?? budget?.before)],
     ['若分成到账后', money(projection?.pressureCashAfter ?? budget?.after)],
     ['失败端相对保护本金及额外成本', money(result.failVsPrincipal)],
     ['成功端相对保护本金及额外成本', money(result.passVsPrincipal)],
@@ -713,12 +983,12 @@ function invalidatePreview() {
 function manualImport(side, v, stamp) {
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw Error('每个平台须提供当前快照对象');
   const f = {};
-  for (const k of ['equity', 'qty', 'anchor', 'leverage', 'otherHold', 'free']) {
+  for (const k of ['equity', 'qty', 'anchor', 'leverage', 'otherHold', 'free', 'maxQty']) {
     if (v[k] != null && v[k] !== '')
       f[k] = out(
         (['anchor', 'leverage'].includes(k)
           ? positive
-          : ['otherHold', 'free'].includes(k)
+          : ['otherHold', 'free', 'maxQty'].includes(k)
             ? nonnegative
             : dec)(String(v[k]))
       );
@@ -901,12 +1171,18 @@ async function pollBridge() {
 setInterval(pollBridge, 1500);
 $('paste').oninput = invalidatePreview;
 $('paste-kind').onchange = invalidatePreview;
-for (const k of ['mode', 'stage', 'B', 'R', 'sizes', ...Object.keys(ruleFields)]) {
+for (const k of ['mode', 'stage', 'B', 'R', 'objective', 'externalCurrency', ...Object.keys(ruleFields)]) {
   $(k).addEventListener('input', () => {
     r[k] = $(k).value.trim();
     r.editedAt = now();
+    if (k === 'externalFx') r.externalFxAt = now();
+    if (k === 'externalCurrency') {
+      r.externalFx = '';
+      r.externalFxAt = null;
+      $('externalFx').value = '';
+    }
     if (k === 'fx') r.fxAt = now();
-    $('joint-fields').hidden = r.mode !== 'joint';
+    $('objective-label').hidden = r.mode !== 'auto';
     save();
     render();
   });

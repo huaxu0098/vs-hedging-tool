@@ -8,6 +8,7 @@ import {
   normalizeExposure,
   estimateFill
 } from './math.js';
+import { solveAuto } from './auto.js';
 import {
   solve,
   executionDetail,
@@ -42,7 +43,15 @@ export const rules = {
   hlFee: '0.0005',
   pfFee: '0.0001',
   k: '0',
-  mode: 'keepPF',
+  mode: 'auto',
+  objective: 'size',
+  pfUtil: '100',
+  hlUtil: '100',
+  externalCurrency: 'USDC',
+  adverseBps: '0',
+  jumpBps: '0',
+  delayBps: '0',
+  fundingDebit: '0',
   quoteSecs: '5',
   accountSecs: '300'
 };
@@ -89,6 +98,7 @@ function buildMarket(data, r, a, fx) {
     pf.symbol !== spec.symbol ||
     hl.symbol !== asset ||
     spec.quote !== 'USDC' ||
+    [spec, hl].some((l) => l.payoffType != null && l.payoffType !== 'linear') ||
     hl.collateralToken !== 0
   )
     return null;
@@ -104,18 +114,24 @@ function buildMarket(data, r, a, fx) {
     const im = r.stage === 'challenge' ? spec.capitalInitMarginRatio : spec.fundedInitMarginRatio;
     const rate = isPF ? r.pfFee : (ac.fee ?? r.hlFee);
     const lev = isPF && im ? out(dec('1').div(positive(im))) : optional(ac.leverage);
+    if (nonnegative(String(rate)).gte(1)) throw Error('单边费率须小于 100%');
+    const utilization = nonnegative(String((isPF ? r.pfUtil : r.hlUtil) ?? '100')).div(100);
+    if (utilization.gt(1)) throw Error('最大保证金占用率必须在 0 至 100% 之间');
+    const limits = [(isPF ? spec : hl).maxQty, ac.maxQty]
+      .filter(specified)
+      .map((x) => nonnegative(String(x)));
     market[key] = {
       symbol: q.symbol,
       underlying: asset,
       unit: asset,
       type: 'linear',
       mappingVerified: true,
-      multiplier: '1',
-      fx: '1',
+      multiplier: out(positive(String((isPF ? spec : hl).contractMultiplier ?? '1'))),
+      fx: out(positive(String((isPF ? spec : hl).settlementToUSDC ?? '1'))),
       factor: isPF ? '1' : fx,
       step,
-      minQty: step,
-      minNotional: isPF ? '0' : '10',
+      minQty: out(positive(String((isPF ? spec : hl).minQty ?? step))),
+      minNotional: out(nonnegative(String((isPF ? spec : hl).minNotional ?? (isPF ? '0' : '10')))),
       mark: out(positive(String(q.mark))),
       open: isPF ? pf.open : true,
       bids: q.levels[0],
@@ -131,6 +147,9 @@ function buildMarket(data, r, a, fx) {
           : isPF
             ? null
             : hlTiers(hl.marginTiers),
+      utilization: out(utilization),
+      reserve: isPF ? '0' : r.R,
+      maxQty: limits.length ? out(limits.reduce((a, b) => (a.lt(b) ? a : b))) : null,
       capacity: ac.capacity,
       currentLiquidation: isPF ? null : ac.liquidation,
       directionalFree: ac.directionalFree,
@@ -140,10 +159,16 @@ function buildMarket(data, r, a, fx) {
   return market;
 }
 
-function equityAt(s, q, px) {
+function equityAt(s, q, px, unit) {
   const eq = optional(s.equity);
   if (eq === null || q === null || !specified(s.anchor) || !px) return eq;
-  return out(dec(eq).plus(dec(q).times(dec(String(px)).minus(positive(String(s.anchor))))));
+  return out(
+    dec(eq).plus(
+      dec(q)
+        .times(unit)
+        .times(dec(String(px)).minus(positive(String(s.anchor))))
+    )
+  );
 }
 function reason(code) {
   return (
@@ -164,6 +189,21 @@ function reason(code) {
       hl_INITIAL_MARGIN: 'Hype 初始保证金',
       pf_INITIAL_MARGIN: 'PF 初始保证金',
       hl_AVAILABLE: 'Hype 可增开额度',
+      pf_PENDING: 'VS 未成交挂单的方向及数量',
+      hl_PENDING: 'Hype 未成交挂单的方向及数量',
+      AUTO_HOLD: '双边空仓，保持等待',
+      AUTO_INFEASIBLE: '完整合法仓位范围内无解',
+      AUTO_PARTIAL: '搜索范围内尚无可验证结论',
+      pf_UTILIZATION: 'VS 保证金占用上限',
+      hl_UTILIZATION: 'Hype 保证金占用上限',
+      pf_POSITION_LIMIT: 'VS 合约数量上限',
+      hl_POSITION_LIMIT: 'Hype 合约数量上限',
+      pf_FREE_RESERVE: 'VS 可用抵押品',
+      hl_FREE_RESERVE: 'Hype 调仓后可用抵押品留存',
+      STRESS_FAILURE: '基差压力下失败端保护金',
+      STRESS_RESERVE: '基差压力下成功端留存',
+      STRESS_GAIN: '压力情景整轮增益',
+      STRESS_MAINTENANCE: '压力路径维持保证金',
       pf_AVAILABLE: 'PF 可增开额度',
       hl_MAINTENANCE_PATH: 'Hype 维持保证金',
       hl_TIER_LEVERAGE: 'Hype 仓位档位杠杆上限',
@@ -198,6 +238,7 @@ function heldOutcomes(book, market, p, pf, hl) {
     if (key === 'fail') cash.failureCash = out(settled);
     else {
       cash.cashBeforePayout = out(settled.plus(p.inTransit));
+      cash.hlBeforePayout = out(settled.minus(book.external));
       const payout = p.stage === 'funded' ? profitSplit(p.target, p.baseline, p.share).user : '0';
       cash.pressureCashAfter = out(dec(cash.cashBeforePayout).plus(payout));
     }
@@ -205,9 +246,16 @@ function heldOutcomes(book, market, p, pf, hl) {
   return { cash, notes };
 }
 
-export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now()) {
+export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(), options = {}) {
   const issues = [],
-    result = { issues, cash: {}, qty: {}, currentNotional: {}, notices: [] };
+    result = {
+      issues,
+      cash: {},
+      qty: {},
+      currentNotional: {},
+      notices: [],
+      autoStatus: r.mode === 'auto' ? 'AUTO_DATA_BLOCKED' : null
+    };
   const stage = r.stage,
     funded = stage === 'funded',
     target = funded ? r.fundedTarget : r.challengeTarget;
@@ -218,17 +266,56 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now())
   if (expired) result.notices.push('考核已到期，待核对实际退出');
   for (const k of ['pf', 'hl']) {
     const q = (result.qty[k] = optional(a[k].qty));
-    result.cash[k] = equityAt(a[k], q, data[k]?.mark);
-    if (q != null && data[k]?.mark) result.currentNotional[k] = out(dec(q).abs().times(String(data[k].mark)));
+    const spec = k === 'pf' ? data.spec : data.hl;
+    const unit = positive(String(spec?.contractMultiplier ?? '1')).times(
+      positive(String(spec?.settlementToUSDC ?? '1'))
+    );
+    result.cash[k] = equityAt(a[k], q, data[k]?.mark, unit);
+    if (q != null && data[k]?.mark)
+      result.currentNotional[k] = out(dec(q).abs().times(unit).times(String(data[k].mark)));
   }
   const protection = out(nonnegative(r.B).plus(nonnegative(r.outsideCosts ?? '0')));
   if (nonnegative(r.registration ?? '0').gt(r.B)) result.notices.push('保护目标低于已支付的报名费');
+  // Only funds marked received and owned can enter personal recovery, at a verified USDC valuation.
+  const currency = r.externalCurrency ?? 'USDC',
+    externalAmount = nonnegative(r.external || '0');
+  let conversion = currency === 'USDC' ? '1' : null;
+  if (
+    currency !== 'USDC' &&
+    specified(r.externalFx) &&
+    fresh(r.externalFxAt, now, Number(r.accountSecs) * 1000)
+  )
+    conversion = out(positive(r.externalFx));
+  if (
+    !conversion &&
+    ['USD', 'USDT'].includes(currency) &&
+    fresh(fxData.USDC?.asOf, now, 60000) &&
+    (currency === 'USD' || fresh(fxData.USDT?.asOf, now, 60000))
+  )
+    conversion = out(
+      positive(String(currency === 'USD' ? '1' : fxData.USDT.rate)).div(positive(String(fxData.USDC.rate)))
+    );
+  const external = conversion ? out(externalAmount.times(conversion)) : '0';
+  result.externalValue = external;
+  result.externalRate = conversion;
+  result.externalSource = !conversion
+    ? '缺少有效估值'
+    : currency === 'USDC'
+      ? 'USDC 本币'
+      : specified(r.externalFx) && fresh(r.externalFxAt, now, Number(r.accountSecs) * 1000)
+        ? '手工估值 ' + r.externalFxAt
+        : '公开现货汇率 ' +
+          [fxData.USDC?.asOf, currency === 'USDT' ? fxData.USDT?.asOf : null].filter(Boolean).join(' / ');
+  result.marginHL = a.hl.directionalFree ?? optional(a.hl.free);
+  result.protect = result.cash.hl == null ? null : out(dec(result.cash.hl).plus(external));
+  if (!conversion && !externalAmount.isZero())
+    result.notices.push('外部资金 ' + externalAmount + ' ' + currency + ' 估值未确认，暂未计入保护资金');
   const p = {
     stage,
     E: result.cash.pf,
     C_hl: result.cash.hl,
-    C_external: r.external,
-    inTransit: r.inTransit,
+    C_external: external,
+    inTransit: '0',
     C_ref: optional(r.ref),
     B: protection,
     floor,
@@ -285,6 +372,8 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now())
     )
       issues.push((k === 'pf' ? 'VS' : 'Hype') + ' 行情缺失或过期');
     if (a[k].error) issues.push(a[k].error);
+    if (r.mode === 'auto' && a[k].qty != null && a[k].equity != null && !a[k].at)
+      issues.push((k === 'pf' ? 'VS' : 'Hype') + ' 账户快照缺少确认时间');
     if (a[k].at && !fresh(a[k].at, now, positive(r.accountSecs).toNumber() * 1000))
       issues.push((k === 'pf' ? 'VS' : 'Hype') + ' 账户快照过期');
     if (result.qty[k] != null && !dec(result.qty[k]).isZero() && !a[k].anchor)
@@ -308,8 +397,10 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now())
     }
     const net = f
       ? dec(p.E)
-          .plus(dec(pf).times(dec(f.price).minus(market.pf.mark)))
-          .minus(dec(f.notional).times(market.pf.rate))
+          .plus(
+            dec(pf).times(market.pf.multiplier).times(market.pf.fx).times(dec(f.price).minus(market.pf.mark))
+          )
+          .minus(dec(f.notional).times(market.pf.fx).times(market.pf.rate))
       : dec(p.E);
     result.settlePF = out(net);
     if (funded) result.claim = profitSplit(out(net), r.baseline, r.share).user;
@@ -329,6 +420,24 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now())
     dec(result.range.min).gt(0)
   )
     result.notices.push('Hype 已确认空仓，固定该仓位不能覆盖失败端资金缺口');
+  if (r.mode === 'auto' && expired) result.autoStatus = 'AUTO_DEADLINE_EXIT_REQUIRED';
+  else if (
+    r.mode === 'auto' &&
+    !issues.some((x) => /过期|缺失|未录入|请录入|断开|休市|确认时间|连接失败/.test(x)) &&
+    !terminal &&
+    !pending
+  )
+    result.autoStatus = 'AUTO_PARTIAL';
+  if (expired && !issues.length && market) {
+    const q = result.qty.hl,
+      l = market.hl,
+      f = estimateFill(out(dec(q).neg()), l);
+    const net = dec(result.cash.hl)
+      .plus(f ? dec(q).times(l.multiplier).times(l.fx).times(dec(f.price).minus(l.mark)) : 0)
+      .minus(f ? dec(f.notional).times(l.fx).times(l.rate) : 0);
+    result.deadlineExit = out(net.plus(external));
+    result.notices.push('按本次可见盘口退出，个人现金约 ' + net.plus(external).toFixed(2) + ' U，待实际结算');
+  }
   if (issues.length || terminal || expired || pending) return result;
   const pos = {};
   const book = {
@@ -344,9 +453,9 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now())
     challengeDeadlineAt: r.deadline || null,
     passTrigger: 'net_settlement',
     failureTrigger: 'net_settlement',
-    external: r.external,
+    external: external,
     ref: p.C_ref,
-    transfers: { current: { status: 'in_transit', amount: r.inTransit } },
+    transfers: { current: { status: 'in_transit', amount: '0' } },
     payouts: {},
     roundIn: r.roundIn,
     roundOut: r.roundOut,
@@ -364,8 +473,8 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now())
         qty,
         entry: leg.mark,
         mark: leg.mark,
-        multiplier: '1',
-        fx: '1'
+        multiplier: leg.multiplier,
+        fx: leg.fx
       };
     if (a[k].otherPositions) leg.hold = null;
   }
@@ -377,16 +486,104 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now())
           .map((x) => x.trim())
           .filter(Boolean)
           .map((x) => out(positive(x)));
-  const solved = solve(
-    book,
-    market,
-    { mode: r.mode, sizes, target, sort: 'gain', directions: [1, -1], R: r.R, g: r.g, k: r.k },
-    {
-      currentSnapshot: true,
-      minPriceBuffer: out(nonnegative(r.minBuffer ?? '0')),
-      now: new Date(now).toISOString()
+  const params = {
+    mode: r.mode,
+    sizes,
+    target,
+    sort: 'gain',
+    directions: [1, -1],
+    R: r.R,
+    g: r.g,
+    k: r.k,
+    objective: r.objective,
+    movePct: specified(r.movePct) ? out(positive(r.movePct)) : null
+  };
+  const checks = {
+    currentSnapshot: true,
+    liveLimits: true,
+    adverseBps: out(nonnegative(r.adverseBps ?? '0')),
+    minPriceBuffer: out(nonnegative(r.minBuffer ?? '0')),
+    now: new Date(now).toISOString()
+  };
+  if ([r.jumpBps, r.delayBps, r.fundingDebit].some((x) => nonnegative(x ?? '0').gt(0)))
+    checks.stress = {
+      jumpBps: r.jumpBps ?? '0',
+      basisBps: r.adverseBps ?? '0',
+      delayBps: r.delayBps ?? '0',
+      fundingDebit: r.fundingDebit ?? '0'
+    };
+  if (r.mode === 'auto') {
+    const missing = [];
+    for (const [key, label] of [
+      ['pf', 'VS'],
+      ['hl', 'Hype']
+    ]) {
+      const l = market[key];
+      if (!Array.isArray(a[key].orders)) missing.push(label + ' 未成交挂单');
+      else if (
+        a[key].orders.some((o) => o.conditional || o.reduceOnly) ||
+        new Set(a[key].orders.map((o) => dec(o.qty).isNegative())).size > 1
+      )
+        missing.push(label + ' 条件、只减仓或双向挂单成交顺序');
+      else l.pendingQty = out(a[key].orders.reduce((sum, o) => sum.plus(o.qty), dec('0')));
+      if (l.marginMode !== 'cross') missing.push(label + ' 已支持的全仓模式');
+      if (!l.leverage || !l.tiers?.length) missing.push(label + ' 杠杆或维持保证金档位');
+      if (l.hold == null) missing.push(label + ' 其他仓位及挂单占用');
+      if (l.free == null && !l.directionalFree) missing.push(label + ' 实际可用抵押品');
     }
-  );
+
+    if (missing.length) {
+      result.autoStatus = 'AUTO_PARTIAL';
+      issues.push('资金比例可算，待确认 ' + missing.join('、'));
+      return result;
+    }
+    if (options.deferAuto) {
+      result.needsSearch = true;
+      return result;
+    }
+  }
+  const solved =
+    r.mode === 'auto' ? solveAuto(book, market, params, checks) : solve(book, market, params, checks);
+  if (r.mode === 'auto') {
+    result.autoStatus = solved.code;
+    result.search = { complete: solved.searchComplete, evaluations: solved.evaluations, nodes: solved.nodes };
+    result.top = solved.candidates;
+    result.waiting = solved.hold;
+    result.pressure = solved.pressure;
+    if (params.movePct && !funded) {
+      const maxSize =
+        params.objective === 'cash'
+          ? solveAuto(book, market, { ...params, objective: 'size', movePct: null }, checks)
+          : solved;
+      result.maximum = { amount: maxSize.selected?.vsNotional ?? null, complete: maxSize.searchComplete };
+    }
+    if (solved.code === 'AUTO_HOLD' && !solved.selected) result.flatHold = true;
+    if (!funded && !r.deadline && solved.selected) {
+      result.autoStatus = 'AUTO_PARTIAL';
+      result.notices.push('仓位按考核仍有效计算，实际截止时间待确认');
+    }
+    if (solved.selected && params.movePct && !funded) {
+      const sign = dec(solved.selected.vsTargetQuantity).gt(0) ? 1 : -1;
+      const shift = dec(market.pf.mark).times(params.movePct).div(100).times(sign).div(market.pf.factor);
+      try {
+        result.stressedEquity = out(
+          projectSettlementEquity(book, market, 'pf', solved.selected.vsTargetQuantity, out(shift))
+        );
+      } catch {
+        result.notices.push('两日压力价格超出有效范围');
+      }
+    }
+    const bad =
+      solved.rejected.find((c) => c.constraints?.some((x) => x.status === 'fail')) ?? solved.rejected[0];
+    const check = bad?.constraints?.find((x) => x.status === 'fail');
+    if (bad)
+      result.eliminated = {
+        pf: bad.vsTargetQuantity,
+        hl: bad.hlTargetQuantity,
+        why: reason(check?.code ?? bad.code),
+        check
+      };
+  }
   result.exactRange = solved.theory;
   const c = solved.selected;
   if (!c) {
@@ -423,14 +620,15 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now())
     return result;
   }
   result.candidate = c;
+  if (dec(c.hlTargetQuantity).eq(0)) result.notices.push('Hype 目标为空仓，PF 保留单边敞口');
   const verified = solved.candidates.filter((x) => x.code === 'FEASIBLE');
   if (verified.length) {
-    const ratios = verified.map((x) => dec(x.actualRatio)).sort((a, b) => a.cmp(b));
+    const ratios = (solved.ratios ?? verified.map((x) => x.actualRatio)).map(dec).sort((a, b) => a.cmp(b));
     result.verified = { min: out(ratios[0]), max: out(ratios.at(-1)), count: new Set(ratios.map(out)).size };
   }
   result.riskMissing = [];
   result.points = verified.length
-    ? [...new Set(verified.map((x) => x.actualRatio))]
+    ? [...new Set(solved.ratios ?? verified.map((x) => x.actualRatio))]
         .map(dec)
         .sort((a, b) => a.cmp(b))
         .map(out)
@@ -468,7 +666,7 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now())
     result.adjust.pf = { ...result.adjust.pf, remaining: null, text: 'Hype 已有挂单，成交后需重算' };
     result.notices.push('Hype 有未成交订单，VS 目标按当前已成交 Hype 测算');
   }
-  result.forward = out(dec(c.pressureCashAfter).minus(p.C_hl).minus(r.external).minus(r.inTransit));
+  result.forward = out(dec(c.pressureCashAfter).minus(p.C_hl).minus(external));
   result.round =
     c.roundGain ??
     (p.C_ref === null

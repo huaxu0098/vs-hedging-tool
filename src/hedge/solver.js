@@ -322,6 +322,18 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
       delta = n.minus(qty(pos(s, m, venue)));
     if (!l.open) throw Error('MARKET_CLOSED');
     if (!n.abs().mod(positive(l.step)).eq(0) || !delta.abs().mod(l.step).eq(0)) throw Error('INVALID_STEP');
+    if (options.liveLimits && l.pendingQty && !dec(l.pendingQty).eq(0)) {
+      const pending = dec(l.pendingQty);
+      constraints.push(
+        constraint(
+          venue + '_PENDING',
+          out(delta.times(pending.gt(0) ? 1 : -1)),
+          out(pending.abs()),
+          l.unit,
+          '确认挂单'
+        )
+      );
+    }
     if (!delta.eq(0)) {
       if (l.leverage && n.abs().gt(qty(pos(s, m, venue)).abs())) {
         const nominal = n.abs().times(value(l)).times(l.mark);
@@ -392,7 +404,111 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
     ['hl', hlQty]
   ])
     constraints.push(...validateMargin(s, m, venue, q, ['0', lines.pass, lines.fail], options.catalog));
-  const stress = options.stress ? pathStress(s, m, hlQty, lines, options.stress, options.catalog) : [];
+  if (options.liveLimits) {
+    for (const [venue, size] of [
+      ['pf', v],
+      ['hl', h]
+    ]) {
+      const l = m[venue],
+        old = qty(pos(s, m, venue)),
+        delta = size.minus(old);
+      if (l.maxQty != null)
+        constraints.push(constraint(venue + '_POSITION_LIMIT', l.maxQty, out(size.abs()), l.unit));
+      const margin = constraints.find((c) => c.code === venue + '_INITIAL_MARGIN');
+      if (margin && l.utilization != null)
+        constraints.push(
+          constraint(
+            venue + '_UTILIZATION',
+            out(dec(margin.actual).times(l.utilization)),
+            margin.required,
+            'U'
+          )
+        );
+      if (l.leverage && l.reserve != null) {
+        const free = l.directionalFree?.[delta.lt(0) ? 1 : 0] ?? l.free;
+        const change = size.abs().minus(old.abs()).times(value(l)).times(l.mark).div(l.leverage);
+        constraints.push(
+          constraint(
+            venue + '_FREE_RESERVE',
+            free == null
+              ? null
+              : out(
+                  dec(free)
+                    .minus(change)
+                    .minus(exec(l, out(delta)).fee)
+                ),
+            l.reserve,
+            'U'
+          )
+        );
+      }
+    }
+  }
+  const stressBps = max(nonnegative(options.adverseBps ?? '0'), nonnegative(options.stress?.jumpBps ?? '0'));
+  const shock = stressBps
+    .times(m.hl.mark)
+    .div(10000)
+    .div(m.hl.factor)
+    .times(h.gt(0) ? -1 : 1);
+  const scenarioCash = [];
+  const delayDebit = h
+    .minus(qty(pos(s, m, 'hl')))
+    .abs()
+    .times(value(m.hl))
+    .times(m.hl.mark)
+    .times(nonnegative(options.stress?.delayBps ?? '0'))
+    .div(10000);
+  const extraDebit = delayDebit.plus(h.isZero() ? 0 : nonnegative(options.stress?.fundingDebit ?? '0'));
+  if ((!shock.isZero() && !h.isZero()) || !extraDebit.isZero()) {
+    const atBoundary = (shift) =>
+      projectSettlementEquity(
+        s,
+        m,
+        'hl',
+        hlQty,
+        out(dec(shift).plus(shock)),
+        'net_settlement',
+        options.catalog
+      )
+        .minus(extra)
+        .minus(extraDebit);
+    const downside = atBoundary(lines.fail).plus(s.external),
+      survive = atBoundary(lines.pass),
+      end = survive.plus(s.external).plus(payout);
+    constraints.push(
+      constraint('STRESS_FAILURE', out(downside), p.B, 'U'),
+      constraint('STRESS_RESERVE', out(survive), p.R, 'U')
+    );
+    if (p.stage === 'funded' && s.ref != null)
+      constraints.push(
+        constraint('STRESS_GAIN', out(end.minus(s.ref).minus(s.roundIn).plus(s.roundOut)), p.g, 'U')
+      );
+    const stressPass = dec(lines.pass).plus(shock);
+    const extraBuffer = nonnegative(options.minPriceBuffer ?? '0')
+      .div(m.hl.factor)
+      .times(h.gt(0) ? -1 : 1);
+    const shifts = [
+      '0',
+      out(dec(lines.fail).plus(shock)),
+      out(stressPass),
+      out(stressPass.plus(extraBuffer))
+    ];
+    constraints.push({
+      ...validateMargin(s, m, 'hl', hlQty, shifts, options.catalog, out(extraDebit)).at(-1),
+      code: 'STRESS_MAINTENANCE'
+    });
+    scenarioCash.push(out(downside), out(end));
+  }
+  const stress = options.stress
+    ? pathStress(
+        s,
+        m,
+        hlQty,
+        lines,
+        h.isZero() ? { ...options.stress, fundingDebit: '0' } : options.stress,
+        options.catalog
+      )
+    : [];
   constraints.push(...stress);
   const modelLiq = liquidationMark(s, m, hlQty, options.catalog);
   const pressureMark = sourcePrice(m.hl, lines.pass);
@@ -432,6 +548,9 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
       constraints.push(constraint('hl_PRICE_BUFFER', priceBuffer, options.minPriceBuffer, '价格单位'));
     }
   }
+  if (options.currentSnapshot)
+    for (const check of constraints)
+      if (check.source === 'simulation_assumption') check.source = '当前快照、行情及已设规则';
   const checks = constraints.map((c) => c.status),
     code = checks.includes('unknown')
       ? 'MARGIN_UNVERIFIED'
@@ -441,6 +560,8 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
   return {
     code,
     stress,
+    scenarioCash,
+    hlBeforePayout: out(passHL.minus(extra)),
     liqMark: liq,
     liqSource: useReference ? '当前仓平台参考' : '全仓档位测算',
     pressureMark: out(pressureMark),

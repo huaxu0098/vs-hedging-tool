@@ -22,7 +22,7 @@ const market = {
     maintMarginRatio: '0.01'
   }
 };
-const r = { ...rules, fx: '1', fxAt: at };
+const r = { ...rules, mode: 'keepPF', fx: '1', fxAt: at };
 const calc = (profile = r, a = accounts, m = market, time = t) => calculateCurrent(profile, a, m, {}, time);
 test('当前权益独立给出区间，仓位留空与显式零有不同语义', () => {
   const x = calc(r, { pf: { equity: '10000' }, hl: { equity: '409' } }, {});
