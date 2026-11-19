@@ -10,6 +10,7 @@ import {
   normalizeExposure,
   estimateFill
 } from './math.js';
+import { buildPlanReport } from './position-plans.js';
 import { analyzeRatios } from './ratio-analysis.js';
 import { validLeverageCap } from './leverage.js';
 import { auditCross } from './cross-check.js';
@@ -402,6 +403,7 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
   if (result.ratioScan) {
     attachRepresentative(result, r);
     result.ratioScan.analysis = analyzeRatios(result, r);
+    result.ratioScan.plans = { ...buildPlanReport(result.ratioScan, result.autoStatus === 'AUTO_PAYOUT_PENDING'), pfQuote: result.currencies.pf.quoteAsset, hlQuote: result.currencies.hl.quoteAsset };
   }
   result.missingFields = [];
   const add = (id, label) => {
@@ -444,11 +446,17 @@ function attachRepresentative(result, r) {
     const i = dec(candidate.vsTargetQuantity).abs().div(market.pf.step).toNumber();
     const j = dec(candidate.hlTargetQuantity).abs().div(market.hl.step).toNumber();
     const sign = dec(candidate.vsTargetQuantity).cmp(0);
-    if (ratioSlice(scan, sign, i, 'both').some(([lo, hi]) => lo <= j && j <= hi)) {
+    if (ratioSlice(scan, sign, i, 'eligible').some(([lo, hi]) => lo <= j && j <= hi)) {
       point = { i, j, sign };
       group = 'both';
       objective = result.preference?.objective ?? 'fixed';
     }
+  }
+  const eligible = scan.sets.eligible ?? scan.sets.both;
+  if (result.autoStatus !== 'AUTO_PAYOUT_PENDING' && eligible.largest && !Number(r.riskPreference) && point?.i !== eligible.largest.i) {
+    point = eligible.largest;
+    group = 'both';
+    objective = 'max_pf';
   }
   if (!point) {
     group = ['both', 'protect', 'survive', 'risk'].find((k) => scan.sets[k].count);
@@ -1033,7 +1041,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
     market.hl.tiers?.length &&
     market.pf.tiers?.length
   ) {
-    const ctx = scanContext(book, market, params, checks);
+    const ctx = scanContext(book, market, { ...params, recoveryBuffer: out(nonnegative(r.recoveryBuffer || '0')) }, checks);
     const scan = (result.ratioScan = buildRatioScan(ctx, { cache: options.marketCache }));
     const feasible = scan.sets.both;
     checks.seeds = [feasible.largest, feasible.min, feasible.max].filter(Boolean).map((point) => ({

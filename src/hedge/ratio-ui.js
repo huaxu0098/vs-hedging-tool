@@ -1,3 +1,4 @@
+import { planRecord, pagePoints } from './position-plans.js';
 import { dec } from './math.js';
 import { inspectRatio, ratioSlice } from './ratio-scan.js';
 import { reportGroups, subsetGroups } from './range-report.js';
@@ -142,7 +143,7 @@ function showRepresentative(scan, result) {
   const { book, params } = scan.ctx;
   write(
     'scan-representative',
-    objective === 'diagnostic' ? '自动计算代表方案 · 当前无可推荐仓位' : '自动计算代表方案 · ' + pct(row.h)
+    objective === 'diagnostic' ? '自动计算代表方案 · 当前无可推荐仓位' : (scan.plans?.rows[0]?.labels.includes('最大 PF 仓位') ? '最大 PF 方案 · ' : '自动计算代表方案 · ') + pct(row.h)
   );
   write(
     'scan-position',
@@ -199,7 +200,6 @@ function showRepresentative(scan, result) {
   );
   write('scan-pass-cash', row.passStop ?? settlementAmount(row.success));
   const diff = dec(row.successPersonal).minus(B);
-  const hypeVsCapital = dec(row.success).minus(B);
   write(
     'scan-pass-net',
     row.passStop
@@ -228,8 +228,8 @@ function showRepresentative(scan, result) {
     'scan-pass-summary',
     row.passStop
       ? '提前触线 · 清算结余未知'
-      : (hypeVsCapital.lt(0) ? '距保护本金差 ' : '比保护本金多 ') +
-          settlementAmount(hypeVsCapital.abs()) + ' · ' + (row.survives ? '满足 ' : '低于 ') + usd(params.R) + ' 留存'
+      : (diff.lt(0) ? '个人距本金差 ' : '个人较本金多 ') +
+          settlementAmount(diff.abs()) + ' · ' + (row.survives ? '满足 ' : '低于 ') + usd(params.R) + ' 留存'
   );
   const cutoff = row.deadline;
   write(
@@ -333,6 +333,7 @@ function patchRows(body, next) {
       body.append(incoming);
       continue;
     }
+    if (incoming.dataset.point && row.dataset.point !== incoming.dataset.point) row.dataset.point = incoming.dataset.point;
     if (incoming.hasAttribute('data-band')) {
       if (row.dataset.band !== incoming.dataset.band) row.dataset.band = incoming.dataset.band;
       if (row.dataset.subset !== incoming.dataset.subset) row.dataset.subset = incoming.dataset.subset;
@@ -560,12 +561,89 @@ function positionBand(body, scan, bin, segment, group) {
     risk.append(document.createElement('br'), bin.profit === bin.risk ? '双端净盈利' : '部分规模双端净盈利');
 }
 
+const pageSize = 5;
+let browsing = false, cursors = [null], more = null;
+
+function renderPlans(scan) {
+  const report = scan?.plans;
+  if (!report?.index || !scan.cells) { browsing = false; cursors = [null]; }
+  const viewButton = $('plan-view');
+  viewButton.disabled = !report?.index || !scan?.sets.legal.count;
+  viewButton.textContent = browsing ? '查看优先方案' : '浏览全部仓位';
+  const tbody = document.createElement('tbody'), riskBody = document.createElement('tbody');
+  const marks = new Map((report?.rows ?? []).map(r => [r.key, r]));
+  let rows = report?.rows ?? [];
+  more = null;
+  if (browsing) {
+    let page = pagePoints(scan, report.index, cursors.at(-1), pageSize);
+    if (!page.rows.length && cursors.length > 1) {
+      cursors = [null];
+      page = pagePoints(scan, report.index, null, pageSize);
+    }
+    rows = page.rows.map(p => marks.get([p.sign,p.i,p.j].join('/')) ?? planRecord(scan, p));
+    more = page.next;
+  }
+  $('plan-prev').hidden = $('plan-next').hidden = !browsing;
+  $('plan-prev').disabled = cursors.length < 2;
+  $('plan-next').disabled = !more;
+  write('plan-caption', !report ? '' : [
+    browsing ? '第 ' + cursors.length + ' 页 · 按方向、PF 数量及实际比例排列' :
+      report.legacy ? '保留上次仓位，新盘口就绪后更新三种方案' : report.pending ? 'Funded 分成待到账，仅供仓位对照' : !report.eligible ? '当前没有满足全部已配置条件的优先方案' :
+      scan.complete ? '三种优先目标均取自合格仓位' : '仅比较已扫描仓位，最大值待验证',
+    '名义额按 Mark 估值，均价按盘口深度估算，费用按失败 / 成功列示'
+  ].join('。'));
+  const signed = x => x == null ? '未知' : (dec(x).gt(0) ? '+' : '') + settlementAmount(x);
+  const units = side => scan.ctx.market[side].unit === 'contract' ? '张' : scan.ctx.market[side].unit;
+  const cell = (tr, first, ...lines) => {
+    const td = tr.insertCell();
+    td.append(document.createTextNode(first));
+    for (const line of lines) {
+      const detail = document.createElement('small');
+      detail.textContent = line;
+      td.append(detail);
+    }
+    return td;
+  };
+  const sideCell = (tr, qty, value, side, fill) => {
+    const size = dec(qty);
+    const price = fill?.price;
+    const quote = side === 'pf' ? scan.plans.pfQuote : scan.plans.hlQuote;
+    const entry = !fill ? '成交价未核实' : price == null ? '无需调仓' :
+      (dec(fill.delta).gt(0) ? '买入均价 ' : '卖出均价 ') + fmt(price, 4) + (quote ? ' ' + quote : '');
+    const legCell = cell(tr, (size.isZero() ? '空仓 ' : size.gt(0) ? '多 ' : '空 ') + size.abs() + ' ' + units(side), usd(value), entry);
+    if (price != null) legCell.title = '本次调整 ' + fill.delta + ' ' + units(side) + '，预计成交均价 ' + price + ' ' + quote;
+  };
+  for (const r of rows) {
+    const tr = tbody.insertRow();
+    tr.dataset.point = r.key;
+    tr.className = r.both ? 'qualified' : '';
+    const label = r.labels?.join(' · ') ?? '合法仓位';
+    cell(tr, pct(r.h), label).title = (r.fraction ? '精确敏感度比 ' + r.fraction + ' · ' : '') + '数量网格 ' + r.key;
+    sideCell(tr, r.pf, r.pfValue, 'pf', r.pfFill);
+    sideCell(tr, r.hl, r.hypeValue, 'hl', r.hlFill);
+    cell(tr, r.failStop || settlementAmount(r.fail), r.failStop ? '清算结余未知' : '本金 ' + signed(r.failDelta),
+      r.failStop ? '' : 'Hype ' + settlementAmount(r.failHype));
+    cell(tr, r.passStop || settlementAmount(r.success), r.passStop ? '清算结余未知' : '个人较本金 ' + signed(r.successDelta));
+    const risk = !r.physical ? (r.failStop || r.passStop || r.reason) : r.profitable ? '双路径净盈利' :
+      r.both ? '失败回本 · 成功达留存' : r.covers ? '成功留存不足' : r.survives ? '失败回收不足' : '两端均不足';
+    const cost = k => [r.failCost, r.passCost].map(v => v ? fmt(v[k], 4) : '未知').join(' / ');
+    cell(tr, risk, (r.j ? '保证金 ' + pct(r.marginRate, 1) + ' · 强平距 ' + (r.distanceRate == null ? '无已验证交点' : pct(r.distanceRate, 2)) : 'Hype 空仓'), '手续费 ' + cost('fees') + ' U', '深度滑点 ' + cost('slippage') + ' U');
+    const detail = riskBody.insertRow();
+    for (const str of [pct(r.h) + ' · PF ' + r.pf + ' ' + units('pf'), r.hl + ' ' + units('hl'),
+      usd(r.initial) + ' · ' + pct(r.marginRate, 2), usd(r.surplus), r.liquidation == null ? '无已验证交点' : fmt(r.liquidation, 4) + ' ' + report.hlQuote,
+      r.distance == null ? '无已验证交点' : fmt(r.distance, 4) + ' ' + report.hlQuote]) detail.insertCell().textContent = str;
+  }
+  patchRows($('plan-rows'), tbody);
+  patchRows($('plan-risk-rows'), riskBody);
+}
+
 function draw(result) {
   frame = result.ratioScan ?? null;
   frameKey = result.trace?.id ?? '';
   audit = null;
   const scan = frame,
     rep = scan?.representative;
+  renderPlans(scan);
   renderAnalysis(scan);
   $('bands-empty').hidden = !!scan?.sets.legal.count;
   const aggregate = document.createElement('tbody');
@@ -787,7 +865,8 @@ export function renderScan(result, m, r, plan, status) {
       .filter(Boolean)
       .join(' · ')
   );
-  if ((displayed && frameKey !== id) || (!displayed && (frame || frameKey !== 'empty'))) {
+  const liveGridRestored = displayed?.ratioScan?.cells && !frame?.cells;
+  if ((displayed && (frameKey !== id || liveGridRestored)) || (!displayed && (frame || frameKey !== 'empty'))) {
     draw(displayed ?? {});
     if (!displayed) frameKey = 'empty';
   }
@@ -798,6 +877,9 @@ export function renderScan(result, m, r, plan, status) {
   }
 }
 export function setupScan() {
+  $('plan-view').onclick = () => { browsing = !browsing; cursors = [null]; renderPlans(frame); };
+  $('plan-prev').onclick = () => { if (cursors.length > 1) cursors.pop(); renderPlans(frame); };
+  $('plan-next').onclick = () => { if (more) cursors.push(more); renderPlans(frame); };
   for (const id of ['desk-details', 'audit-details', 'scan-detail'])
     $(id).addEventListener('toggle', auditText);
   $('subset-detail').ontoggle = renderSubsets;

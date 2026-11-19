@@ -50,8 +50,13 @@
           </dl>
         </section>
         <section id="scan-results" aria-labelledby="bands-heading">
-          <div class="bands-heading"><h2 id="bands-heading">比例与仓位</h2><small>双保护规模优先 · 金额 U · 数量为绝对值</small></div>
-          <div class="table-wrap"><table class="bands-table"><thead id="bin-columns"></thead><tbody id="scan-buckets"></tbody></table></div>
+          <div class="bands-heading"><h2 id="bands-heading">比例与实际仓位</h2>
+            <nav aria-label="浏览实际仓位"><button type="button" id="plan-view" disabled>浏览全部仓位</button><button type="button" id="plan-prev" hidden>上一页</button><button type="button" id="plan-next" hidden>下一页</button></nav>
+          </div>
+          <p class="plan-caption" id="plan-caption"></p>
+          <div class="table-wrap" tabindex="0" role="region" aria-label="按比例和规模排列的实际仓位"><table class="bands-table exact-plans">
+            <thead><tr><th scope="col">方案 / 实际比例</th><th scope="col">PF 目标仓位</th><th scope="col">Hype 目标仓位</th><th scope="col">失败 · 个人回收</th><th scope="col">成功 · Hype 剩余</th><th scope="col">风险与成交成本</th></tr></thead>
+            <tbody id="plan-rows"></tbody></table></div>
           <p id="bands-empty">等待有效盘口和资金规则</p>
         </section>
       </div>
@@ -342,19 +347,6 @@
         </details>
         <p id="path-mapping"></p><p id="frame-times"></p>
       </section>
-      <section class="card" id="plan-comparison">
-        <h2>双方案对照</h2>
-        <label class="risk-choice">风险偏好 · 仓位优先 → 现金留存优先
-          <input id="riskPreference" type="range" min="0" max="100" step="1" value="0" />
-          <output id="preference-info"></output>
-          <span>0% 最大化 PF 仓位。100% 最大化已配置情景中最低的可用个人现金。中间值在两端现金下限间线性插值，在满足该下限后最大化 PF 仓位。</span>
-        </label>
-        <div class="dual-plans">
-          <div><h3 id="size-title">最大可行方案</h3><p>优先扩大符合约束的 PF 仓位。每个候选均须满足失败保护及已配置的风险约束。</p><p id="size-plan"></p></div>
-          <div><h3 id="cash-title">保守推荐方案</h3><p>优先保留两端及已配置压力情景中最少的个人现金，同额时优先较小 PF 仓位。</p><p id="cash-plan"></p></div>
-        </div>
-        <p id="plan-tradeoff"></p><p id="risk-tradeoff"></p>
-      </section>
       <section class="card" aria-labelledby="result-heading">
         <h2 id="result-heading">持仓比例与本次调整</h2>
         <p id="calc-status" role="status">等待当前快照</p>
@@ -463,6 +455,8 @@
       </section>
       </details>
       <details class="desk-group" id="audit-details"><summary>区间统计、现金流水与原始输入</summary>
+        <h3>当前表内仓位的保证金与清算风险</h3>
+        <div class="table-wrap"><table><thead><tr><th>实际比例 / PF 数量</th><th>Hype 数量</th><th>Hype 初始保证金</th><th>路径最低维持余量</th><th>Hype 清算标记价</th><th>成功线至清算距离</th></tr></thead><tbody id="plan-risk-rows"></tbody></table></div>
         <section id="ratio-analysis" hidden aria-label="分段对账与相邻仓位">
           <p id="ratio-counts"></p><p id="ratio-boundary"></p>
           <h2>代表方案与相邻仓位</h2>
@@ -480,6 +474,7 @@
       <p><strong id="scan-deadline"></strong> <span id="scan-deadline-note"></span></p><p id="scan-funded"></p>
       <p id="scan-runtime"></p>
       <details><summary>四类区间的完整统计与费用</summary>
+        <div class="table-wrap"><table><thead id="bin-columns"></thead><tbody id="scan-buckets"></tbody></table></div>
         <div class="table-wrap"><table><thead id="range-columns"></thead><tbody id="scan-rows"></tbody></table></div>
         <details id="subset-detail"><summary>逐段核对七类候选的数量、现金、手续费与风险</summary><p>各类数量可重叠。全部合法仓位包含提前强平的组合，该类现金列为假设能到达终点的估值。其余六类均通过路径保证金检查。</p><div class="table-wrap"><table><thead id="subset-columns"></thead><tbody id="scan-subsets"></tbody></table></div></details>
         <details id="scan-exclusions"><summary>各段未达到两端约束的数量</summary><div id="scan-risk-counts"></div></details>

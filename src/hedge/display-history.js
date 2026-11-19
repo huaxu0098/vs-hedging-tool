@@ -1,3 +1,4 @@
+import { recordFromInspection } from './position-plans.js';
 import { modelVersion } from './trace.js';
 
 // Read only by the renderer. The worker always starts from current inputs.
@@ -22,8 +23,15 @@ export function displayHistory(storage) {
           Array.isArray(saved.view.ratioScan.buckets) &&
           saved.view.ratioScan.ctx?.market?.pf &&
           saved.view.ratioScan.sets?.legal
-        )
+        ) {
+          const scan = saved.view.ratioScan;
+          if (!scan.plans && scan.representative?.row) {
+            const row = recordFromInspection(scan.ctx, scan.representative.row);
+            scan.plans = { legacy: true, rows: [{ ...row, labels: ['上次计算仓位'] }],
+              pfQuote: saved.view.prices?.pf?.quote, hlQuote: saved.view.prices?.hl?.quote };
+          }
           previous = saved.view;
+        }
       } catch {
         /* No readable local display snapshot. */
       }
@@ -64,6 +72,7 @@ export function displayHistory(storage) {
           buckets,
           representative,
           analysis,
+          plans: scan.plans && { rows: scan.plans.rows, eligible: scan.plans.eligible, pending: scan.plans.pending, pfQuote: scan.plans.pfQuote, hlQuote: scan.plans.hlQuote },
           complete,
           ctx: {
             book: { B: book.B },

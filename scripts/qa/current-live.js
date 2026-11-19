@@ -40,14 +40,15 @@ try {
   assert.equal(await val('funding-view'), 'plan');
   assert.equal(await run("document.querySelectorAll('#planLeverage,#hl-leverage').length"), 0);
   assert.equal(await run("document.getElementById('plan-cross-flat').checked"), true);
-  const hasPlan = "document.querySelector('#best-two').textContent.includes('第二优 PF')";
+  const freshFrame = "document.querySelector('#scan-desk').dataset.state === 'ready'";
+  const hasPlan = freshFrame + " && document.querySelector('#best-two').textContent.includes('第二优 PF')";
   await wait(hasPlan, 40000);
   assert.match(await text('#plan-basis'), /500.00 U.*91.00 U.*409.00 U/);
   assert.match(await text('#summary-status'), /预设规划/);
   assert.match(await text('#stress-assumptions'), /压力未配置/);
   assert.match(await text('#summary-status'), /AUTO_PARTIAL · 条件方案/);
-  assert.match(await text('#size-plan'), /最差个人现金/);
-  assert.match(await text('#cash-plan'), /最差个人现金/);
+  assert.match(await text('#plan-rows'), /失败回收优先/);
+  assert.match(await text('#plan-rows'), /成功留存优先/);
   assert.match(await text('#success-hl'), /考核利润不可分/);
   assert.match(await text('#trace-id'), /AUTO-0.21/);
   const leverageCheck = await run(`(() => {
@@ -62,7 +63,7 @@ try {
     'SECTION09_LIVE',
     JSON.stringify(
       await run(
-        "Object.fromEntries(['trace-id','trace-sources','size-plan','cash-plan','leverage-reason','fail-summary','fail-parts','pass-summary','success-hl','summary-status'].map(id=>[id,document.getElementById(id).textContent]))"
+        "Object.fromEntries(['trace-id','trace-sources','plan-rows','leverage-reason','fail-summary','fail-parts','pass-summary','success-hl','summary-status'].map(id=>[id,document.getElementById(id).textContent]))"
       )
     )
   );
@@ -118,7 +119,7 @@ try {
   );
   for (const field of ['jumpBps', 'delayBps', 'adverseBps', 'fundingDebit']) await set(field, '');
   await set('jumpBps', '0');
-  await wait(hasPlan);
+  await wait(hasPlan + " && document.querySelector('#stress-assumptions').textContent.includes('零压力假设')", 40000);
   assert.match(await text('#stress-assumptions'), /零压力假设.*跳价/);
   await set('stage', 'funded');
   await wait(
@@ -334,7 +335,7 @@ try {
     R_success: '100'
   }))
     await set(id, value);
-  const recommended = "/推荐|基础候选|已验候选/.test(document.querySelector('#target-h').textContent)";
+  const recommended = freshFrame + " && /推荐|基础候选|已验候选/.test(document.querySelector('#target-h').textContent)";
   await wait(recommended, 30000);
   await wait("document.querySelector('#hl-quote').textContent.includes('WebSocket')", 30000);
   assert.match(await text('#verified-range'), /个可行比例/);

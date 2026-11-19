@@ -46,7 +46,7 @@ try {
     )
   );
   console.log('RANGE12 极简首页与折叠详情通过');
-  await ready("document.getElementById('scan-representative').textContent.includes('自动计算代表方案')");
+  await ready("document.getElementById('scan-representative').textContent.includes('最大 PF 方案')");
   assert.ok(
     await run(`['scan-percent','scan-find','scan-reset','scan-slider','scan-smaller','scan-larger','scan-scale','scan-filter','scan-endpoint'].every(x=>!document.getElementById(x)) &&
     !document.getElementById('desk-details').open && !document.getElementById('scan-desk').innerText.includes('已选') &&

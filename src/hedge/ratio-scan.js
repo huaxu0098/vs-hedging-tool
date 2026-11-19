@@ -190,6 +190,11 @@ function cell(ctx, p, pfSegment, hypeSegment, common) {
   const feesLine = hypeSegment.settled.map((v, k) => v.minus(k === 0 ? extra : 0));
   const payout = p.stage === 'funded' ? profitSplit(p.target, p.baseline, p.share).user : null;
   const threshold = decimal(p.B).minus(book.external);
+  const extraBuffer = decimal(ctx.params.recoveryBuffer ?? 0);
+  const buffered = [];
+  const roundFloor = payout != null && p.C_ref != null
+    ? decimal(p.C_ref).plus(p.contributions).minus(p.withdrawals).plus(p.g).minus(payout).minus(book.external)
+    : null;
   const costBasis =
     ctx.params.profitBasis == null ? null : decimal(ctx.params.profitBasis).minus(book.external);
   for (const k of [0, 1]) {
@@ -198,6 +203,8 @@ function cell(ctx, p, pfSegment, hypeSegment, common) {
       const line = feesLine.map((v, j) => (stressed ? v.minus(debit[j]) : v));
       const cash = (floor, strict = false) => project(line, hypeSegment.slope.div(factor), s, floor, strict);
       (k === 0 ? protect : survive).push(cash(k === 0 ? threshold : p.R));
+      if (k === 1 && roundFloor != null) buffered.push(cash(stressed ? roundFloor : roundFloor.minus(p.inTransit)));
+      if (k === 0 && extraBuffer.gt(0)) buffered.push(cash(threshold.plus(extraBuffer)));
       if (k === 1 && stressed && costBasis != null) {
         const n = cash(costBasis);
         loss.push(n.map((v, i) => (i === 0 ? -v - 1n : -v)));
@@ -256,6 +263,7 @@ function cell(ctx, p, pfSegment, hypeSegment, common) {
     )
   );
   return {
+    buffered: buffered.length ? compact(buffered, pfSegment, hypeSegment) : null,
     metrics: pathMetrics(ctx, pfSegment, hypeSegment, common, feesLine, debit, nonflat ? shock : decimal(0)),
     sign: pfSegment.sign,
     from: pfSegment.lo,
@@ -277,12 +285,14 @@ function slices(c, i) {
       : null;
   const failProfit = applyBands(risk, c.failProfit, n),
     passProfit = applyBands(risk, c.passProfit, n);
+  const both = intersect(protect, survive);
   return {
     legal,
     risk,
+    eligible: c.buffered ? applyBands(both, c.buffered, n) : both,
     protect,
     survive,
-    both: intersect(protect, survive),
+    both,
     afterCreditProfit: applyBands(risk, c.afterCreditProfit, n),
     loss: applyBands(risk, c.loss, n),
     failProfit,
@@ -435,6 +445,7 @@ export function inspectRatio(ctx, point) {
     passProfitable: physical && successNet != null && successNet.gt(0),
     profitable: physical && failNet != null && failNet.gt(0) && successNet.gt(0),
     reason: c.constraints.find((x) => x.status !== 'pass'),
+    lines: c.lines,
     paths: c.paths,
     stress: path
   };
@@ -484,7 +495,9 @@ function scanLotRanges(ctx, maxVisits, legs, cache) {
   const constant = decimal(normalizeExposure(ctx.market.hl.step, ctx.market.hl)).div(
     normalizeExposure(ctx.market.pf.step, ctx.market.pf)
   );
-  const sets = Object.fromEntries([...keys, 'high'].map((k) => [k, empty()])),
+  const guarded = decimal(ctx.params.recoveryBuffer ?? 0).gt(0) || (p.stage === 'funded' && p.C_ref != null);
+  const groups = guarded ? [...keys, 'eligible'] : keys;
+  const sets = Object.fromEntries([...groups, 'high'].map((k) => [k, empty()])),
     cells = [];
   let visits = 0,
     complete = true;
@@ -508,6 +521,7 @@ function scanLotRanges(ctx, maxVisits, legs, cache) {
             (h.hi > 0 && decimal(oldPath.actual).lt(ctx.checks.minMaintenanceSurplus ?? 0)))
         )
           c.risk = [[-1n, 0n, 0n, 0n]];
+        c.legalScales = [];
         cells.push(c);
         c.scannedTo = c.from - 1;
         if (!complete) continue;
@@ -518,7 +532,12 @@ function scanLotRanges(ctx, maxVisits, legs, cache) {
           }
           c.scannedTo = i;
           const bands = slices(c, i);
-          for (const k of keys) if (bands[k]) add(sets[k], ...bands[k], i, sign);
+          if (bands.legal) {
+            const last = c.legalScales.at(-1);
+            if (last && last[1] === i - 1) last[1] = i;
+            else c.legalScales.push([i, i]);
+          }
+          for (const k of groups) if (bands[k]) add(sets[k], ...bands[k], i, sign);
           for (const band of highRiskBands(bands)) add(sets.high, ...band, i, sign);
         }
       }
@@ -551,7 +570,7 @@ function reportBuckets(ctx, p, sets, cells, cache) {
   const cmp = (a, b) => Number(BigInt(a.j) * BigInt(b.i) - BigInt(b.j) * BigInt(a.i));
   edges.sort(cmp);
   const cuts = edges.filter((point, k) => k === 0 || cmp(point, edges[k - 1]) !== 0);
-  const counted = [...subsetGroups, 'risk'];
+  const counted = [...subsetGroups, 'risk', ...(sets.eligible ? ['eligible'] : [])];
   const accumulators = () => Object.fromEntries(counted.map((key) => [key, newReport()]));
   const totals = accumulators();
   const buckets = [...cuts, null].map((edge, n) => ({

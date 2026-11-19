@@ -8,6 +8,8 @@ import {
   ratioSlice,
   adjacentScale
 } from '../src/hedge/ratio-scan.js';
+import { displayHistory } from '../src/hedge/display-history.js';
+import { pagePoints, planRecord, pointKey } from '../src/hedge/position-plans.js';
 import { ratioChanges } from '../src/hedge/ratio-analysis.js';
 import { exactRatio, ratioBin } from '../src/hedge/ratio-scan.js';
 import { MarketRevaluation } from '../src/hedge/scan-refresh.js';
@@ -1786,4 +1788,90 @@ test('DYN 数量步长独立变化：理论不变，可行下界及自动代表 
     c = ratioChanges(a, b);
   assert.ok(!c.theoryChanged && c.hChanged && c.intervalChanged && c.changes.includes('数量网格'));
   assert.deepEqual([a.ratioScan.representative.row.h, b.ratioScan.representative.row.h], ['0.6', '0.57']);
+});
+
+test('实际仓位分页穷尽所有合法网格，方向、比例与规模分别保留', () => {
+  const scan = scanFixture().ratioScan;
+  const pages = [];
+  let cursor = null;
+  do {
+    const page = pagePoints(scan, scan.plans.index, cursor, 3);
+    assert.ok(page.rows.length && page.rows.length <= 3);
+    pages.push(...page.rows);
+    cursor = page.next;
+  } while (cursor);
+  const expected = [];
+  for (const sign of [1, -1])
+    for (let i = 1; i <= 10; i++)
+      for (let j = 0; j <= 6; j++)
+        if (ratioSlice(scan, sign, i).some(([lo,hi]) => lo <= j && j <= hi)) expected.push({sign,i,j});
+  assert.deepEqual(pages, expected);
+  assert.equal(new Set(pages.map(pointKey)).size, scan.sets.legal.count);
+  const pair = scan.plans.rows.filter(r => r.labels.includes('同 h 规模对照'));
+  assert.equal(pair.length, 2);
+  assert.equal(pair[0].fraction, pair[1].fraction);
+  assert.notEqual(pair[0].i, pair[1].i);
+});
+
+test('三目标从合格交集分别取真仓位，对照逐点账本、额外保护缓冲及 Funded 约束', () => {
+  for (const rules of [{}, { recoveryBuffer:'5' }, { recoveryBuffer:'1000' },
+    { stage:'funded', ref:'140', fundedTarget:'1100', fundedFloor:'900', g:'50' }]) {
+    const scan = scanFixture(rules).ratioScan;
+    const eligible = [];
+    for (const {sign,i,j} of pagePoints(scan,scan.plans.index,null,1000).rows) {
+      const r = inspectRatio(scan.ctx,{sign,i,j});
+      if (r.both && dec(r.failureVsProtection).gte(rules.recoveryBuffer ?? 0) &&
+          (!rules.ref || dec(r.funded.ifCredited).minus(rules.ref).gte(rules.g))) eligible.push(r);
+    }
+    assert.equal(eligible.length, scan.plans.eligible);
+    for (const [label,field] of [['最大 PF 仓位','pfValue'],['失败回收优先','fail'],['成功留存优先','success']]) {
+      const winners = scan.plans.rows.filter(r => r.labels.includes(label));
+      assert.equal(winners.length,eligible.length ? 1 : 0);
+      if (!eligible.length) continue;
+      const pick=winners[0], actual=eligible.find(r=>pointKey(r)===pick.key);
+      assert.ok(actual);
+      for (const k of ['pfValue','hypeValue','fail','success','initial']) assert.equal(pick[k],actual[k]);
+      assert.ok(eligible.every(r=>dec(r[field]).lte(pick[field])));
+    }
+  }
+});
+
+test('每行原生买卖均价及双边费用来自同一个差额仓位，外部现金只计入个人总额', () => {
+  const f=fixture();
+  f.a.hl.qty='1'; f.a.hl.currentMarginCredit='10';
+  f.m.hl.levels=[[['99.8','0.5'],['99.6','30']],[['100.1','0.5'],['100.2','30']]];
+  const scan=scanFixture({hlFee:'0.0005',pfFee:'0.0001',external:'15',externalAt:at},f).ratioScan;
+  for (const p of [{sign:-1,i:6,j:1},{sign:-1,i:6,j:2},{sign:1,i:6,j:2}]) {
+    const r=planRecord(scan,p), actual=inspectRatio(scan.ctx,p);
+    assert.equal(r.hlFill.price,actual.paths.fail.hl.entryPrice);
+    if(r.j===1) assert.equal(r.hlFill.price,null);
+    else assert.ok(p.sign<0 ? dec(r.hlFill.price).gt('100.1') : dec(r.hlFill.price).lt('99.8'));
+    assert.ok(dec(r.fail).minus(r.failHype).eq('15'), JSON.stringify([r.fail, r.failHype, scan.ctx.book.external]));
+    for(const [key,path] of [['failCost','fail'],['passCost','pass']]) {
+      const {pf,hl}=actual.paths[path];
+      const total=dec(pf.entryFee).plus(hl.entryFee).plus(pf.exitFee).plus(hl.exitFee);
+      assert.ok(total.eq(r[key].fees));
+    }
+  }
+});
+
+test('断线重载保留三目标与同规模对照的原始记录，资金来源之间隔离', () => {
+  const f = fixture(), result = scanFixture({}, f);
+  result.calculationMarket = f.m;
+  const data = new Map(), storage = {
+    getItem: k => data.get(k) ?? null,
+    setItem: (k,v) => data.set(k,v)
+  };
+  displayHistory(storage).record('plan:BTC',result);
+  const retained = displayHistory(storage).read('plan:BTC').ratioScan;
+  assert.deepEqual(retained.plans.rows,result.ratioScan.plans.rows);
+  assert.equal(retained.plans.index,undefined);
+  assert.equal(displayHistory(storage).read('account:BTC'),null);
+  const [[key,raw]]=data.entries(), old=JSON.parse(raw);
+  delete old.view.ratioScan.plans;
+  storage.setItem(key,JSON.stringify(old));
+  const legacy=displayHistory(storage).read('plan:BTC').ratioScan;
+  assert.equal(legacy.plans.rows[0].fail, legacy.representative.row.fail);
+  assert.equal(legacy.plans.rows[0].success, legacy.representative.row.success);
+  assert.equal(legacy.plans.legacy,true);
 });

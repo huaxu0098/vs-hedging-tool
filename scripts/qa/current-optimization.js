@@ -5,7 +5,7 @@ const b = await openTestBrowser({ current: true });
 const { send, run, wait, click, text } = b;
 const input = (id, v) => b.set('#' + id, v, 'input');
 const ready =
-  "document.querySelector('#plan-tradeoff').textContent.includes('现金缓冲变化') && document.querySelector('#trace-id').textContent.includes('AUTO-0.21')";
+  "document.querySelector('#plan-rows').textContent.includes('最大 PF 仓位') && document.querySelector('#scan-desk').dataset.state==='ready' && document.querySelector('#trace-id').textContent.includes('AUTO-0.21')";
 try {
   await send('Page.navigate', { url: (process.env.CURRENT_URL ?? b.url) + '/' });
   await wait("!!document.getElementById('desk-details')");
@@ -21,7 +21,7 @@ try {
       at:document.querySelector('#trace-sources').textContent.match(/计算于 (\\S+)/)[1],
       stamp:document.querySelector('#trace-id').textContent,
       versions:[...new Set([...document.querySelectorAll('.frame-key')].map(el=>el.title))],
-      fields:Object.fromEntries(['plan-tradeoff','size-plan','cash-plan','current-h','target-h','lev-equity-heading','candidate-surplus-heading','cash-bridge','cross-audit','deadline-clock','clock-skew','risk-values','hysteresis','missing-list'].map(k=>[k,document.getElementById(k).textContent]))};
+      fields:Object.fromEntries(['plan-rows','plan-risk-rows','current-h','target-h','lev-equity-heading','candidate-surplus-heading','cash-bridge','cross-audit','deadline-clock','clock-skew','risk-values','hysteresis','missing-list'].map(k=>[k,document.getElementById(k).textContent]))};
   })()`);
   const { inputs, fields } = frame;
   const x = calculateCurrent(
@@ -34,8 +34,9 @@ try {
   );
   assert.ok(frame.stamp.endsWith(x.trace.id));
   assert.equal(frame.versions.length, 1);
-  assert.match(fields['plan-tradeoff'], /PF 名义仓位减少.*成功端 Hype 现金变化.*现金缓冲变化/);
-  assert.match(fields['size-plan'], /已枚举数量网格内最优|最优性待验证/);
+  assert.match(fields['plan-rows'], /失败回收优先/);
+  assert.match(fields['plan-rows'], /成功留存优先/);
+  assert.ok(fields['plan-risk-rows']);
   assert.match(fields['risk-values'], /PF 模拟初始保证金/);
   assert.match(fields['risk-values'], /Hype 其他保证金占用/);
   assert.match(fields['lev-equity-heading'], /基础情景/);
@@ -59,28 +60,18 @@ try {
   await click('#missing-list a[href="#jumpBps"]');
   assert.equal(await run('document.activeElement.id'), 'jumpBps');
   const pending = await run(`(() => {
-    const desk=document.querySelector('#scan-desk'), slider=document.querySelector('#riskPreference');
+    const desk=document.querySelector('#scan-desk'), reserve=document.querySelector('#R_success');
     const before=[desk.dataset.resultId,document.querySelector('#scan-fail-cash').textContent];
-    slider.value='50';
-    slider.dispatchEvent(new Event('input',{bubbles:true}));
+    reserve.value='98';
+    reserve.dispatchEvent(new Event('input',{bubbles:true}));
     return {before,after:[desk.dataset.resultId,document.querySelector('#scan-fail-cash').textContent],
       state:desk.dataset.state, label:document.querySelector('#advanced-frame').textContent};
   })()`);
   assert.equal(pending.state, 'updating');
   assert.match(pending.label, /更新中.*上次完成/);
   assert.deepEqual(pending.after, pending.before);
-  await wait(ready + " && document.querySelector('#preference-info').textContent.startsWith('50%')", 40000);
-  console.log('PREFERENCE', await text('#preference-info'));
-  await input('riskPreference', '100');
-  await wait(ready + " && document.querySelector('#preference-info').textContent.startsWith('100%')", 40000);
-  const cashView = await run(`(() => {
-    const txt=id=>document.getElementById(id).textContent;
-    return [txt('pf-summary'),txt('hl-summary'),txt('cash-plan'),txt('risk-tradeoff'),txt('search-coverage')];
-  })()`);
-  assert.ok(cashView[2].includes(cashView[0]) && cashView[2].includes(cashView[1]));
-  assert.match(cashView[3], /最低维持余量.*强平线距离变化.*杠杆变化/);
-  assert.match(cashView[4], /网格点.*剪枝次数.*ms/);
-  await input('riskPreference', '50');
+  await wait(ready + " && document.querySelector('#reserve-threshold').textContent.includes('98')",40000);
+  assert.equal(await run("!!document.querySelector('#riskPreference')"),false);
   await input('quoteSkewMs', '0');
   await wait(
     "document.querySelector('#auto-search').textContent.includes('AUTO_DATA_BLOCKED') && document.querySelector('#calc-status').textContent.includes('行情熔断')",
@@ -100,7 +91,7 @@ try {
   assert.equal(await run("document.querySelector('#hl-equity').value"), '');
   assert.equal(await run("document.querySelector('#pf-qty').value"), '');
   assert.equal(await run("document.querySelector('#deadline').value"), '');
-  assert.equal(await run("document.querySelector('#riskPreference').value"), '0');
+  assert.equal(await run("document.querySelector('#R_success').value"), '100');
   assert.match(await text('#auto-search'), /AUTO_DATA_BLOCKED/);
   await click('#confirm-pf-qty');
   assert.equal(await run("document.querySelector('#pf-qty').value"), '0');
@@ -123,11 +114,11 @@ try {
   await input('rebalanceSteps', '3');
   await wait(ready + " && document.querySelector('#hysteresis').textContent.includes('阈值 3')", 40000);
   await b.set('#funding-view', 'plan');
-  assert.equal(await run("document.querySelector('#riskPreference').value"), '50');
+  assert.equal(await run("document.querySelector('#R_success').value"), '98');
   assert.equal(await run("document.querySelector('#rebalanceSteps').value"), '2');
   assert.deepEqual(b.faults, []);
   console.log(
-    'OPT_BROWSER_OK 双方案、同版来源、风险偏好、两日截止、时差熔断、拆分确认、真实与规划隔离、迟滞入口'
+    'OPT_BROWSER_OK 三目标仓位、同版来源、现金留存、两日截止、时差熔断、拆分确认、真实与规划隔离、迟滞入口'
   );
 } finally {
   await b.close();

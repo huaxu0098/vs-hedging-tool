@@ -41,8 +41,8 @@ if (state.stressVersion !== 1) {
 const planDefaults = { planCrossFlat: true, planCapital: '500', planPF: '10000', planFundedCash: '101.50' };
 const planning = () => state.fundingView === 'plan';
 state.fundingView ??= 'plan';
-state.rules = { ...rules, ...splitReserves(state.rules) };
-state.planRules = { ...rules, ...planDefaults, ...splitReserves(state.planRules) };
+state.rules = { ...rules, ...splitReserves(state.rules), riskPreference: '0' };
+state.planRules = { ...rules, ...planDefaults, ...splitReserves(state.planRules), riskPreference: '0' };
 let r = planning() ? state.planRules : state.rules;
 const save = () => localStorage.setItem(key, JSON.stringify(state));
 const fmt = (x, n = 2) => {
@@ -249,7 +249,6 @@ function inputs() {
     'B',
     'R_success',
     'R_free',
-    'riskPreference',
     'externalCurrency',
     ...Object.keys(ruleFields)
   ])
@@ -844,65 +843,6 @@ function renderConditions(result, a, m, plan) {
               age(t.accountLimit))
       : ''
   );
-  put(
-    'size-title',
-    result.maximum && !result.maximum.complete ? '已找到的仓位方案 · 最大值待验证' : '最大可行方案'
-  );
-  put(
-    'cash-title',
-    result.conservative && !result.conservative.complete
-      ? '现金优先候选 · 最优性待验证'
-      : actualStress
-        ? '已配置情景 · 现金优先'
-        : '基础情景 · 现金优先'
-  );
-  const diff = result.comparison;
-  put(
-    'plan-tradeoff',
-    diff
-      ? '选择现金优先方案，PF 名义仓位减少 ' +
-          money(diff.pfReduction) +
-          '（' +
-          pct(diff.reductionRatio) +
-          '），成功端 Hype 现金变化 ' +
-          signedMoney(diff.successGain) +
-          '，最差个人现金缓冲变化 ' +
-          signedMoney(diff.worstGain) +
-          '。'
-      : '等待同一快照的两套方案'
-  );
-  put(
-    'preference-info',
-    (r.riskPreference ?? '0') +
-      '% · 当前方案最差个人现金留存下限 ' +
-      money(result.preference?.floor) +
-      (result.preference
-        ? '（' +
-          money(result.preference.sizeFloor) +
-          ' + ' +
-          (r.riskPreference ?? '0') +
-          '% × 两端最低现金差）'
-        : '') +
-      '；失败保护、保证金与清算约束继续生效。'
-  );
-  $('riskPreference').disabled = r.mode !== 'auto';
-  put(
-    'risk-tradeoff',
-    diff
-      ? '现金优先相对仓位优先 · Hype 名义额 ' +
-          signedMoney(diff.hypeChange) +
-          '，失败端现金 ' +
-          signedMoney(diff.failureChange) +
-          '，当前维持保证金 ' +
-          signedMoney(diff.maintenanceChange) +
-          '，路径最低维持余量 ' +
-          signedMoney(diff.surplusChange) +
-          '，成功线至强平线距离变化 ' +
-          (diff.distanceChange == null ? '无可比较交点' : signed(diff.distanceChange) + ' 价格单位') +
-          '，候选杠杆变化 ' +
-          (diff.leverageChange == null ? '—' : signed(diff.leverageChange) + '×')
-      : ''
-  );
   const h = result.advice;
   put(
     'hysteresis',
@@ -1406,51 +1346,6 @@ function render() {
             : '')
       ])
     );
-  $('plan-comparison').hidden = r.mode !== 'auto';
-  for (const [id, plan] of [
-    ['size-plan', result.maximum],
-    ['cash-plan', result.conservative]
-  ]) {
-    const pick = plan?.candidate;
-    put(
-      id,
-      pick
-        ? [
-            'PF ' +
-              directional(pick.vsTargetQuantity, pick.vsNotional) +
-              ' / Hype ' +
-              directional(pick.hlTargetQuantity, pick.hlNotional),
-            '对冲比例 ' +
-              pct(pick.actualRatio) +
-              ' · 候选杠杆 ' +
-              (pick.candidateLeverage ? pick.candidateLeverage + '×' : '空仓') +
-              ' · 当前账户设置 ' +
-              (configured ? configured + '×' : '未核实'),
-            '失败端个人合计 ' +
-              money(pick.failureCash) +
-              ' / 成功端到账前 Hype ' +
-              money(pick.hlBeforePayout),
-            '最差个人现金 ' +
-              money(pick.worstCash) +
-              ' · Hype 初始保证金 ' +
-              money(pick.requiredInitialMargin),
-            '路径最低维持余量 ' +
-              money(pick.stressedSurplus ?? pick.baseSurplus) +
-              ' · 成功线至强平线距离 ' +
-              (pick.priceBuffer == null
-                ? '无可比较交点'
-                : fmt(pick.stressPriceBuffer ?? pick.priceBuffer) + ' 价格单位'),
-            plan.complete
-              ? '当前输入、行情快照、已配置约束与已枚举数量网格内最优'
-              : '本次搜索已找到的候选，最优性待验证',
-            plan.audit?.status + (plan.audit?.gaps?.length ? ' · ' + plan.audit.gaps.join('、') : ''),
-            id === 'cash-plan' && plan.unverified?.length ? '条件方案 · ' + plan.unverified.at(-1) : ''
-          ]
-            .filter(Boolean)
-            .join('\n')
-        : status
-    );
-  }
   const trace = result.trace;
   put('trace-id', trace ? trace.model + ' / ' + trace.id : '等待计算');
   put(
@@ -2294,7 +2189,6 @@ for (const k of [
   'B',
   'R_success',
   'R_free',
-  'riskPreference',
   'receiptSource',
   'externalCurrency',
   ...Object.keys(ruleFields)
@@ -2492,8 +2386,8 @@ window.addEventListener('storage', (event) => {
   const next = JSON.parse(localStorage.getItem(key) || 'null');
   if (next?.version !== 1) return;
   Object.assign(state, { assets: next.assets, shared: next.shared, asset: next.asset, vestSpecs: next.vestSpecs });
-  state.rules = { ...rules, ...splitReserves(next.rules) };
-  state.planRules = { ...rules, ...planDefaults, ...splitReserves(next.planRules) };
+  state.rules = { ...rules, ...splitReserves(next.rules), riskPreference: '0' };
+  state.planRules = { ...rules, ...planDefaults, ...splitReserves(next.planRules), riskPreference: '0' };
   r = planning() ? state.planRules : state.rules;
   const switched = feed.asset !== asset();
   if (switched) {

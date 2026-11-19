@@ -25,7 +25,7 @@ const install = `(() => {
         test.results[key]={id:key, started:r.startedAt,finished:r.finishedAt,ms:r.solveMs,
           pfMark:s.ctx.market.pf.mark,hlMark:s.ctx.market.hl.mark, count:s.sets.legal.count,
           revaluation:r.revaluation, sequence:data.version, protect:s.ctx.book.B, reserve:s.ctx.params.R,
-          rep:rep && {pf:rep.pfValue, hl:rep.hypeValue, fail:rep.fail, success:rep.success},
+          plans:s.plans.rows, rep:rep && {pf:rep.pfValue, hl:rep.hypeValue, fail:rep.fail, success:rep.success},
           bins:s.buckets.flatMap((b,index)=>{
             if(!b.legal)return [];
             const groups=[b.risk?'risk':'legal'];
@@ -54,22 +54,23 @@ const install = `(() => {
       if(desk.dataset.state==='updating') test.pendingPaints++;
       if(desk.dataset.state==='paused') test.pausedPaints++;
       if(e('scan-focus').hidden || e('scan-results').hidden || !e('scan-fail-cash').textContent ||
-        !e('scan-pass-cash').textContent || ['scan-pass-cash','scan-fail-cash'].some(k=>e(k).textContent==='—') || !e('scan-buckets').rows.length || ['protect','survive','both','profit'].some(k=>!e('scan-'+k).textContent || e('scan-'+k).textContent.includes('等待有效数据'))) test.blanks++;
+        !e('scan-pass-cash').textContent || ['scan-pass-cash','scan-fail-cash'].some(k=>e(k).textContent==='—') || !e('plan-rows').rows.length || ['protect','survive','both','profit'].some(k=>!e('scan-'+k).textContent || e('scan-'+k).textContent.includes('等待有效数据'))) test.blanks++;
       if(e('ratio-analysis').hidden || !e('ratio-neighbors').rows.length ||
         !e('ratio-neighbors').querySelector('.representative-range') || !e('ratio-counts').textContent) test.neighborBlanks=(test.neighborBlanks||0)+1;
       if(neighborBody!==e('ratio-neighbors') || neighborCell!==e('ratio-neighbors').rows[0]?.cells[0]) test.neighborRemounts=(test.neighborRemounts||0)+1;
       const rect=region.getBoundingClientRect(), style=getComputedStyle(region);
       if(rect.height===0 || style.visibility==='hidden' || Number(style.opacity)===0) test.blanks++;
       if(region.inert || getComputedStyle(region).userSelect==='none') test.unreadable=true;
-      if(e('scan-buckets').rows[0]!==firstRow || e('scan-buckets').rows[0]?.cells[0]!==firstCell) test.replacedFirstRow=true;
+      if(e('plan-rows').rows[0]!==firstRow || e('plan-rows').rows[0]?.cells[0]!==firstCell) test.replacedFirstRow=true;
     }
     const id=desk?.dataset.resultId;
     if(id && id!==lastId && test.results[id]){
-      if(!root){test.started=performance.now();main=document.querySelector('main');root=desk;region=e('scan-results');neighborBody=e('ratio-neighbors');neighborCell=neighborBody.rows[0]?.cells[0];firstCell=e('scan-buckets').rows[0]?.cells[0]}
-      firstRow??=e('scan-buckets').rows[0];lastId=id;
+      if(!root){test.started=performance.now();main=document.querySelector('main');root=desk;region=e('scan-results');neighborBody=e('ratio-neighbors');neighborCell=neighborBody.rows[0]?.cells[0];firstCell=e('plan-rows').rows[0]?.cells[0]}
+      firstRow??=e('plan-rows').rows[0];lastId=id;
       test.commits.push({ ...test.results[id], prices:[e('scan-pf-price').textContent,e('scan-hl-price').textContent],
         cash:[e('scan-fail-cash').textContent,e('scan-pass-cash').textContent], position:e('scan-position').textContent,
-        rows:[...e('scan-buckets').rows].map(tr=>({index:Number(tr.dataset.band),group:tr.dataset.subset,cells:[...tr.cells].map(td=>td.innerText)})),
+        shown:[...e('plan-rows').rows].map(tr=>({key:tr.dataset.point,cells:[...tr.cells].map(td=>td.innerText)})),
+        rows:[...e('scan-buckets').rows].map(tr=>({index:Number(tr.dataset.band),group:tr.dataset.subset,cells:[...tr.cells].map(td=>[...td.childNodes].map(n=>n.nodeName==='BR'?'\\n':(n.nodeName==='SMALL'?'\\n':'')+n.textContent).join(''))})),
         height:e('scan-results').getBoundingClientRect().bottom, status:e('scan-status').textContent});
     }
     requestAnimationFrame(frame);
@@ -99,6 +100,15 @@ try {
     assert.ok(f.status.includes('结果时间'));
     assert.equal(f.rows.length, f.bins.length);
     assert.deepEqual(f.cash, [cash(f.rep.fail), cash(f.rep.success)]);
+    assert.equal(f.shown.length, f.plans.length);
+    assert.ok(f.plans.some(r=>r.labels.includes('最大 PF 仓位')));
+    for (const [i, plan] of f.plans.entries()) {
+      const {key,cells}=f.shown[i];
+      assert.equal(key,plan.key);
+      assert.ok(cells[1].includes(dec(plan.pf).abs()+' BTC') && cells[2].includes(dec(plan.hl).abs()+' BTC'));
+      assert.ok(cells[3].includes(plan.failStop || cash(plan.fail)) && cells[4].includes(plan.passStop || cash(plan.success)));
+      if(plan.both) assert.ok(dec(plan.fail).gte(f.protect) && dec(plan.success).gte(f.reserve));
+    }
     assert.ok(f.prices.every((px) => Number(px) > 0));
     const range = (values, digits) => {
       const parts = values.map(x => digits == null ? x : dec(x).toFixed(digits));
@@ -139,12 +149,22 @@ try {
       const at = selector => Math.ceil(document.querySelector(selector).getBoundingClientRect().bottom);
       return {width:innerWidth, height:innerHeight, contentWidth:document.documentElement.scrollWidth,
         quotes:at('.book-table'), cash:at('#scan-cash'), ranges:at('.scan-sets'),
-        secondBand:at('#scan-buckets tr:nth-child(2)'), table:at('#scan-results')};
+        secondBand:at('#plan-rows tr:nth-child(2)'), table:at('#scan-results')};
     })()`);
     assert.ok(layout.contentWidth <= width && layout.secondBand <= height, JSON.stringify(layout));
     if (width>=1000) assert.ok(layout.table <= height, JSON.stringify(layout));
     evidence.viewports.push(layout);
   }
+  await b.click('#plan-view');
+  await wait("document.querySelector('#plan-caption').textContent.includes('第 1 页')");
+  const first=await run("document.querySelector('#plan-rows tr').dataset.point");
+  await b.click('#plan-next');
+  assert.match(await b.text('#plan-caption'), /第 2 页/);
+  assert.notEqual(await run("document.querySelector('#plan-rows tr').dataset.point"),first);
+  await b.click('#plan-prev');
+  assert.match(await b.text('#plan-caption'), /第 1 页/);
+  await b.click('#plan-view');
+  assert.match(await b.text('#plan-rows'), /失败回收优先/);
   // Hold one legitimate request, supersede it with a new rule, then deliver
   // the old response after dispatch. It must never become visible.
   await run('window.scanTest.hold=true');

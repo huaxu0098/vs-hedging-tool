@@ -593,3 +593,32 @@ main.live-desk {padding-block:14px}
 #ratio-analysis table { min-width: 740px; font-variant-numeric: tabular-nums }
 #ratio-analysis td, #ratio-analysis th { padding: 4px 8px; font-size: 12px }
 #ratio-neighbors .representative-range { background: #edf5ef }
+
+.bands-heading nav {display:flex;gap:6px}
+.bands-heading button {min-height:25px;padding:2px 9px;font:inherit;font-size:12px}
+#scan-results .plan-caption {margin:0 0 5px;font-size:12px;color:#53665f}
+.exact-plans td {line-height:1.25;font-weight:600}
+.exact-plans td small {font-weight:400;color:#50645b;line-height:1.32;font-variant-numeric:tabular-nums}
+.exact-plans th:first-child {width:15%}
+.exact-plans th:last-child {width:22%}
+.exact-plans tr.qualified td:first-child {color:#15563e}
+#scan-results .bands-heading nav {width:auto;margin:0}
+@media(max-width:780px) {
+  #scan-results .bands-heading {display:flex;align-items:center;flex-wrap:wrap}
+  #scan-results .bands-heading h2 {flex:none}
+  #scan-results .table-wrap {overflow:auto;overscroll-behavior-x:contain}
+  #scan-results .exact-plans {display:table;width:865px;table-layout:fixed}
+  #scan-results .exact-plans thead {display:table-header-group;position:static;width:auto;height:auto;clip-path:none}
+  #scan-results .exact-plans tbody {display:table-row-group}
+  #scan-results .exact-plans tr {display:table-row;padding:0}
+  #scan-results .exact-plans th,#scan-results .exact-plans td {display:table-cell;padding:4px 5px;font-size:12px}
+  #scan-results .exact-plans td::before {content:none}
+  #scan-results .exact-plans td small {display:block;font-size:11px}
+  #scan-results .exact-plans th:first-child {width:90px}
+  #scan-results .exact-plans td:first-child,#scan-results .exact-plans th:first-child {
+    position:sticky;left:0;background:#fbfcfa;border-right:1px solid #c7d2ca
+  }
+  #scan-results .exact-plans tr.qualified td:first-child {background:#eef5ef}
+  #scan-results .exact-plans th:nth-child(2),#scan-results .exact-plans th:nth-child(3) {width:121px}
+  .plan-caption::after {content:' · 左右滑动查看各仓位资金与风险'}
+}
