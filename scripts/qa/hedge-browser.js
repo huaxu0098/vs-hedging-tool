@@ -216,6 +216,21 @@ try {
   await send('Page.reload');
   await wait("document.querySelector('#account-readout')?.innerText.includes('本次不开仓')");
   assert.ok(await run('document.documentElement.scrollWidth<=innerWidth+1'));
+  await click('nav a[href="/?simulation=challenge"]');
+  await wait(
+    "document.title === '默认考核模拟 · VS × Hype' && document.querySelectorAll('#account-readout .card').length === 4"
+  );
+  const cards = await run(
+    "Array.from(document.querySelectorAll('#account-readout .card'), c => c.textContent)"
+  );
+  assert.match(cards[0], /VS 做多5,000.00 U.*0.05 BTC/);
+  assert.match(cards[1], /Hype 做空766.00 U.*0.00766 BTC/);
+  assert.match(cards[2], /VS 通过.*剩 101.50 U.*亏 398.50 U.*VS 1.20 U，Hype 0.92 U/);
+  assert.match(cards[3], /VS 失败.*剩 500.06 U.*赚 0.06 U.*VS 0.94 U，Hype 0.72 U/);
+  assert.deepEqual(await workspace(), ledgerBeforeObservation);
+  await click('nav a[href="/?accounts=last"]');
+  await wait("document.querySelector('#account-readout')?.innerText.includes('不适用 · 主账户')");
+  console.log('通过 独立默认考核模拟仓位、两条触线的扣费剩余现金、500 U 基准盈亏与原账本隔离');
   await click('#account-readout a');
   await wait("document.getElementById('mode')?.value==='live_readonly'");
   assert.deepEqual(chrome.faults, []);

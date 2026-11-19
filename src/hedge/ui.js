@@ -1,3 +1,4 @@
+import { sizingParameters } from './sizing-parameters.js';
 import { D, dec, out, positive, nonnegative, ratio, normalizeExposure, solveBudgetBounds } from './math.js';
 import { createBook, applyLedgerEvent, advanceClock, balances, markEquity, iso } from './book.js';
 import { solve, profileInputs, projectSettlementEquity } from './solver.js';
@@ -207,27 +208,6 @@ function hydrate() {
   $('pass-trigger').value = w.profile.passTrigger;
   $('failure-trigger').value = w.profile.failureTrigger;
 }
-function parameters() {
-  const list = (k) =>
-    val(k)
-      .split(/[,，]/)
-      .map((x) => x.trim())
-      .filter(Boolean)
-      .map((v) => out(positive(v)));
-  return {
-    target: out(positive(val('target'))),
-    R: out(nonnegative(val('reserve'))),
-    g: out(nonnegative(val('gain'))),
-    k: out(nonnegative(val('friction'))),
-    pfSize: out(nonnegative(val('pf-size'))),
-    hlSize: out(nonnegative(val('hl-size'))),
-    mode: val('sizing'),
-    sizes: list('sizes'),
-    targets: list('targets'),
-    sort: val('sort'),
-    directions: val('direction') === 'both' ? [1, -1] : [Number(val('direction'))]
-  };
-}
 function stressSettings() {
   return $('stress-enable').checked
     ? Object.fromEntries(
@@ -436,7 +416,7 @@ function render() {
   try {
     drawBook();
     preview = projection();
-    const p = parameters(),
+    const p = sizingParameters(val),
       b = balances(preview);
     show(
       'context',
@@ -812,7 +792,7 @@ function liveBudget(issues) {
     resetOutput('实时条件未验证', '需新鲜的双边报价、账户与汇率，完整标的映射和已确认的本轮基准。');
     return;
   }
-  const p = parameters(),
+  const p = sizingParameters(val),
     rules = w.profile;
   const currencyEquity = out(dec(data.account.equity).times(c.hlFx)),
     equity = out(dec(vs.fields.equity).times(c.vsFx));

@@ -1,5 +1,8 @@
 const params = new URLSearchParams(location.search);
-if (params.get('accounts') === 'last') {
+if (params.get('simulation') === 'challenge') {
+  const { showChallengeSimulation } = await import('./account-report.js');
+  showChallengeSimulation();
+} else if (params.get('accounts') === 'last') {
   const { showReport } = await import('./account-report.js');
   showReport();
   window.addEventListener('hashchange', () => {
