@@ -33,7 +33,7 @@ export function displayHistory(storage) {
       const scan = result.ratioScan;
       if (!scan?.complete) return;
       const { id, at, model } = result.trace;
-      const { sets, buckets, representative, complete } = scan;
+      const { sets, buckets, representative, analysis, complete } = scan;
       const { book, params, market } = scan.ctx;
       const view = {
         prices: Object.fromEntries(
@@ -60,6 +60,7 @@ export function displayHistory(storage) {
           sets,
           buckets,
           representative,
+          analysis,
           complete,
           ctx: {
             book: { B: book.B },

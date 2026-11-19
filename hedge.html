@@ -42,6 +42,16 @@
           <h2>各比例段的仓位与现金 · 优先展示交集合格组</h2>
           <div class="table-wrap"><table><thead id="bin-columns"></thead><tbody id="scan-buckets"></tbody></table></div>
         </section>
+        <section id="ratio-analysis" hidden aria-label="分段对账与相邻仓位">
+          <p id="ratio-counts"></p><p id="ratio-boundary"></p>
+          <h2>代表方案与相邻仓位</h2>
+          <p id="ratio-objective"></p>
+          <div class="table-wrap"><table>
+            <thead><tr><th scope="col">实际 h / 两端门槛</th><th scope="col">PF 仓位 / 数量</th><th scope="col">Hype 仓位 / 数量</th><th scope="col">失败回收</th><th scope="col">成功剩余</th><th scope="col">Hype 初始保证金</th><th scope="col">成功线至强平距离</th></tr></thead>
+            <tbody id="ratio-neighbors"></tbody>
+          </table></div>
+          <p id="ratio-theory"></p><p id="ratio-change"></p>
+        </section>
       </section>
       <details id="desk-details"><summary id="scan-config">高级详情</summary>
       <details class="desk-group" id="account-details"><summary>账户、持仓与资金规则</summary>

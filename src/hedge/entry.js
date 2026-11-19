@@ -10,6 +10,7 @@ import {
   reason as constraintReason
 } from './current.js';
 import { scanKeys, refreshDelay } from './scan-refresh.js';
+import { ratioChanges } from './ratio-analysis.js';
 import { displayHistory } from './display-history.js';
 import { applyVestConfirmation, confirmVestSpec, riskFields } from './vest-confirmation.js';
 import { renderScan, setupScan } from './ratio-ui.js';
@@ -499,7 +500,11 @@ function currentFrame(a, m, t) {
         // Recheck the original clocks, account and eligibility before publication.
         // A long worker task may have crossed a deadline or a quote TTL.
         const eligible = calculateCurrent(r, a, m, frameRates, Date.now(), {deferAuto:true}).needsSearch;
-        if (eligible) { lastGood = completed; history.record(scope, completed.result); }
+        if (eligible) {
+          completed.result.ratioScan.analysis.change = ratioChanges(lastGood?.result, completed.result);
+          lastGood = completed;
+          history.record(scope, completed.result);
+        }
         else completed = null;
       }
       render();

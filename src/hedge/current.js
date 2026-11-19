@@ -1,4 +1,4 @@
-import { scanContext, buildRatioScan, ratioSlice, inspectRatio } from './ratio-scan.js';
+import { scanContext, buildRatioScan, ratioSlice, inspectRatio, ratioBin } from './ratio-scan.js';
 import {
   dec,
   out,
@@ -10,6 +10,7 @@ import {
   normalizeExposure,
   estimateFill
 } from './math.js';
+import { analyzeRatios } from './ratio-analysis.js';
 import { validLeverageCap } from './leverage.js';
 import { auditCross } from './cross-check.js';
 import { adjustmentTarget, comparePlans } from './optimization.js';
@@ -392,7 +393,10 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
   const result = computeCurrent(r, a, data, fxData, now, options);
   if (result.autoStatus === 'AUTO_FEASIBLE' && result.currencies?.warnings.length)
     result.autoStatus = 'AUTO_PARTIAL';
-  if (result.ratioScan) attachRepresentative(result, r);
+  if (result.ratioScan) {
+    attachRepresentative(result, r);
+    result.ratioScan.analysis = analyzeRatios(result, r);
+  }
   result.missingFields = [];
   const add = (id, label) => {
     if (!result.missingFields.some((x) => x.label === label)) result.missingFields.push({ id, label });
@@ -448,9 +452,7 @@ function attachRepresentative(result, r) {
   }
   const row = inspectRatio(scan.ctx, point);
   if (!row.physical || (group === 'both' && !row.both)) throw Error('自动代表方案与网格风控结果不一致');
-  const segment = scan.buckets.findIndex(
-    ({ throughLots: end }) => !end || BigInt(point.j) * BigInt(end.i) <= BigInt(end.j) * BigInt(point.i)
-  );
+  const segment = ratioBin(scan.buckets, point);
   const segmentRange = scan.buckets[segment]?.ranges[group];
   if (!segmentRange) throw Error('自动代表方案缺少完整分段记录');
   for (const range of [scan.sets[group].range, segmentRange].filter(Boolean)) {

@@ -37,7 +37,7 @@ const install = `(() => {
     if(test.hold) {const handler=this.onmessage.bind(this);test.held.push({job,send:()=>post.call(this,job,...args),handler});return}
     return post.call(this,job,...args);
   };
-  let lastId, firstRow, main, root, region, firstCell, previousQuote;
+  let lastId, firstRow, main, root, region, firstCell, previousQuote, neighborBody, neighborCell;
   function frame() {
     const e=id=>document.getElementById(id),desk=e('scan-desk');
     if(lastId) {
@@ -51,6 +51,9 @@ const install = `(() => {
       if(desk.dataset.state==='paused') test.pausedPaints++;
       if(e('scan-focus').hidden || e('scan-results').hidden || !e('scan-fail-cash').textContent ||
         !e('scan-pass-cash').textContent || !e('scan-buckets').rows.length || ['protect','survive','both','profit'].some(k=>!e('scan-'+k).textContent || e('scan-'+k).textContent.includes('等待有效数据'))) test.blanks++;
+      if(e('ratio-analysis').hidden || !e('ratio-neighbors').rows.length ||
+        !e('ratio-neighbors').querySelector('.representative-range') || !e('ratio-counts').textContent) test.neighborBlanks=(test.neighborBlanks||0)+1;
+      if(neighborBody!==e('ratio-neighbors') || neighborCell!==e('ratio-neighbors').rows[0]?.cells[0]) test.neighborRemounts=(test.neighborRemounts||0)+1;
       const rect=region.getBoundingClientRect(), style=getComputedStyle(region);
       if(rect.height===0 || style.visibility==='hidden' || Number(style.opacity)===0) test.blanks++;
       if(region.inert || getComputedStyle(region).userSelect==='none') test.unreadable=true;
@@ -58,7 +61,7 @@ const install = `(() => {
     }
     const id=desk?.dataset.resultId;
     if(id && id!==lastId && test.results[id]){
-      if(!root){test.started=performance.now();main=document.querySelector('main');root=desk;region=e('scan-results');firstCell=e('scan-buckets').rows[0]?.cells[0]}
+      if(!root){test.started=performance.now();main=document.querySelector('main');root=desk;region=e('scan-results');neighborBody=e('ratio-neighbors');neighborCell=neighborBody.rows[0]?.cells[0];firstCell=e('scan-buckets').rows[0]?.cells[0]}
       firstRow??=e('scan-buckets').rows[0];lastId=id;
       test.commits.push({ ...test.results[id], prices:[e('scan-pf-price').textContent,e('scan-hl-price').textContent],
         cash:[e('scan-fail-cash').textContent,e('scan-pass-cash').textContent], position:e('scan-position').textContent,
@@ -118,7 +121,7 @@ try {
   assert.ok(new Set(frames.map((f) => JSON.stringify(f.bins))).size > 1);
   evidence.live = frames.map(({ rows, bins, ...f }) => ({ ...f, bands: bins.length }));
   evidence.observation = await run(
-    '(({paints,pendingPaints,blanks,replacedFirstRow=false,remounts=0,unreadable=false,posted,elapsedMs,quoteChanges})=>({paints,pendingPaints,blanks,replacedFirstRow,remounts,unreadable,posted,elapsedMs,quoteChanges}))(window.scanTest)'
+    '(({paints,pendingPaints,blanks,neighborBlanks=0,neighborRemounts=0,replacedFirstRow=false,remounts=0,unreadable=false,posted,elapsedMs,quoteChanges})=>({paints,pendingPaints,blanks,neighborBlanks,neighborRemounts,replacedFirstRow,remounts,unreadable,posted,elapsedMs,quoteChanges}))(window.scanTest)'
   );
   // Hold one legitimate request, supersede it with a new rule, then deliver
   // the old response after dispatch. It must never become visible.
@@ -145,6 +148,8 @@ try {
     )
   );
   assert.ok(evidence.observation.elapsedMs >= 60000 && evidence.observation.quoteChanges > 1);
+  assert.equal(evidence.observation.neighborBlanks, 0);
+  assert.equal(evidence.observation.neighborRemounts, 0);
   assert.equal(evidence.observation.remounts, 0);
   assert.equal(evidence.observation.unreadable, false);
   assert.equal(evidence.observation.blanks, 0);

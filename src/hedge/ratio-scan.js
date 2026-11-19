@@ -628,6 +628,54 @@ export function ratioSlice(scan, sign, i, kind = 'legal') {
   return bands.sort((a, b) => a[0] - b[0]);
 }
 
+// All bin edges use (lower, upper]. The common sensitivity per lot cancels
+// in this comparison, including for equal ratios at different position sizes.
+export function ratioBin(buckets, point) {
+  return buckets.findIndex(
+    ({ throughLots: end }) => !end || BigInt(point.j) * BigInt(end.i) <= BigInt(end.j) * BigInt(point.i)
+  );
+}
+
+export function exactRatio(market, pfQty, hlQty) {
+  const numerator = decimal(normalizeExposure(hlQty, market.hl)).abs();
+  const denominator = decimal(normalizeExposure(pfQty, market.pf)).abs();
+  const places = Math.max(numerator.decimalPlaces(), denominator.decimalPlaces());
+  const asInteger = (x) => BigInt(x.toFixed(places).replace('.', ''));
+  const n = asInteger(numerator),
+    d = asInteger(denominator),
+    factor = gcd(n, d);
+  return (n / factor).toString() + '/' + (d / factor).toString();
+}
+
+// Hold one leg and direction constant. For a fixed Hype leg, transpose the
+// existing bilinear legality constraints to clip the PF integer axis exactly.
+export function neighborPoints(scan, point) {
+  const fixedHL = scan.ctx.params.mode === 'keepHL';
+  const axis = fixedHL ? 'i' : 'j';
+  const center = point[axis];
+  let bands;
+  if (fixedHL) {
+    bands = [];
+    for (const c of scan.cells) {
+      if (c.sign !== point.sign || point.j < c.lo || point.j > c.hi || c.scannedTo < c.from) continue;
+      const planes = c.valid.map(([a, b, h, cross]) => [a, h, b, cross]);
+      const band = applyBands([c.from, c.scannedTo], planes, BigInt(point.j));
+      if (band) bands.push(band);
+    }
+  } else bands = ratioSlice(scan, point.sign, point.i);
+  const lots = new Set([center]);
+  for (const [lo, hi] of bands) {
+    const before = Math.min(hi, center - 1),
+      after = Math.max(lo, center + 1);
+    for (const lot of [before - 1, before, after, after + 1]) if (lo <= lot && lot <= hi) lots.add(lot);
+  }
+  const ordered = [...lots].sort((a, b) => a - b);
+  const index = ordered.indexOf(center);
+  return ordered
+    .slice(Math.max(0, index - 2), index + 3)
+    .map((lot) => ({ i: point.i, j: point.j, sign: point.sign, [axis]: lot }));
+}
+
 // Integer multiples of the reduced pair retain the exact same sensitivity ratio.
 export function adjacentScale(scan, point, direction, kind = 'legal') {
   if (![1, -1].includes(direction)) throw Error('规模方向无效');

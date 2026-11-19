@@ -96,14 +96,15 @@ export function fundingInterval(p, failCost = p.k ?? '0', passCost = p.k ?? '0')
 function cashInterval(p, loss, gain, failCost, passCost) {
   const personal = dec(p.C_hl).plus(nonnegative(p.C_external));
   const protectedCash = nonnegative(p.B), retained = nonnegative(p.R);
-  const lower = max('0', protectedCash.minus(personal).plus(failCost).div(loss));
-  const upper = dec(p.C_hl).minus(retained).minus(passCost).div(gain);
+  const recoveryNeed = max('0', protectedCash.minus(personal).plus(failCost));
+  const spendable = dec(p.C_hl).minus(retained).minus(passCost);
+  const lower = recoveryNeed.div(loss), upper = spendable.div(gain);
   const fail = h => personal.plus(loss.times(h)).minus(failCost);
   const before = h => dec(p.C_hl).minus(gain.times(h)).minus(passCost);
   return { code: lower.gt(upper) ? 'NO_CASH_INTERSECTION' : 'CASH_INTERSECTION',
     B: p.B, C_H: p.C_hl, C_E: p.C_external, C_P: out(personal), R: p.R,
     E: p.E, F: p.floor, T: p.target, loss: out(loss), gain: out(gain),
-    failCost, passCost, lower: out(lower), upper: out(upper),
+    failCost, passCost, recoveryNeed: out(recoveryNeed), spendable: out(spendable), lower: out(lower), upper: out(upper),
     successShortfallAtLower: out(max(0, dec(p.R).minus(before(lower)))),
     failureShortfallAtUpper: upper.lt(0) ? null : out(max(0, dec(p.B).minus(fail(upper)))),
     reserveShortfallAtZero: out(max(0, dec(p.R).minus(before(dec('0')))))

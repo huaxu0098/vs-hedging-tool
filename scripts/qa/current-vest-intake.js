@@ -12,6 +12,7 @@ const paused = "document.querySelector('#scan-desk')?.dataset.state==='paused'";
 const read = () =>
   run(`(()=>{const e=k=>document.getElementById(k),t=k=>e(k).textContent;
  return {id:e('scan-desk').dataset.resultId,status:t('scan-status'),pf:t('scan-pf-price'),hl:t('scan-hl-price'),
+ neighbors:[...e('ratio-neighbors').rows].map(r=>r.innerText), boundary:t('ratio-boundary'),
  rows:e('scan-buckets').rows.length,cash:[t('scan-fail-cash'),t('scan-pass-cash')],
  ranges:['protect','survive','both','profit'].map(k=>t('scan-'+k)), units:[t('scan-pf-unit'),t('scan-hl-unit'),t('scan-hl-settle')]}})()`);
 const metaFault = async (value) =>
@@ -74,6 +75,9 @@ try {
   assert.equal(reports.reloaded.id, reports.missing.id);
   assert.deepEqual(reports.reloaded.cash, reports.missing.cash);
   assert.deepEqual(reports.reloaded.ranges, reports.missing.ranges);
+  assert.ok(reports.missing.neighbors.length > 0);
+  assert.deepEqual(reports.reloaded.neighbors, reports.missing.neighbors);
+  assert.equal(reports.reloaded.boundary, reports.missing.boundary);
   assert.ok(await run("document.querySelector('#scan-hl-quote').textContent.includes('历史 Mark')"));
   await metaFault('missing');
   await wait(

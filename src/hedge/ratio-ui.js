@@ -343,6 +343,125 @@ function renderSubsets() {
   }
   patchRows($('scan-subsets'), details);
 }
+function neighborVerdict(row) {
+  if (!row.physical) return row.failStop || row.passStop || '保证金或强平缓冲不足';
+  if (row.both) return '双路径保护';
+  const gaps = [];
+  if (!row.covers) gaps.push('回本差 ' + settlementAmount(row.shortfall));
+  if (!row.survives) gaps.push('留存差 ' + settlementAmount(dec(row.reserveHeadroom).neg()));
+  return gaps.join('，');
+}
+
+function renderAnalysis(scan) {
+  const info = scan?.analysis;
+  $('ratio-analysis').hidden = !info;
+  if (!info) return;
+  const { boundary, theory, change } = info;
+  const rep = scan.representative;
+  const qty = (q, leg) => q + ' ' + (leg.unit === 'contract' ? '张' : leg.unit);
+  const leg = scan.ctx.market;
+  const counts = scan.buckets.filter((b) => b.both).map((b) => b.both.toLocaleString());
+  write(
+    'ratio-counts',
+    '交集对账' +
+      (scan.complete ? '' : '（已覆盖网格）') +
+      '　' +
+      (counts.length ? counts.join(' + ') + ' = ' : '') +
+      scan.sets.both.count.toLocaleString() +
+      ' 组'
+  );
+  write(
+    'ratio-boundary',
+    boundary
+      ? '下界 ' +
+          boundary.fraction +
+          '（约 ' +
+          pct(boundary.h, 8) +
+          '）计入右端含等号的一段，共 ' +
+          boundary.count.toLocaleString() +
+          ' 组。' +
+          (boundary.count === 1 ? '该组' : '其中一组') +
+          ' PF ' +
+          qty(boundary.pf, leg.pf) +
+          '，Hype ' +
+          qty(boundary.hl, leg.hl) +
+          '。'
+      : ''
+  );
+  const objective = {
+    max_pf: '优先扩大可行 PF 仓位，同额时取最差路径剩余现金较多的一组。',
+    max_min_cash: '优先提高两端较低的个人现金，并列时取较小 PF 仓位。',
+    max_pf_with_cash_floor: '最差个人现金至少 ' + usd(info.cashFloor) + '，再优先扩大 PF 仓位。',
+    fixed: '按固定侧现仓求解另一侧。',
+    diagnostic: '当前没有可推荐仓位，以下为条件路径对照。'
+  };
+  write(
+    'ratio-objective',
+    rep
+      ? (rep.complete ? '' : '当前搜索范围内，') +
+          (objective[rep.objective] ?? '') +
+          '固定' +
+          (info.fixed === 'hl' ? ' Hype ' : ' PF ') +
+          '数量和方向，对比另一侧相邻合法档。数量正为多、负为空。' +
+          (info.neighbors.length === 1 ? '当前仅此一档。' : '')
+      : '当前没有可供比较的代表仓位。'
+  );
+  const next = document.createElement('tbody');
+  for (const row of info.neighbors) {
+    const tr = next.insertRow();
+    tr.classList.toggle('representative-range', row.center);
+    const head = document.createElement('th');
+    head.scope = 'row';
+    head.append(
+      (row.center ? '代表 · ' : '') + pct(row.h, 6),
+      document.createElement('br'),
+      neighborVerdict(row)
+    );
+    head.title = dec(row.h).times(100).toString() + '%';
+    tr.append(head);
+    for (const [value, q, venue] of [
+      [row.pfValue, row.pf, leg.pf],
+      [row.hypeValue, row.hl, leg.hl]
+    ]) {
+      tr.insertCell().append(usd(value), document.createElement('br'), qty(q, venue));
+    }
+    tr.insertCell().textContent = row.failStop || settlementAmount(row.fail);
+    tr.insertCell().textContent = row.passStop || settlementAmount(row.success);
+    tr.insertCell().append(usd(row.initial), document.createElement('br'), pct(row.imRate, 2));
+    tr.insertCell().textContent =
+      row.buffer == null
+        ? row.physical
+          ? '无正价交点或空仓'
+          : '未验证'
+        : fmt(row.buffer) + ' ' + info.quote;
+  }
+  patchRows($('ratio-neighbors'), next);
+  write(
+    'ratio-theory',
+    '理论下限 ' + pct(theory.lower) + '（待回收 ' + usd(theory.recoveryNeed) + ' ÷ PF 失败空间 ' + usd(theory.loss) +
+    '），理论上限 ' + pct(theory.upper) + '（Hype 留存后可承亏 ' + usd(theory.spendable) + ' ÷ PF 成功空间 ' + usd(theory.gain) +
+    '）。' + (dec(theory.lower).gt(theory.upper) ? '理论无交集。' : '') +
+    '实际区间另计成交成本、数量步长及风险约束。'
+  );
+  let message = '';
+  if (change) {
+    if (change.changes.length) message += '较上一帧，' + change.changes.join('、') + '有变动。';
+    message += change.theoryChanged ? '资金理论界限已变。' : '资金理论界限未变。';
+    if (rep && change.previousH != null) {
+      if (change.hChanged) {
+        message +=
+          '代表 h ' +
+          intervalText(change.previousH, rep.row.h, ' → ') +
+          '，' +
+          (change.lotsChanged ? '两边数量步数组合已变。' : '每步的相对盈亏敏感度已变。');
+      } else message += '代表 h 未变。';
+      if (change.directionChanged) message += '代表方向已反转。';
+    }
+    if (change.intervalChanged) message += '实际区间端点已变。';
+  } else message = '同一标的同步涨跌时，若资金空间和每单位敏感度不变，理论界限可以保持不变。';
+  write('ratio-change', message);
+}
+
 function draw(result) {
   frame = result.ratioScan ?? null;
   frameKey = result.trace?.id ?? '';
@@ -350,6 +469,7 @@ function draw(result) {
   auditText();
   const scan = frame,
     rep = scan?.representative;
+  renderAnalysis(scan);
   $('scan-results').hidden = !scan;
   $('scan-focus').hidden = !rep;
   const aggregate = document.createElement('tbody');
@@ -425,9 +545,9 @@ function draw(result) {
         group === 'legal' ? '路径结余未验证' : pair(metrics.successHype, settlementAmount);
       const risk = tr.insertCell();
       risk.append(
-        '缺口 ' + pct(metrics.gapRate?.[1], 2),
+        '缺口 ' + pair(metrics.gapRate, v => pct(v, 2)),
         document.createElement('br'),
-        '消耗 ' + pct(metrics.consumption?.[1], 2)
+        '消耗 ' + pair(metrics.consumption, v => pct(v, 2))
       );
       risk.title =
         '初始保证金占用 ' +
@@ -642,7 +762,7 @@ export function setupScan() {
           'Hype 仓位 / 数量',
           '失败回收',
           '成功剩余',
-          '失败缺口 / 成功消耗（最大）'
+          '失败缺口 / 成功消耗范围'
         ]
       : columns) {
       const cell = document.createElement('th');

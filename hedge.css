@@ -568,3 +568,10 @@ label input[type='checkbox'] {
 #desk-details > .desk-group { margin: 4px 0; padding: 6px 12px; border: 1px solid var(--line); border-radius: 4px }
 #desk-details > .desk-group > summary { cursor: pointer; font-weight: 600 }
 #vest-spec-source { white-space: pre-line }
+
+#ratio-analysis { background: white; border: 1px solid var(--line); padding: 8px 12px }
+#ratio-analysis p { margin: 4px 0; font-size: 13px }
+#ratio-analysis h2 { margin: 10px 0 2px }
+#ratio-analysis table { min-width: 740px; font-variant-numeric: tabular-nums }
+#ratio-analysis td, #ratio-analysis th { padding: 4px 8px; font-size: 12px }
+#ratio-neighbors .representative-range { background: #edf5ef }

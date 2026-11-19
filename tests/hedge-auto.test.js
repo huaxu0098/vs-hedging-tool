@@ -8,6 +8,8 @@ import {
   ratioSlice,
   adjacentScale
 } from '../src/hedge/ratio-scan.js';
+import { ratioChanges } from '../src/hedge/ratio-analysis.js';
+import { exactRatio, ratioBin } from '../src/hedge/ratio-scan.js';
 import { MarketRevaluation } from '../src/hedge/scan-refresh.js';
 import { sumPostings, presentLedger, reconcilePostings } from '../src/hedge/settlement-ledger.js';
 import { calculateCurrent, rules, splitReserves } from '../src/hedge/current.js';
@@ -1628,4 +1630,160 @@ test('AUTOSEL05 500.0018U 仅高出 0.0018U，缓冲率 0.00036%', async () => {
   const { recoveryCushion } = await import('../src/hedge/range-report.js');
   assert.deepEqual(recoveryCushion('500.0018', '500'), { amount: '0.0018', rate: '0.0000036', thin: true });
   assert.equal(recoveryCushion('499.9999', '500').thin, false);
+});
+
+test('DYN01 同步标记价格、盘口同比变化：理论界限和 h 可不变，目标数量、费用及保证金实际重算', () => {
+  const rules = { pfFee: '0.0001', hlFee: '0.0005' };
+  const a = scanFixture(rules);
+  const f = fixture();
+  for (const venue of ['pf', 'hl'])
+    Object.assign(f.m[venue], { mark: '480', levels: [[['480', '30']], [['480', '30']]] });
+  const b = scanFixture(rules, f);
+  const left = a.ratioScan.representative.row,
+    right = b.ratioScan.representative.row;
+  assert.deepEqual(a.ratioScan.analysis.theory, b.ratioScan.analysis.theory);
+  assert.equal(left.h, right.h);
+  for (const key of ['pf', 'hl', 'pfValue', 'hypeValue', 'initial', 'buffer'])
+    assert.notEqual(left[key], right[key], key);
+  assert.notEqual(left.paths.fail.hl.entryFee, right.paths.fail.hl.entryFee);
+  const delta = ratioChanges(a, b);
+  assert.ok(!delta.theoryChanged && !delta.hChanged && delta.lotsChanged);
+  assert.ok(delta.changes.includes('标记价'));
+});
+
+test('DYN02 分别改变点差、单边费率，核对相同实际仓位的双端结算及离散界限', () => {
+  const a = scanFixture(),
+    f = fixture();
+  f.m.hl.levels = [[['98', '30']], [['102', '30']]];
+  for (const [b, label] of [
+    [scanFixture({}, f), '盘口价格或深度'],
+    [scanFixture({ hlFee: '0.007' }), '成交费率']
+  ]) {
+    const read = (s) => inspectRatio(s.ratioScan.ctx, { sign: -1, i: 10, j: 4 });
+    assert.equal(a.funding.lower, b.funding.lower);
+    assert.ok(dec(read(b).fail).lt(read(a).fail) && dec(read(b).success).lt(read(a).success));
+    assert.ok(dec(b.ratioScan.sets.both.min.h).gt(a.ratioScan.sets.both.min.h));
+    assert.ok(dec(b.ratioScan.sets.both.max.h).lt(a.ratioScan.sets.both.max.h));
+    assert.ok(ratioChanges(a, b).changes.includes(label));
+  }
+});
+
+test('DYN03 本金、Hype权益、外部资金、当前 PF 权益、两条触线、成功留存独立驱动上下界', () => {
+  const a = scanFixture();
+  for (const [patch, side, equity, lo, hi, label] of [
+    [{ B: '183' }, null, null, '0.63', '1', '保护本金'],
+    [{}, 'hl', '145', '0.15', '1.25', 'Hype 权益'],
+    [{ external: '18', externalAt: at }, null, null, '0.22', '1', '外部到账资金'],
+    [{}, 'pf', '1020', out(dec('40').div(120)), '1.25', 'PF 权益'],
+    [{ challengeFloor: '929' }, null, null, out(dec('40').div(71)), '1', '失败线'],
+    [{ challengeTarget: '1150' }, null, null, '0.4', out(dec('100').div(150)), '成功线'],
+    [{ R_success: '51' }, null, null, '0.4', '0.69', '成功最低留存']
+  ]) {
+    const f = fixture();
+    if (side) Object.assign(f.a[side], { equity, free: equity });
+    const b = scanFixture(patch, f),
+      delta = ratioChanges(a, b);
+    assert.deepEqual([b.funding.lower, b.funding.upper], [lo, hi], label);
+    assert.ok(delta.changes.includes(label) && delta.theoryChanged && delta.intervalChanged, label);
+    if (['保护本金', 'Hype 权益'].includes(label)) assert.ok(delta.hChanged);
+  }
+});
+
+test('DYN04 仅变更参考 FX：quanto 单点、原生路径、实际比例、邻近方案与强平距离完全一致', () => {
+  const f = fixture();
+  f.m.hl.contract = {
+    ...unitContract('BTC', 'USDT', 'USDC'),
+    standardCryptoPerp: true,
+    settlement: 'quanto-1:1'
+  };
+  f.rates = { USDC: usdQuote('USDC', '1', '1', at), USDT: usdQuote('USDT', '1', '1', at) };
+  const a = scanFixture({}, f);
+  f.rates = { ...f.rates, USDT: usdQuote('USDT', '0.98', '0.98', at) };
+  const b = scanFixture({}, f);
+  assert.notEqual(a.priceComparison.diff, b.priceComparison.diff);
+  assert.ok(b.currencies.warnings.length);
+  assert.deepEqual(a.ratioScan.representative.row.paths, b.ratioScan.representative.row.paths);
+  assert.deepEqual(a.ratioScan.analysis.neighbors, b.ratioScan.analysis.neighbors);
+  assert.deepEqual(ratioChanges(a, b).changes, ['参考汇率']);
+});
+
+test('DYN05、DYN06 边界单组的精确见证，按半开区间只计入一个桶，各子集合计一致', () => {
+  const f = fixture();
+  f.a.hl.qty = '-2';
+  f.a.hl.currentMarginCredit = '20';
+  const scan = scanFixture({ mode: 'keepHL' }, f).ratioScan;
+  const b = scan.analysis.boundary;
+  assert.deepEqual([b.count, b.fraction, b.pf, b.hl], [1, '2/5', '5', '-2']);
+  assert.equal(ratioBin(scan.buckets, b), b.segment);
+  const edge = scan.buckets[b.segment].throughLots;
+  assert.equal(b.i * edge.j, b.j * edge.i);
+  const sums = {};
+  for (const key of ['legal', 'risk', 'protect', 'survive', 'both', 'failProfit', 'passProfit', 'profit']) {
+    sums[key] = scan.buckets.reduce((acc, x) => acc + x[key], 0);
+    assert.equal(sums[key], scan.sets[key].count, key);
+  }
+  // Exact sensitivity ratios also handle unequal multipliers and recurring percentages.
+  const m = structuredClone(scan.ctx.market);
+  m.pf.multiplier = '3';
+  assert.equal(exactRatio(m, '-5', '2'), '2/15');
+});
+
+test('DYN07 相邻目标来自同一方向最近合法数量网格，逐行复核现金、保证金、强平和去重', () => {
+  for (const mode of ['auto', 'keepHL']) {
+    const f = fixture();
+    if (mode === 'keepHL') {
+      f.a.hl.qty = '-2';
+      f.a.hl.currentMarginCredit = '20';
+    }
+    const scan = scanFixture({ mode }, f).ratioScan,
+      rep = scan.representative.row;
+    const rows = scan.analysis.neighbors,
+      axis = mode === 'keepHL' ? 'i' : 'j';
+    const lots = [];
+    for (let i = 1; i <= 10; i++)
+      for (let j = 0; j <= 6; j++) {
+        if (
+          (axis === 'i' ? rep.j !== j : rep.i !== i) ||
+          !ratioSlice(scan, rep.sign, i).some(([a, b]) => a <= j && j <= b)
+        )
+          continue;
+        lots.push(axis === 'i' ? i : j);
+      }
+    const k = lots.indexOf(rep[axis]);
+    assert.deepEqual(
+      rows.map((r) => r[axis]),
+      lots.slice(Math.max(0, k - 2), k + 3)
+    );
+    assert.equal(rows.filter((r) => r.center).length, 1);
+    assert.ok(rows.some((r) => !r.both) && rows.some((r) => r.both));
+    for (const row of rows) {
+      const check = inspectRatio(scan.ctx, row);
+      for (const field of [
+        'h',
+        'pf',
+        'hl',
+        'pfValue',
+        'hypeValue',
+        'fail',
+        'success',
+        'initial',
+        'imRate',
+        'buffer',
+        'failStop',
+        'passStop',
+        'both'
+      ])
+        assert.equal(row[field], check[field], field);
+    }
+  }
+});
+
+test('DYN 数量步长独立变化：理论不变，可行下界及自动代表 h 随实际数量变化', () => {
+  const a = scanFixture({ B: '177' }),
+    f = fixture();
+  f.m.hl.sizeDecimals = 1;
+  const b = scanFixture({ B: '177' }, f),
+    c = ratioChanges(a, b);
+  assert.ok(!c.theoryChanged && c.hChanged && c.intervalChanged && c.changes.includes('数量网格'));
+  assert.deepEqual([a.ratioScan.representative.row.h, b.ratioScan.representative.row.h], ['0.6', '0.57']);
 });
