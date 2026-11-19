@@ -10,6 +10,8 @@ Funded 阶段自动显示目标可分金额、全额到账条件现金与已确�
 
 切换「资金来源」到「当前账户快照」可使用手工录入、VS 只读桥接或 Hype 公开地址。权益、持仓与可用保证金分别检查确认时间。快速空仓按钮会同时确认两个账户均为全仓、空仓且无挂单。只知道某个合约空仓时，单独填该合约数量 0。个人保护资金和 Hype 可用抵押品在首页分别列出来源。规划参数与实际快照独立保存。
 
+汇率专项复验可运行 `npm run test:hedge:fx`。要测试已经启动的 4181 工作台，可在命令前指定 `CURRENT_URL=http://127.0.0.1:4181`。
+
 ## 本地启动
 
 已安装依赖的 T9 工程可直接运行下列命令，或双击「打开匹配器.command」。服务绑定本机。新检出需要 Node.js 22 或更高版本，先运行 `npm ci`。
@@ -52,7 +54,8 @@ VS 也可通过“数据连接 → 从 VS 页面只读推送当前快照”配�
 ## 行情与验证范围
 
 - Vest BTC、ETH、SOL 使用对应 `-PERP` 的公开 ticker、depth 和 exchangeInfo。Hyperliquid 标记价和档位来自主网 Info，五档盘口优先使用官方 WebSocket 的 l2Book，起始连接和重连时可使用新鲜的 REST 盘口。标记价记录 REST 请求时间，盘口记录交易所事件时间，两者分别检查时效。[官方 WebSocket 订阅](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions)黄金、指数的真实标的和合约映射待核实，仍可先查看资金区间。
-- 两边的收益以 USDC 计。Hype 的上述合约按 USDT 报价，1 个本币价格单位的线性盈亏按 USDC 结算。共同价格变动通过 USDC/USD 和 USDT/USD 市场汇率对齐。页面显示现货交易所及时间，也支持有时效的手工汇率。[Hype 合约规格](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/contract-specifications)
+- 工作台以 USDC 为资金账本单位。两侧原生 Mark 与成交盘口分别标注报价币。高级连接详情列出标的、报价币、结算币、乘数、元数据来源、美元现货 Bid/Ask 和源时间。双方报价币相同就直接相减；跨币种将 Hype Mark 乘以「每个 Hype 报价币对应的 Vest 报价币数」。买入换算用卖一，卖出换算用买一。标的共同变动反向映射到各自原生价格轴；盈亏和费用按实际合约结算。行情、FX 与账户在同一快照中重算。
+- Vest BTC-PERP 的 `exchangeInfo` 返回 BTC / USDC；官方规格说明 USDC 结算、线性 1:1。Hyperliquid 标准永续 BTC 的 `metaAndAssetCtxs` 提供市场代码和抵押币索引，`spotMeta` 核对结算币。官方规格列明其价格以 USDT 计价，每数值点盈亏按 USDC 1:1 结算。接口直接声明的报价币优先使用；报价或结算币无法核实时显示 `QUOTE_CURRENCY_UNVERIFIED`。必要 FX 超过盘口有效期、断连或无来源时撤回仓位。脱锚报警阈值默认 50 bp，可在资金规则中修改；美元估值偏离独立显示。历史手工无方向汇率不会参与计算。[Vest 合约规格](https://docs.vestmarkets.com/platform/perpetual-contract-specifications) · [Hyperliquid 合约规格](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/contract-specifications)
 - 报价、汇率、账户分别检查时效。公开行情中断保留最近读数，调整量暂停。只有可比对的线性合约使用精确数量计算。默认费率为用户情景；保证金模式、其他持仓与挂单占用、账户实际杠杆或完整规则未核实时，数量只作为条件测算。公开地址接口分开读取持仓和未成交订单，不用可转出金额替代可开仓额度。[只读账户与订单接口](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint)
 - `npm test` 运行数学与业务回归，`npm run test:hedge:browser` 打开隔离的真实 Chrome 并访问主网完成 R 验收，`npm run test:hedge:live` 独立检查 Hype REST 和 WebSocket。真实浏览器验收需要网络；公开金库与手工验算数据均独立于个人账户。原模拟和回放回归可用 `npm run test:hedge:internal` 运行。[开发文档 1.2](docs/vest-hype-dynamic-hedge-codex-spec.md) · [实测报告](docs/current-acceptance.md)
 

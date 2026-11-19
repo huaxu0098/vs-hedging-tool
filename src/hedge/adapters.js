@@ -1,4 +1,5 @@
 import { dec, out, positive, nonnegative } from './math.js';
+import { hypeContract } from './contract-currencies.js';
 import { iso } from './book.js';
 import { parseVSText } from '../vs-parser.js';
 const check = (ok, code) => {
@@ -228,6 +229,7 @@ export async function collectHype({ symbol, user = '', now = Date.now(), request
     marginTables: meta[0].marginTables,
     marginTableId: spec.marginTableId,
     collateralToken: meta[0].collateralToken,
+    contract: hypeContract(spec, dex, meta[0].collateralToken),
     source: 'api',
     unresolved: ['PF_RULES', 'FX', 'CANDIDATE_MARGIN']
   };

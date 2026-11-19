@@ -1,5 +1,18 @@
 # 实时双平台动态对冲工作台验收记录
 
+## 2026-11-20 第 0.18 节 · 报价币、方向与结算
+
+**根因。** 旧工作台针对每个品种使用 `USD_per_USDC / USD_per_USDT`，再以 Hype Mark 除以该比率；手工数值也可覆盖它。这条路径只适用于特定报价币组合。原始合约元数据和方向没有出现在价差旁，资金计算也固定使用这套映射。现在每帧从两个合约分别导出「Hype 报价 → Vest 报价」「Vest 标的价格变动 → Hype 原生价格变动」「每原生报价点 → USDC 资金账本」；每一条均有方向。旧手工比率已撤销。
+
+**真实合约证据。** 本次主网 Vest `exchangeInfo` 给出 BTC-PERP、base BTC、quote USDC；结算规则为 USDC 线性、乘数 1。Hyperliquid 主网标准永续 `metaAndAssetCtxs` 给出市场 BTC 和 collateralToken 0；`spotMeta` 将 0 解析为 USDC。该市场元数据没有独立的报价币字段。官方合约规格规定该 BTC 永续以 USDT 报价，每个原生价格点的损益以 USDC 数值 1:1 结算。工作台将接口值与合约规则的出处分别列出；字段与规则不足时停算。[Vest 合约规格](https://docs.vestmarkets.com/platform/perpetual-contract-specifications) · [Hyperliquid 合约规格](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/contract-specifications)
+
+**实际浏览器。** 在 4181 打开 Chrome，从 BTC 切到 ETH，再切回 BTC，逐帧独立复算 Mark 与两个成交方向。2026‑11‑20 01:57:45.033（上海）快照 `AUTO-0.18 / fac6cea4a286445c` 中，Vest Mark 为 62,738 USDC，Hype Mark 为 62,728 USDT。Bitstamp 的 USD_per_USDC 买一 / 卖一为 0.99980 / 0.99983，USD_per_USDT 为 0.99884 / 0.99885。统一 Mark 差为 `62728 × (0.998845 / 0.999815) − 62738 = −70.857 USDC`（取三位小数）。卖 Hype 买 Vest、买 Hype 卖 Vest 的顶档差分别为 −74.60831、−70.90162 USDC/BTC。本次 BTC 规划快照扫描 1,068,570,956 组可结算仓位。代表方案为 PF 多 0.111 BTC（6,963.92 U），Hype 空 0.01705 BTC（1,069.51 U），条件失败回收 500.0028 U，条件通过剩余 100.0057 U；该帧无双端净盈利比例。[币种与主网同帧记录](../../../deliverables/vs-hedging-tool/fx-section018-live.json) · [完整双路径浏览器回归](../../../deliverables/vs-hedging-tool/fx-section018-paths.json)
+
+- **FX01—FX04 通过。** 同为 USDC 的两条腿用原始价格；Vest 为 USD 时使用 USD_per_USDC；Vest 为 USDT 时用两份美元盘口相除得到 USDT_per_USDC。独立测试验证反向汇率交换买卖侧取倒数，倒置标签的供应商数据被拒绝。
+- **FX05—FX07 通过。** 缺任一侧报价或结算币返回 `QUOTE_CURRENCY_UNVERIFIED`，必要汇率过期返回 `FX_STALE`。浏览器对这两个异常注入故障，验证旧仓位与区间立即撤下，恢复真实行情后重新生成。离线脱锚测试按 USDC 的实际参考价 0.97 USD 估值。仅改变 FX、保持标的盘口与账户不变，也会改变输入版本，重新计算两端账本、成本、仓位、比例和风险。
+- **FX08—FX10 通过。** 双向顶档差按各自 Bid/Ask 和有方向的 FX Bid/Ask 计算。不同乘数、同名不同标的、未知数量单位、USDT 计价而每点支付 USDC 的结构分别做了数值验证。截图若两侧均为 USDC，结果为 −31.70 USDC/BTC；若 Vest 报 USD、Hype 报 USDC，且 USD_per_USDC 确认为 1.000841，则为 +21.147599 USD/BTC。0.0001 U 的回收余量在极薄缓冲规则内。
+- 全库 **304/304** 自动化测试通过，零跳过；FX 专项和双路径真实浏览器回归通过。运行使用本金 500 U、报名费 91 U、Hype 409 U 的预设资金。真实账户权益、已有持仓、实际成交滑点、用户专属费用及未来脱锚幅度未核实，页面保留 `AUTO_PARTIAL`。现货中间价用于估值，方向性顶档价差为参考，系统没有执行换汇或交易。
+
 ## 2026-11-20 第 0.17 节 · 自动扫描与双路径现金
 
 真实 Chrome 在 4181 首次打开工作台，收到 Vest 与 Hyperliquid 主网 BTC 盘口后自动计算。快照 `AUTO-0.17 / 7522adddce5b9eed` 的 Vest 买一 / 卖一为 62,644.10 / 62,644.40（01:02:42.887），Hyperliquid 为 62,626.00 / 62,627.00（01:02:42.061）。两侧各自保留源时间。本次使用预设空仓规划，个人本金 500 U，扣除 91 U 报名费后 Hype 权益 409 U，外部到账 0 U。PF 权益 10,000 U，失败线 9,400 U，通过线 12,000 U，成功端 Hype 最低留存 100 U。[浏览器逐帧记录与同帧复算](../../../deliverables/vs-hedging-tool/autosel-section017.json)

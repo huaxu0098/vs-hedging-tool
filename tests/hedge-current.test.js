@@ -1,3 +1,4 @@
+import { unitContract } from '../fixtures/hedge-currency-contracts.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { rules, calculateCurrent, remainingOrder } from '../src/hedge/current.js';
@@ -11,10 +12,11 @@ const q = { mark: '63000', asOf: at, levels: depth };
 const market = {
   asset: 'BTC',
   pf: { ...q, symbol: 'BTC-PERP', open: true },
-  hl: { ...q, symbol: 'BTC', sizeDecimals: 5, collateralToken: 0 },
+  hl: { ...q, symbol: 'BTC', contract: unitContract('BTC'), sizeDecimals: 5, collateralToken: 0 },
   spec: {
     symbol: 'BTC-PERP',
     base: 'BTC',
+    contract: unitContract('BTC-PERP'),
     quote: 'USDC',
     sizeDecimals: 4,
     capitalInitMarginRatio: '0.04',
@@ -22,7 +24,7 @@ const market = {
     maintMarginRatio: '0.01'
   }
 };
-const r = { ...rules, mode: 'keepPF', fx: '1', fxAt: at };
+const r = { ...rules, mode: 'keepPF' };
 const calc = (profile = r, a = accounts, m = market, time = t) => calculateCurrent(profile, a, m, {}, time);
 test('当前权益独立给出区间，仓位留空与显式零有不同语义', () => {
   const x = calc(r, { pf: { at, equity: '10000' }, hl: { at, equity: '409' } }, {});

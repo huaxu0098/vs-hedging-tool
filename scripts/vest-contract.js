@@ -1,3 +1,4 @@
+import { vestContract } from '../src/hedge/contract-currencies.js';
 const infoURL = 'https://api-gateway.hz.vestmarkets.com/v3/exchangeInfo';
 let inflight;
 let symbols;
@@ -16,8 +17,7 @@ export async function readVestSpecs(symbol) {
         if (!Array.isArray(data.symbols)) throw Error('Vest 合约列表不完整。');
         const parsed = new Map();
         for (const item of data.symbols) {
-          if (typeof item.symbol === 'string' && typeof item.quote === 'string' && item.quote.length > 0)
-            parsed.set(item.symbol, item);
+          if (typeof item.symbol === 'string') parsed.set(item.symbol, item);
         }
         obtainedAt = new Date().toISOString();
         symbols = parsed;
@@ -28,10 +28,10 @@ export async function readVestSpecs(symbol) {
     await inflight;
   }
   const spec = symbols.get(symbol);
-  return spec ? { ...spec, obtainedAt } : null;
+  return spec ? { ...spec, contract: vestContract(spec), obtainedAt } : null;
 }
 
 export async function readVestContract(symbol) {
   const item = await readVestSpecs(symbol);
-  return item ? { symbol: item.symbol, quote: item.quote } : null;
+  return item?.contract.quoteAsset ? { symbol: item.symbol, quote: item.contract.quoteAsset } : null;
 }

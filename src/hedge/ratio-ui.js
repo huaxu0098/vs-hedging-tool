@@ -114,12 +114,12 @@ function showRepresentative(scan, result, plan) {
       (row.sign > 0 ? '多 ' : '空 ') +
       usd(row.pfValue) +
       '（数量 ' +
-      row.pf +
+      row.pf + ' ' + (scan.ctx.market.pf.unit === 'contract' ? '张' : scan.ctx.market.pf.unit) +
       '） · Hype ' +
       (row.j === 0 ? '空仓 ' : row.sign > 0 ? '空 ' : '多 ') +
       usd(row.hypeValue) +
       '（数量 ' +
-      row.hl +
+      row.hl + ' ' + (scan.ctx.market.hl.unit === 'contract' ? '张' : scan.ctx.market.hl.unit) +
       '）' +
       (objective === 'diagnostic' ? ' · ' + (names[group] ?? '通过保证金检查') : '') +
       (!complete && objective !== 'diagnostic' ? ' · 当前覆盖内的方案' : '')
@@ -142,7 +142,7 @@ function showRepresentative(scan, result, plan) {
           '（相对保护基准 ' +
           bufferRate +
           '）' +
-          (thin ? ' · 极薄缓冲' : '') +
+          (thin ? ' · 极薄缓冲（几乎零缓冲）' : '') +
           (thin && stressIncomplete
             ? result.stress.positive.length
               ? '，已配置情景刚好覆盖，完整压力未验证'
@@ -384,18 +384,24 @@ export function renderScan(result, m, r, plan, status) {
     ['hl', 'Hype']
   ]) {
     const q = m[key];
+    const c = result.currencies?.[key];
+    write('scan-' + key + '-unit', c?.quoteAsset && c?.baseAsset ? c.quoteAsset + '/' + c.baseAsset : '报价币待核实');
     write('scan-' + key + '-price', q?.mark == null ? '—' : fmt(q.mark));
     write(
       'scan-' + key + '-quote',
       q?.levels
-        ? '买 ' + fmt(q.levels[0]?.[0]?.[0]) + ' / 卖 ' + fmt(q.levels[1]?.[0]?.[0]) + ' · ' + time(q.asOf)
+        ? '买 ' + fmt(q.levels[0]?.[0]?.[0]) + ' / 卖 ' + fmt(q.levels[1]?.[0]?.[0]) + ' · ' + time(q.asOf) +
+          (c?.settleAsset ? ' · ' + c.settleAsset + ' 结算' : '')
         : title + ' 等待盘口'
     );
   }
-  const factor = result.ratioScan?.ctx.market.hl.factor;
-  const diff = m.pf?.mark && m.hl?.mark && factor ? dec(m.hl.mark).div(factor).minus(m.pf.mark) : null;
-  write('scan-basis', diff ? fmt(diff, 3) + ' / ' + pct(diff.div(m.pf.mark)) : '待换汇核对');
-  write('scan-clock', (m.source ?? '等待来源') + (factor ? ' · 价格换算系数 ' + fmt(factor, 6) : ''));
+  const map = result.currencies, comp = result.priceComparison;
+  write('scan-basis', comp ? fmt(comp.diff, 3) + ' ' + map.pf.quoteAsset + ' / ' + pct(comp.fraction) :
+    (map?.error?.split(' · ')[0] ?? '等待有效快照'));
+  const tr = result.trace;
+  write('scan-clock', [m.source, comp && (comp.raw != null ? '同报价币直接相减' : map.hypeToVest.name + ' × ' + fmt(map.hypeToVest.mid, 8)),
+    ...(map?.warnings ?? []), tr && ('快照 ' + tr.id + ' · ' + time(tr.at)),
+    !tr && '本帧重算中'].filter(Boolean).join(' · '));
   const f = result.funding;
   write(
     'scan-capital',

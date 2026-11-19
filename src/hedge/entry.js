@@ -110,7 +110,7 @@ const ruleFields = {
   quoteSkewMs: '行情最大时间差（毫秒）',
   accountSkewSecs: '账户快照最大时间差（秒）',
   rebalanceSteps: '最小调仓变动（两边各自数量步长，0 为关闭）',
-  fx: '手工 USDC/USDT 汇率（选填）'
+  depegAlertBps: '稳定币偏离美元告警阈值（基点）'
 };
 const legFields = {
   maxQty: '平台另设总数量上限（如有）',
@@ -189,8 +189,8 @@ function market() {
     asset: asset(),
     source: '手工确认盘口',
     pf: manualPrices?.pf,
-    hl: manualPrices?.hl,
-    errors: { spec: feed.errors?.spec }
+    hl: manualPrices?.hl && { ...feed.hl, ...manualPrices.hl, contract: feed.hl?.contract },
+    errors: { spec: feed.errors?.spec ?? (feed.errors?.hl ? 'Hype 合约规格当前未核实' : null) }
   };
 }
 function account(side) {
@@ -446,7 +446,9 @@ function currentFrame(a, m, t) {
     m.hl.marginTiers,
     m.hl.maxLeverage,
     m.hl.sizeDecimals,
-    m.hl.onlyIsolated
+    m.hl.onlyIsolated,
+    m.hl.contract,
+    rates
   ]);
   const key = JSON.stringify([context, m, rates]);
   if ((running && running.context !== context) || (completed && completed.context !== context)) cancelAuto();
@@ -687,8 +689,8 @@ function renderFunding(result, a, m, plan) {
       exitNominal: '平仓计费名义额（U）',
       rate: '单边费率',
       multiplier: '合约乘数',
-      fx: '结算币兑 U',
-      factor: '共同价格变动映射系数',
+      fx: '每原生报价点的 USDC 账本价值（单位标的）',
+      factor: '原生报价变动 / 每单位 Vest 报价变动',
       step: '数量步长'
     }))
       rows.push(cellRow([label, ...cols.map((x) => x?.[field] ?? '—')]));
@@ -1745,8 +1747,8 @@ function render() {
                   dec(delta)
                     .abs()
                     .times(String(m[s].mark))
-                    .times(String((s === 'pf' ? m.spec : m.hl)?.contractMultiplier ?? '1'))
-                    .times(String((s === 'pf' ? m.spec : m.hl)?.settlementToUSDC ?? '1'))
+                    .times(result.currencies.legs[s].multiplier)
+                    .times(result.currencies.legs[s].pointToLedger.mid)
                 )
               )
             : ''),
@@ -1936,27 +1938,46 @@ function render() {
         : '') +
       (quoteError ? ' ｜ ' + quoteError : '')
   );
-  const frameRates = result.calculationRates ?? rates;
-  put(
-    'fx-source',
-    '共同价格因子按 USDC/USDT 折算 · ' +
-      (r.fx && fresh(r.fxAt, Date.now(), Number(r.accountSecs) * 1000)
-        ? '手工 ' + r.fx + ' · ' + clock(r.fxAt)
-        : ['USDC', 'USDT']
-            .map(
-              (k) =>
-                k +
-                '/USD ' +
-                (frameRates[k]
-                  ? fmt(String(frameRates[k].rate), 6) +
-                    ' ' +
-                    frameRates[k].source +
-                    ' ' +
-                    clock(frameRates[k].asOf)
-                  : '未取得')
-            )
-            .join(' ｜ '))
-  );
+  const currencies = result.currencies;
+  const fxRows = [];
+  for (const [k, name] of [['pf', 'Vest'], ['hl', 'Hyperliquid']]) {
+    const c = currencies?.[k];
+    if (c) fxRows.push(name + ' ' + c.symbol + ' · 标的 ' + (c.baseAsset ?? '未知') +
+      ' · 报价 ' + (c.quoteAsset ?? '未知') + ' · 结算 ' + (c.settleAsset ?? '未知') +
+      ' · 每数量单位 ' + (c.contractMultiplier ?? '未知') + ' ' + (c.baseAsset ?? '') +
+      ' · ' + (c.settlement === 'quanto-1:1' ? '每个报价点按 1 个结算币记账' : '线性') +
+      ' · ' + c.source + (c.collateralEvidence ? ' · spotMeta 抵押币索引 ' +
+        c.collateralEvidence.index + ' = ' + c.collateralEvidence.name : ''));
+  }
+  for (const [asset, q] of Object.entries(currencies?.spots ?? {}))
+    fxRows.push('USD_per_' + asset + ' · ' + (q.error || ('买 ' + q.bid + ' / 卖 ' + q.ask +
+      ' · ' + q.source + ' ' + q.asOf + ' · 本帧有效，年龄 ' +
+      Math.max(0, (Date.parse(result.trace?.at) || Date.now()) - Date.parse(q.asOf)) + ' ms · 偏离 1 USD 为 ' + fmt(q.deviationBps, 2) + ' bp')));
+  const spot = currencies?.hypeToVest, px = result.priceComparison;
+  if (px && spot) {
+    fxRows.push('原始 Mark · ' + (px.raw == null ? '不同报价币，不能直接相减' : px.raw + ' ' + spot.to) +
+      '。统一 Mark · ' + m.hl.mark + ' × ' + fmt(spot.mid, 9) + ' ' + spot.name + ' − ' + m.pf.mark + ' = ' +
+      fmt(px.diff, 5) + ' ' + spot.to);
+    fxRows.push('顶档成交价差（Hype − VS）· PF 多 / Hype 空开仓、反向平仓 ' + fmt(px.sellHypeBuyVest, 5) +
+      '；PF 空 / Hype 多开仓、反向平仓 ' + fmt(px.buyHypeSellVest, 5) + ' ' + spot.to +
+      ' · 换汇买 / 卖 ' + fmt(spot.bid, 8) + ' / ' + fmt(spot.ask, 8) + ' ' + spot.name);
+    fxRows.push('共同标的每变动 1 ' + spot.to + '，Hype 报价变动 ' +
+      fmt(currencies.vestMoveToHype.mid, 9) + ' ' + spot.from + '。双边按各自盘口成交，U 账本单位为 USDC。');
+  }
+  const dollarMark = currencies?.spots?.USDC;
+  if (dollarMark?.mid && result.cash.hl != null) {
+    const fiat = dec(result.cash.hl).times(dollarMark.mid);
+    fxRows.push('独立汇率情景 · 固定币数与标的报价，Hype 当前 ' + fmt(result.cash.hl) +
+      ' USDC 按此现货值 ' + fmt(fiat, 4) + ' USD，与 1 USD 平价相差 ' +
+      fmt(fiat.minus(result.cash.hl), 4) + ' USD。');
+  }
+  const row = result.ratioScan?.representative?.row;
+  if (dollarMark?.mid && row && !row.failStop && !row.passStop)
+    fxRows.push('若本帧 USDC/USD 保持至平仓，失败端个人资金折合 ' +
+      fmt(dec(row.fail).times(dollarMark.mid), 4) + ' USD，通过端折合 ' +
+      fmt(dec(row.successPersonal).times(dollarMark.mid), 4) + ' USD。两端 U 账本保留 USDC 口径。');
+  if (currencies?.error) fxRows.push(currencies.error);
+  put('fx-source', fxRows.join('\n') || '等待合约与报价元数据');
   put(
     'sync-status',
     useAPI()
@@ -2007,7 +2028,7 @@ async function refreshMarket() {
     quoteError = '本地行情连接断开';
     feed = { ...feed, errors: { ...feed.errors, pf: quoteError, hl: quoteError } };
   }
-  if (res[1].status === 'fulfilled') rates = res[1].value.rates ?? {};
+  rates = res[1].status === 'fulfilled' ? res[1].value.rates ?? {} : {};
   render();
   quoteTimer = setTimeout(pollNextMarket, 1250);
 }
@@ -2282,7 +2303,6 @@ for (const k of [
       r.externalFxAt = null;
       $('externalFx').value = '';
     }
-    if (k === 'fx') r.fxAt = now();
 
     save();
     render();
@@ -2562,12 +2582,11 @@ setInterval(() => {
       Object.values(local()[k].origins ?? {}).map((meta) => fresh(meta.at, t, Number(r.accountSecs) * 1000))
     ),
     !!r.deadline && Date.parse(r.deadline) <= t,
-    fresh(r.fxAt, t, Number(r.accountSecs) * 1000),
     fresh(r.externalAt, t, Number(r.accountSecs) * 1000),
     ...['pf', 'hl'].flatMap((k) =>
       ['equity', 'qty', 'free'].map((f) => fresh(fieldTime(account(k), f), t, Number(r.accountSecs) * 1000))
     ),
-    ...['USDC', 'USDT'].map((k) => fresh(rates[k]?.asOf, t, 60000))
+    ...['USDC', 'USDT'].map((k) => fresh(rates[k]?.asOf, t, Number(r.quoteSecs) * 1000))
   ].join('/');
   if (next !== quality) {
     quality = next;

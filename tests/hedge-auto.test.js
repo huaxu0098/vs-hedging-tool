@@ -1,3 +1,4 @@
+import { unitContract, usdQuote } from '../fixtures/hedge-currency-contracts.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -17,8 +18,6 @@ const at = '2026-11-19T12:00:00Z',
   t = Date.parse(at);
 const inputs = {
   ...rules,
-  fx: '1',
-  fxAt: at,
   deadline: '2026-11-20T12:00:00Z',
   B: '160',
   investedCapital: '160',
@@ -45,6 +44,7 @@ function fixture() {
         ...q,
         symbol: 'BTC',
         sizeDecimals: 0,
+        contract: unitContract('BTC'),
         collateralToken: 0,
         maxLeverage: 10,
         maxQty: '6',
@@ -53,6 +53,7 @@ function fixture() {
       spec: {
         symbol: 'BTC-PERP',
         base: 'BTC',
+        contract: unitContract('BTC-PERP'),
         quote: 'USDC',
         sizeDecimals: 0,
         maxQty: '10',
@@ -62,7 +63,7 @@ function fixture() {
     }
   };
 }
-const calc = (r = {}, f = fixture(), time = t) => calculateCurrent({ ...inputs, ...r }, f.a, f.m, {}, time);
+const calc = (r = {}, f = fixture(), time = t) => calculateCurrent({ ...inputs, ...r }, f.a, f.m, f.rates ?? {}, time);
 test('AUTO01 auto 默认联合搜索两边空仓的最大 PF 名义额', () => {
   const x = calc();
   assert.equal(inputs.mode, 'auto');
@@ -87,9 +88,10 @@ test('AUTO03 减少 Hype 抵押品限制最大可行规模', () => {
 });
 test('AUTO04 不同乘数、结算折算及价格因子以敏感度归一', () => {
   const f = fixture();
-  f.m.spec.contractMultiplier = '2';
-  f.m.hl.settlementToUSDC = '0.8';
-  const x = calc({ fx: '1.25' }, f),
+  f.m.spec.contract.contractMultiplier = '2';
+  f.m.hl.contract = unitContract('BTC', 'USD');
+  f.rates = { USDC: usdQuote('USDC', '1.25', '1.25', at) };
+  const x = calc({}, f),
     c = x.candidate;
   assert.ok(c);
   assert.equal(c.actualRatio, out(dec(c.hlTargetQuantity).abs().div(dec(c.vsTargetQuantity).abs().times(2))));
@@ -580,7 +582,7 @@ test('LEV08 按合法最终数量重算档位与清算，跨边界复核', () =>
     { lowerBound: '400', maxLeverage: 6 }
   ];
   f.m.hl.sizeDecimals = 0;
-  f.m.hl.contractMultiplier = '2';
+  f.m.hl.contract.contractMultiplier = '2';
   const x = calc({}, f);
   assert.ok(x.candidate);
   for (const c of x.top) {
@@ -736,7 +738,7 @@ test('OPT02 搜索范围记录双边方向、步长和数量上限，预算中�
   const partial = calculateCurrent(inputs, f.a, f.m, {}, t, { searchBudget: 1 });
   assert.equal(partial.search.complete, false);
   assert.ok(!partial.maximum?.complete);
-  assert.equal(full.trace.model, 'AUTO-0.17');
+  assert.equal(full.trace.model, 'AUTO-0.18');
 });
 test('OPT03 PF 虚拟保证金、目标 Hype 初始、其他占用及调仓后真实可用分别核验', () => {
   const f = fixture();
@@ -1058,7 +1060,7 @@ test('FORM14 触及边界停止普通求解，达标仍待扣费净结算', () =
   const f = fixture();
   f.a.pf.equity = '1100';
   f.a.pf.qty = '2';
-  f.m.spec.contractMultiplier = '2';
+  f.m.spec.contract.contractMultiplier = '2';
   const x = calc({ pfFee: '0.01' }, f);
   assert.equal(x.settlePF, '1096');
   assert.match(x.notices.join(), /净结算尚待确认/);
@@ -1134,7 +1136,7 @@ test('SNAP01 八项资金规则或权益改变均产生新快照，候选和流�
 
 function scanFixture(overrides = {}, f = fixture()) {
   f.m.spec.fundedInitMarginRatio ??= '0.1';
-  return calculateCurrent({ ...inputs, ...overrides }, f.a, f.m, {}, t, { scanRatios: true });
+  return calculateCurrent({ ...inputs, ...overrides }, f.a, f.m, f.rates ?? {}, t, { scanRatios: true });
 }
 test('RANGE01 修改六个资金条件使比例集合与仓位风险随同一快照重算', () => {
   const x = scanFixture({});
@@ -1220,9 +1222,10 @@ test('RANGE03 / AUTOSEL08 小网格逐点穷举对照整段扫描，方向、现
     if (['tier', 'combined'].includes(variant))
       f.m.hl.marginTiers.push({ lowerBound: '350', maxLeverage: 5 });
     if (variant === 'combined') {
-      f.m.spec.contractMultiplier = '1.5';
-      f.m.hl.settlementToUSDC = '0.95';
-      Object.assign(r, { fx: '1.07', external: '80', externalAt: at });
+      f.m.spec.contract.contractMultiplier = '1.5';
+      f.m.hl.contract = { ...unitContract('BTC', 'USDT', 'USD'), settlement: 'quanto-1:1' };
+      f.rates = { USDC: usdQuote('USDC', '1.05', '1.05', at), USDT: usdQuote('USDT', '0.98', '0.98', at) };
+      Object.assign(r, { external: '80', externalAt: at });
     }
     if (variant === 'funded') Object.assign(r, { stage: 'funded', fundedTarget: '1100', fundedFloor: '900' });
     const s = scanFixture(r, f).ratioScan;
@@ -1278,10 +1281,11 @@ test('RANGE03 / AUTOSEL08 小网格逐点穷举对照整段扫描，方向、现
       profit: s.sets.profit,
       ...Object.fromEntries(s.buckets.map((b, n) => ['bin' + n, b]))
     })) {
+      const lower = key.startsWith('bin') ? s.buckets[Number(key.slice(3)) - 1]?.throughLots : null;
       const rows = verifiedRows.filter((row) =>
         key.startsWith('bin')
-          ? (set.above == null || dec(row.h).gt(set.above)) &&
-            (set.through == null || dec(row.h).lte(set.through))
+          ? (!lower || row.j * lower.i > lower.j * row.i) &&
+            (!set.throughLots || row.j * set.throughLots.i <= set.throughLots.j * row.i)
           : row[{ protect: 'covers', survive: 'survives', both: 'both', profit: 'profitable' }[key]]
       );
       const range = set.range;

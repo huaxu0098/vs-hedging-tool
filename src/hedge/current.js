@@ -15,6 +15,7 @@ import { auditCross } from './cross-check.js';
 import { adjustmentTarget, comparePlans } from './optimization.js';
 import { settlementBridge, sumPostings } from './settlement-ledger.js';
 import { solveAuto } from './auto.js';
+import { currencyMapping, comparePriceBooks, conversionBook } from './quote-currencies.js';
 import { calculationTrace } from './trace.js';
 import {
   solve,
@@ -99,6 +100,7 @@ export const rules = {
   delayBps: '',
   fundingDebit: '',
   quoteSecs: '5',
+  depegAlertBps: '50',
   quoteSkewMs: '3000',
   accountSkewSecs: '120',
   rebalanceSteps: '2',
@@ -176,20 +178,17 @@ function hlTiers(tiers) {
   return normalized;
 }
 
-function buildMarket(data, r, a, fx) {
+function buildMarket(data, r, a, currencies) {
   const { pf, hl, spec, asset } = data;
   if (
     !pf ||
     !hl ||
     !spec ||
     !['BTC', 'ETH', 'SOL'].includes(asset) ||
-    spec.base !== asset ||
-    spec.symbol !== asset + '-PERP' ||
+    spec.symbol !== currencies.pf.symbol ||
     pf.symbol !== spec.symbol ||
-    hl.symbol !== asset ||
-    spec.quote !== 'USDC' ||
-    [spec, hl].some((l) => l.payoffType != null && l.payoffType !== 'linear') ||
-    hl.collateralToken !== 0
+    hl.symbol !== currencies.hl.symbol ||
+    [spec, hl].some((l) => l.payoffType != null && l.payoffType !== 'linear')
   )
     return null;
   const market = { id: asset };
@@ -216,15 +215,16 @@ function buildMarket(data, r, a, fx) {
     market[key] = {
       symbol: q.symbol,
       underlying: asset,
-      unit: asset,
+      unit: (isPF ? currencies.pf : currencies.hl).quantityUnit,
       type: 'linear',
       mappingVerified: true,
-      multiplier: out(positive(String((isPF ? spec : hl).contractMultiplier ?? '1'))),
-      fx: out(positive(String((isPF ? spec : hl).settlementToUSDC ?? '1'))),
-      factor: isPF ? '1' : fx,
+      multiplier: currencies.legs[key].multiplier,
+      fx: currencies.legs[key].pointToLedger.mid,
+      // Native price movement per unit change of the common (Vest quote) price.
+      factor: isPF ? '1' : currencies.vestMoveToHype.mid,
       step,
       minQty: out(positive(String((isPF ? spec : hl).minQty ?? step))),
-      minNotional: out(nonnegative(String((isPF ? spec : hl).minNotional ?? (isPF ? '0' : '10')))),
+      minNotional: out(nonnegative(String((isPF ? spec : hl).minNotional ?? (isPF ? '0' : '10'))).times(currencies.legs[key].settleToLedger.mid)),
       mark: out(positive(String(q.mark))),
       open: isPF ? pf.open : true,
       bids: q.levels[0],
@@ -247,7 +247,10 @@ function buildMarket(data, r, a, fx) {
           ? [{ from: '0', mmr: spec.maintMarginRatio, deduction: '0' }]
           : isPF
             ? null
-            : hlTiers(hl.marginTiers),
+            : hlTiers(hl.marginTiers)?.map(t => ({ ...t,
+                from: out(dec(t.from).times(currencies.legs.hl.settleToLedger.mid)),
+                deduction: out(dec(t.deduction).times(currencies.legs.hl.settleToLedger.mid))
+              })) ?? null,
       utilization: out(utilization),
       reserve: isPF ? '0' : out(nonnegative(r.R_free)),
       maxQty: limits.length ? out(limits.reduce((a, b) => (a.lt(b) ? a : b))) : null,
@@ -381,12 +384,14 @@ function heldOutcomes(book, market, p, pf, hl) {
 
 // An old R was entered as a success-path reserve. The new collateral floor is independent.
 export function splitReserves(saved = {}) {
-  const { R, scanEndpoint: obsoletePath, ...rest } = saved;
+  const { R, scanEndpoint: obsoletePath, fx: obsoleteRatio, fxAt: obsoleteRatioTime, ...rest } = saved;
   return { ...rest, R_success: rest.R_success ?? R ?? rules.R_success, R_free: rest.R_free ?? rules.R_free };
 }
 export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(), options = {}) {
   r = splitReserves(r);
   const result = computeCurrent(r, a, data, fxData, now, options);
+  if (result.autoStatus === 'AUTO_FEASIBLE' && result.currencies?.warnings.length)
+    result.autoStatus = 'AUTO_PARTIAL';
   if (result.ratioScan) attachRepresentative(result, r);
   result.missingFields = [];
   const add = (id, label) => {
@@ -508,6 +513,8 @@ function computeCurrent(r, a, data, fxData, now, options) {
   const clocks = Object.fromEntries(['pf', 'hl'].map((k) => [k, quoteClock(data[k], now, ages)]));
   const quoteOK = (k) => clocks[k].ok && !data.errors?.[k];
   const usable = (k, field) => !a[k].error && (planning || fresh(fieldTime(a[k], field), now, ttl));
+  const currencies = result.currencies = currencyMapping(data, fxData, now, ages, r.depegAlertBps ?? rules.depegAlertBps);
+  result.notices.push(...currencies.warnings);
   result.inputGaps = [];
   const quotes = ['pf', 'hl']
     .flatMap((k) => [clocks[k].bookAt, clocks[k].markAt])
@@ -557,6 +564,9 @@ function computeCurrent(r, a, data, fxData, now, options) {
   };
   if (result.timing.quoteSkew > result.timing.quoteLimit)
     issues.push('双边盘口或标记时间差超过阈值，行情熔断');
+  if (currencies.ok && quoteOK('pf') && quoteOK('hl') && !data.errors?.spec &&
+      result.timing.quoteSkew <= result.timing.quoteLimit)
+    result.priceComparison = comparePriceBooks(data.pf, data.hl, currencies);
   if (result.timing.accountSkew > result.timing.accountLimit) issues.push('账户快照时间差超过阈值，账户熔断');
   if ((a.pf.sourceKind === 'plan') !== (a.hl.sourceKind === 'plan')) {
     issues.push('账户来源混用，禁止跨模式计算');
@@ -587,12 +597,11 @@ function computeCurrent(r, a, data, fxData, now, options) {
         });
     }
     const q = (result.qty[k] = usable(k, 'qty') ? optional(a[k].qty) : null);
-    const spec = k === 'pf' ? data.spec : data.hl;
-    const unit = positive(String(spec?.contractMultiplier ?? '1')).times(
-      positive(String(spec?.settlementToUSDC ?? '1'))
-    );
-    result.cash[k] = usable(k, 'equity') ? equityAt(a[k], q, quoteOK(k) ? data[k]?.mark : null, unit) : null;
-    if (q != null && quoteOK(k) && data[k]?.mark)
+    const leg = currencies.legs?.[k];
+    const unit = leg && currencies.ok ? dec(leg.multiplier).times(leg.pointToLedger.mid) : null;
+    result.cash[k] = usable(k, 'equity') ?
+      (unit ? equityAt(a[k], q, quoteOK(k) ? data[k]?.mark : null, unit) : optional(a[k].equity)) : null;
+    if (unit && q != null && quoteOK(k) && data[k]?.mark)
       result.currentNotional[k] = out(dec(q).abs().times(unit).times(String(data[k].mark)));
   }
   const protection = out(nonnegative(r.B).plus(nonnegative(r.outsideCosts ?? '0')));
@@ -607,15 +616,10 @@ function computeCurrent(r, a, data, fxData, now, options) {
     fresh(r.externalFxAt, now, Number(r.accountSecs) * 1000)
   )
     conversion = out(positive(r.externalFx));
-  if (
-    !conversion &&
-    ['USD', 'USDT'].includes(currency) &&
-    fresh(fxData.USDC?.asOf, now, 60000) &&
-    (currency === 'USD' || fresh(fxData.USDT?.asOf, now, 60000))
-  )
-    conversion = out(
-      positive(String(currency === 'USD' ? '1' : fxData.USDT.rate)).div(positive(String(fxData.USDC.rate)))
-    );
+  if (!conversion && ['USD', 'USDT'].includes(currency)) {
+    try { conversion = conversionBook(currency, 'USDC', fxData, now, ages).mid; }
+    catch { /* An unvalued external balance never enters the protection ledger. */ }
+  }
   const externalFresh = planning || externalAmount.isZero() || fresh(r.externalAt, now, ttl);
   const external = conversion && externalFresh ? out(externalAmount.times(conversion)) : '0';
   if (!externalFresh) issues.push('外部已到账金额缺少当前确认，请核对资金来源');
@@ -659,11 +663,6 @@ function computeCurrent(r, a, data, fxData, now, options) {
     result.range = solveBudgetBounds(p);
     if (result.range.min == null) result.range = null; // Terminal events need fresh positions and executable quotes below.
   }
-  let fx = null;
-  if (specified(r.fx) && fresh(r.fxAt, now, positive(r.accountSecs).toNumber() * 1000))
-    fx = out(positive(r.fx));
-  else if (fxData.USDC && fxData.USDT && [fxData.USDC, fxData.USDT].every((x) => fresh(x.asOf, now, 60000)))
-    fx = out(positive(String(fxData.USDC.rate)).div(positive(String(fxData.USDT.rate))));
   // Invalidate risk fields independently. Editing a quantity must never renew available collateral.
   a = Object.fromEntries(
     ['pf', 'hl'].map((k) => {
@@ -686,7 +685,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
       return [k, leg];
     })
   );
-  const market = fx && buildMarket(data, r, a, fx);
+  const market = currencies.ok && buildMarket(data, r, a, currencies);
   result.configuredLeverage =
     a.hl.source === 'Hype 主网 API' && usable('hl', 'leverage') ? (a.hl.configuredLeverage ?? null) : null;
   const { pf, hl } = result.qty;
@@ -710,7 +709,10 @@ function computeCurrent(r, a, data, fxData, now, options) {
   else if (result.inputGaps.some((g) => !g.id.endsWith('-free') || r.mode === 'auto') || !market)
     result.dataState = '等待数据';
   if (pf === null || hl === null) issues.push('持仓数量未录入，空仓请填 0');
-  if (!fx) issues.push('缺少有效 USDC/USDT 折算，可在规则中确认汇率');
+  if (!currencies.ok) {
+    result.dataState = currencies.error;
+    issues.unshift(currencies.error);
+  }
   if (!market) issues.push('等待已核实的双边合约与盘口');
   for (const k of ['pf', 'hl']) {
     if (!quoteOK(k))
@@ -793,6 +795,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
   else if (
     r.mode === 'auto' &&
     !issues.some((x) => /过期|缺失|未录入|请录入|断开|休市|确认时间|连接失败|熔断|来源混用/.test(x)) &&
+    currencies.ok &&
     !terminal &&
     !pending
   )

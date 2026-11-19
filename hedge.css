@@ -531,3 +531,5 @@ label input[type='checkbox'] {
 #desk-details>.selectors {padding:12px 0;justify-content:flex-start}
 
 #scan-buckets .representative-range th {border-left:3px solid #31846d}
+
+#fx-source { white-space: pre-line; overflow-wrap: anywhere; }
