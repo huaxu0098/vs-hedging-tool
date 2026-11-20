@@ -746,7 +746,7 @@ test('OPT02 搜索范围记录双边方向、步长和数量上限，预算中�
   const partial = calculateCurrent(inputs, f.a, f.m, {}, t, { searchBudget: 1 });
   assert.equal(partial.search.complete, false);
   assert.ok(!partial.maximum?.complete);
-  assert.equal(full.trace.model, 'AUTO-0.21.7');
+  assert.equal(full.trace.model, 'AUTO-0.21.8');
 });
 test('OPT03 PF 虚拟保证金、目标 Hype 初始、其他占用及调仓后真实可用分别核验', () => {
   const f = fixture();
@@ -805,6 +805,22 @@ test('盘口时差 1088 ms 超过阈值时停止发起求解，恢复到边界�
   assert.ok(!blocked.needsSearch && !blocked.candidate);
   assert.match(blocked.issues.join(' '),/行情熔断/);
   assert.ok(check(1000).needsSearch);
+});
+test('盘口时差 10727 ms 即使各腿仍在 TTL 内也暂停，恢复时须重新核准快照',()=>{
+  const f=fixture(), constraints={...inputs,quoteSecs:'20',quoteSkewMs:'3000'};
+  f.m.hl.markAt=at;
+  function atSkew(lag) {
+    f.m.hl.bookAt=new Date(t-lag).toISOString();
+    return calculateCurrent(constraints,f.a,f.m,{},t,{deferAuto:true});
+  }
+  assert.ok(atSkew(0).needsSearch);
+  const breach=atSkew(10727);
+  assert.equal(breach.timing.quoteSkew,10727);
+  assert.equal(breach.timing.quoteLimit,3000);
+  assert.ok(!breach.needsSearch && !breach.adjust && !breach.candidate);
+  assert.match(breach.issues.join(' '),/行情熔断/);
+  assert.ok(!atSkew(3001).needsSearch);
+  assert.ok(atSkew(3000).needsSearch);
 });
 test('OPT06 独立清算核对覆盖正反向、多档、真实现仓参考不符和无正价交点', async () => {
   const { crossCheckRoot } = await import('../src/hedge/cross-check.js');
@@ -2557,6 +2573,31 @@ test('发布帧：仅同一盘口深度、账户、规则、版本和完成时�
 });
 
 
+test('前版已完成快照仅供历史核对，本版拒绝跨候选拼接的现金缓冲和覆盖计数',()=>{
+  const f=pressureFixture(), result=scanFixture({B:'157',R_success:'72',R_free:'0'},f);
+  result.frameState='ready';result.calculationMarket=f.m;result.finishedAt=at;
+  const data=new Map(), storage={setItem:(k,v)=>data.set(k,v),getItem:k=>data.get(k)??null};
+  displayHistory(storage).record('plan:BTC',createSolutionSnapshot(result));
+  const [[key,json]]=data.entries(), old=JSON.parse(json);
+  old.view.trace.model='AUTO-0.21.7';
+  data.clear();
+  storage.setItem(key.replace('AUTO-0.21.8','AUTO-0.21.7'),JSON.stringify(old));
+  const historic=displayHistory(storage).read('plan:BTC');
+  assert.equal(historic.solverVersion,'AUTO-0.21.7');
+  assert.throws(()=>createSolutionSnapshot({...result,trace:old.view.trace}),/求解器版本已变更/);
+  assert.equal(publicationState({...result,trace:old.view.trace},historic,f.m),'updating');
+  for (const corrupt of [
+    s=>{s.cashBuffers.minimum='5';},
+    s=>{s.coverage.unverified=0;},
+    s=>{s.minSuccess.id='D';}
+  ]) {
+    const copy=structuredClone(result), scan=copy.baseScan??copy.ratioScan;
+    const plan=scan.plans.rows.find(x=>x.key===scan.plans.targetKeys[0]);
+    corrupt(plan.pressureSummary);
+    assert.throws(()=>createSolutionSnapshot(copy),/不一致|缺少可对账/);
+  }
+});
+
 function pressureFixture() {
   const f=fixture();
   f.m.pf.levels=[[['100','20'],['99.9','4'],['99.8','5'],['99.5','2']],
@@ -2589,8 +2630,16 @@ test('LIQSEL01 前两档退出成为数量和现金硬约束，压力最大值�
     const desk=calculateCurrent({...inputs,...initial,...patch},f.a,f.m,f.rates??{},t,{scanRatios:true,baseObjectives:true}).ratioScan;
     assert.equal(desk.plans.pressure.row.i,pressure.row.i);
     assert.deepEqual(desk.plans.targetKeys,desktop.plans.targetKeys);
-    assert.equal(pressure.status,patch.jumpBps?'feasible':'conditional');
+    assert.equal(pressure.scope,patch.jumpBps?'configured':'bookOnly');
+    assert.equal(pressure.configuredStatus,'pass');
+    assert.equal(pressure.status,'conditional');
+    assert.equal(pressure.allSpecified.status,'unverified');
+    assert.equal(pressure.allSpecified.key,null);
+    assert.equal(pressure.liveSafety,'unverified');
+    assert.notEqual(result.autoStatus,'AUTO_FEASIBLE');
     const row=pressure.row;
+    if (row.pressureSummary.minLiquidationDistance)
+      assert.equal(row.pressureSummary.minLiquidationDistance.unit,result.currencies.hl.quoteAsset);
     for(const end of ['fail','pass']) for(const scenario of [row.liquidity[end].full,row.liquidity[end],row.liquidity[end].two]){
       assert.equal(scenario.status,'pass'); assert.equal(scenario.path.firstBreach,null);
       assert.ok(scenario.path.worst && dec(scenario.path.worst.surplus).gt(0));
@@ -2613,6 +2662,9 @@ test('LIQSEL02 数量尚可开仓但不能全量退出时无压力候选，两�
   const p=x.plans.rows.find(row=>row.key===x.plans.targetKeys[0]);
   assert.ok(p.both);
   assert.equal(x.plans.pressure.status,'none'); assert.equal(x.plans.pressure.row,undefined);
+  assert.equal(x.plans.pressure.configuredStatus,'none');
+  assert.equal(x.plans.pressure.allSpecified.status,'none');
+  assert.equal(x.plans.pressure.allSpecified.key,null);
   const c=p.liquidity.fail.two;
   assert.equal(c.status,'insufficient'); assert.equal(c.depth.hl.uncovered,c.depth.hl.target);
   assert.equal(c.depth.hl.vwap,null); assert.equal(c.exitFees.hl,null); assert.equal(c.settlement,null);
@@ -2677,6 +2729,7 @@ test('LIQSEL06 已配置基差压力缺少参考汇率时暂停发布，不把�
   const ctx={...scan.ctx,checks:{...scan.ctx.checks,basisBps:'10',basisRate:null}};
   const result=searchLiquidityMaximum(scan,()=>assert.fail('缺少参照时不得核准仓位'),false,ctx);
   assert.equal(result.status,'incomplete');assert.match(result.reason,/参照汇率/);assert.equal(result.key,null);
+  assert.equal(result.configuredStatus,'unknown');assert.equal(result.allSpecified.status,'unverified');
 });
 
 test('LIQSEL07 现仓差额、手续费与延迟扣款进入撤档求解，最大手数与逐点验算一致',()=>{
@@ -2686,6 +2739,10 @@ test('LIQSEL07 现仓差额、手续费与延迟扣款进入撤档求解，最�
   const r={...inputs,B:'157',R_success:'71',R_free:'0',pfFee:'0.0003',hlFee:'0.0009',
     adverseBps:'2',jumpBps:'3',delayBps:'4',fundingDebit:'0.08'};
   const solve=baseObjectives=>calculateCurrent(r,f.a,f.m,f.rates??{},t,{scanRatios:true,baseObjectives}).ratioScan;
+  const unchecked=solve(true).plans.pressure;
+  assert.equal(unchecked.configuredStatus,'unknown');
+  assert.equal(unchecked.key,null);
+  Object.assign(f.a.hl,{source:'Hype 主网 API',configuredLeverage:5,currentMarginCredit:'20'});
   const configured=solve(false),worker=solve(true);
   const sizes=[];
   for(const sign of [1,-1]) for(let i=1;i<=10;i++) for(let j=0;j<=6;j++){
@@ -2724,7 +2781,8 @@ test('PRESSRANK02 全网格与所有同规模并列项的独立排序一致，�
     adverseBps:'1',asyncBps:'1',jumpBps:'1',delayBps:'1',fundingDebit:'0.01'};
   let tied=false;
   const outcomes=[];
-  for (const patch of [{},{B:'142'},{asyncBps:'150'},{fundingDebit:'4'},{fundingDebit:'1.95',fundingRatesBps:'70,25'},{asyncBps:'900',fundingDebit:'7'}]) {
+  for (const patch of [{},{B:'142'},{B:'125',R_success:'35',recoveryBuffer:'11'},
+      {asyncBps:'150'},{fundingDebit:'4'},{fundingDebit:'1.95',fundingRatesBps:'70,25'},{asyncBps:'900',fundingDebit:'7'}]) {
     const r={...inputs,...baseline,...patch};
     const configured=scanFixture(r,fixture).ratioScan;
     const desk=calculateCurrent(r,fixture.a,fixture.m,{},t,{scanRatios:true,baseObjectives:true}).ratioScan;
@@ -2736,6 +2794,8 @@ test('PRESSRANK02 全网格与所有同规模并列项的独立排序一致，�
       const cases=p.cases.filter(c=>c.configured && c.status==='pass');
       const fail=min(...cases.map(c=>dec(c.fail.cash))),success=min(...cases.map(c=>dec(c.success.cash)));
       assert.ok(fail.eq(p.minFailure.value) && success.eq(p.minSuccess.value));
+      assert.ok(fail.gte(dec(r.B).plus(r.recoveryBuffer??'0')) && success.gte(r.R_success));
+      assert.ok(min(fail.minus(r.B),success.minus(r.R_success)).eq(p.cashBuffers.minimum));
       valid.push({row,headroom:min(fail.minus(r.B),success.minus(r.R_success)),
         margin:dec(p.maxMarginUsed.value),surplus:dec(p.minSurplus.value)});
     }
@@ -2745,6 +2805,12 @@ test('PRESSRANK02 全网格与所有同规模并列项的独立排序一致，�
     const best=valid[0]?.row.key??null;
     assert.equal(configured.plans.pressure.key,best);
     assert.equal(desk.plans.pressure.key,best);
+    if (patch.recoveryBuffer) {
+      // Both candidates meet the extra 11 U admission floor. Subtracting it
+      // again from M_fail would incorrectly choose four Hype lots over three.
+      assert.equal(best,'1/7/3');
+      assert.ok(valid.some(x=>x.row.key==='1/7/4'));
+    }
     outcomes.push(best);
     if (valid.length && valid.filter(x=>x.row.i===valid[0].row.i).length>1) tied=true;
   }
@@ -2780,7 +2846,13 @@ test('PRESSRANK04 逐期资金费和金额预算属于同一类压力，错误�
   assert.equal(entries.stress.positive.length,5);
   assert.deepEqual(entries.stress.fundingRatesBps,['2.5','1','0']);
   assert.ok(!entries.missingFields.some(g=>g.id==='fundingDebit'));
-  assert.equal(entries.ratioScan.plans.pressure.status,'feasible');
+  const pressure=entries.ratioScan.plans.pressure;
+  assert.equal(pressure.status,'conditional');
+  assert.equal(pressure.scope,'configured');
+  assert.equal(pressure.allSpecified.status,'unverified');
+  assert.equal(pressure.allSpecified.key,null);
+  assert.match(pressure.allSpecified.reason,/D/);
+  assert.notEqual(entries.autoStatus,'AUTO_FEASIBLE');
   const cleared=run({fundingRatesBps:''});
   assert.notEqual(entries.trace.rulesId,cleared.trace.rulesId);
   assert.equal(cleared.trace.rulesId,absent.trace.rulesId);
@@ -2812,8 +2884,24 @@ test('PRESSRANK05 较大手数缺少已配置情景证据时不得以较小仓�
     return {...row,configuredPass:false,pressureSummary:{...row.pressureSummary,status:'unknown'}};
   });
   assert.equal(search.status,'incomplete');
+  assert.equal(search.configuredStatus,'unknown');
+  assert.equal(search.allSpecified.status,'unverified');
   assert.equal(search.key,null);
   assert.ok(![...observed].some(i=>i<largest));
+});
+
+test('PRESSSCOPE 未完成数量网格和待结分成不能产生压力最大仓位',()=>{
+  const scan=scanFixture({B:'157',R_success:'65',R_free:'0'},pressureFixture()).ratioScan;
+  const inspect=()=>assert.fail('数据未完成时不应取得候选');
+  for (const result of [searchLiquidityMaximum({...scan,complete:false},inspect),
+    searchLiquidityMaximum(scan,inspect,true)]) {
+    assert.equal(result.status,'incomplete');
+    assert.equal(result.configuredStatus,'unknown');
+    assert.equal(result.allSpecified.status,'unverified');
+    assert.equal(result.allSpecified.key,null);
+    assert.equal(result.key,null);
+    assert.equal(result.liveSafety,'unverified');
+  }
 });
 
 

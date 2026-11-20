@@ -25,7 +25,8 @@ try {
             })),audits:Object.keys(x.pathAudit.pass??{})};
           framesById[r.trace.id]={id:r.trace.id,time:r.finishedAt,ms:r.solveMs,model:r.trace.model,
             clocks:JSON.parse(r.trace.inputs).market,account:r.trace.accountsId,rules:r.trace.rulesId,book:r.trace.marketId,
-            tested:r.stress.positive,funding:JSON.parse(r.trace.inputs).rules.fundingDebit,status:p.status,reason:p.reason,B:s.ctx.book.B,R:s.ctx.params.R,
+            tested:r.stress.positive,funding:JSON.parse(r.trace.inputs).rules.fundingDebit,scope:p.scope,allSpecified:p.allSpecified,liveSafety:p.liveSafety,status:p.status,reason:p.reason,B:s.ctx.book.B,R:s.ctx.params.R,
+            columns:[plans.targetKeys[0],null,...plans.targetKeys.slice(1)].map((key,i)=>row(i===1?p.row:plans.rows.find(r=>r.key===key))),
             base:row(plans.rows.find(x=>x.key===plans.targetKeys[0])), pressure:row(p.row),
             keys:[plans.targetKeys[0],p.key,...plans.targetKeys.slice(1)],
             fees:Object.fromEntries(['pf','hl'].map(k=>[k,[s.ctx.market[k].rate,s.ctx.market[k].multiplier,s.ctx.market[k].fx]]))};
@@ -49,6 +50,9 @@ try {
       return {...f,clocks:Object.fromEntries(['pf','hl'].map(k=>[k,[f.clocks[k].bookSource??f.clocks.source,f.clocks[k].bookAt??f.clocks[k].asOf]])),
         ids:['live-view','positions-view','liquidity-maximum'].map(k=>q(k).dataset.snapshotId),display:q('liquidity-maximum').textContent,
         publishedKey:q('liquidity-maximum').dataset.point,publishedKeys:[...q('plan-columns').rows[0].cells].slice(1).map(th=>th.dataset.point||null),
+        allStatus:q('pressure-all-specified').dataset.status,liveSafetyLabel:q('pressure-live-safety').textContent,
+        cashDisplay:[...q('plan-rows').querySelector('[data-metric="cashBuffer"]').cells].slice(1).map(td=>td.textContent),
+        coverageDisplay:[...q('plan-rows').querySelector('[data-metric="coverage"]').cells].slice(1).map(td=>td.textContent),
         detail:[...q('liquidity-evidence-body').rows].map(tr=>[tr.dataset.case,[...tr.cells].map(td=>td.textContent)]),
         headline:[q('scan-fail-cash').textContent,q('scan-pass-cash').textContent]};
     })())`,90000);
@@ -57,9 +61,41 @@ try {
     assert.ok(f.ids.every(id=>id===f.id));
     for(const [source,stamp] of Object.values(f.clocks)){assert.match(source,/Vest|Hyperliquid/);assert.ok(Number.isFinite(Date.parse(stamp)));}
     assert.ok(f.base && f.book && f.rules && f.account);
+    assert.equal(f.liveSafety,'unverified');
+    assert.equal(f.allStatus,f.allSpecified.status);
+    assert.match(f.liveSafetyLabel,/未验证/);
+    for (const [i,plan] of f.columns.entries()) {
+      if (!plan) continue;
+      const summary=plan.summary, known=summary.cases.filter(c=>c.verified);
+      assert.equal(summary.key,f.keys[i]);
+      assert.equal(f.coverageDisplay[i],known.length+' / '+(summary.cases.length-known.length));
+      assert.equal(summary.coverage.passed,known.filter(c=>c.status==='pass').length);
+      // Reconcile signed headroom with independently priced failure and success ledgers.
+      const endpoints=summary.cases.filter(c=>c.configured);
+      const minimum=(name)=>endpoints.map(c=>c[name].cash).filter(v=>v!=null).map(dec)
+        .reduce((a,b)=>a.lte(b)?a:b);
+      const fail=minimum('fail').minus(f.B),success=minimum('success').minus(f.R);
+      const worst=fail.lte(success)?fail:success;
+      assert.ok(dec(summary.cashBuffers.fail).eq(fail) && dec(summary.cashBuffers.success).eq(success));
+      assert.ok(dec(summary.cashBuffers.minimum).eq(worst));
+      const shown=f.cashDisplay[i].match(/[+-]?[0-9]+(?:\.[0-9]+)?/);
+      assert.ok(shown && dec(shown[0]).eq(worst.toDecimalPlaces(4)),f.cashDisplay[i]);
+      for (const [field,maximize] of [['maxMarginUsed',true],['minSurplus',false],
+        ['minFreeCollateral',false],['maxCollateralDeficit',true],['minLiquidationDistance',false]]) {
+        const values=endpoints.flatMap(c=>[c.fail[field],c.success[field]]).filter(x=>x!=null).map(dec);
+        if (!values.length) {assert.equal(summary[field],null);continue;}
+        const expected=values.reduce((a,b)=>(maximize?a.gt(b):a.lt(b))?a:b);
+        assert.ok(expected.eq(summary[field].value),field);
+        const witness=endpoints.find(c=>c.id===summary[field].id);
+        assert.ok(expected.eq(witness[summary[field].endpoint][field]));
+      }
+    }
     if(f.pressure){
       assert.equal(f.pressure.key,f.publishedKey);
-      assert.equal(f.status,full?'feasible':'conditional');
+      assert.equal(f.status,'conditional');
+      assert.equal(f.scope,full?'configured':'bookOnly');
+      assert.equal(f.allSpecified.status,'unverified');assert.equal(f.allSpecified.key,null);
+      assert.equal(f.pressure.summary.coverage.unverified,full?1:6);
       const summary=f.pressure.summary;
       assert.equal(summary.key,f.pressure.key);
       assert.equal(summary.status,'pass');

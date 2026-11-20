@@ -1,11 +1,13 @@
 // Per-candidate stress evidence. Monetary extrema always retain the scenario
 // and endpoint that produced them. Only certified exits can contribute cash.
-import { dec, out } from './math.js';
+import { dec, out, min, max } from './math.js';
 import { exitLiquidity, pressureExitOffset } from './exit-liquidity.js';
-import { validateMargin, preservesCrossExposure } from './solver.js';
+import { validateMargin, preservesCrossExposure, liquidationMark } from './solver.js';
 
 const labels={A:'A 完整盘口', B:'B 撤退出最优档', C:'C 撤退出前两档', D:'D 可见退出深度不足',
   basis:'不利基差扩大', async:'双边价格不同步', delay:'单边延迟', jump:'不利跳价', funding:'持仓期累计资金费',
+  basisWiden:'基差扩大路径',basisNarrow:'基差收敛路径',basisFavorable:'基差有利路径',dislocation:'不同步往返路径',
+  asyncExit:'不同步退出路径',delayedFill:'延迟调仓后退出路径',
   combinedA:'联合压力 · A 完整盘口',combinedB:'联合压力 · B 撤一档',combinedC:'联合压力 · C 撤两档'};
 
 function inputs(checks) {
@@ -46,32 +48,86 @@ function delayedAdmission(ctx,row,delayBps,debit) {
   return {status:ok?'pass':'fail',retryLeverage:!ok && tierOK && report.status==='pass', reason:ok?null:'延迟调仓时的杠杆档位、初始保证金或可用抵押品不足',point};
 }
 
-function metrics(test,admission) {
-  const points=admission?.point?[admission.point]:[];
-  const opened=(!admission || admission.status==='pass') && (!test?.before || test.before.status==='pass');
-  for (const path of [test?.before,opened?test?.path:null]) {
-    if (!path?.checkpoints?.length) continue;
-    const hit=path.firstBreach;
-    if (!hit) {points.push(...path.checkpoints);continue;}
-    // Ignore modeled data after liquidation, including a profitable recovery.
-    points.push(...path.checkpoints.slice(0,hit.segment));
-    const start=path.checkpoints[0];
-    points.push({marginUsed:out(dec(start.initial).times(hit.mark).div(start.mark).plus(start.otherUsed)),
-      surplus:out(dec(hit.equity).minus(hit.maintenance)),maintenance:hit.maintenance});
-  }
-  const low=extreme(points,'surplus',-1), high=extreme(points,'marginUsed',1);
-  return {maxMarginUsed:high?.marginUsed??null,minSurplus:low?.surplus??null,maintenance:low?.maintenance??null};
+// The cross pool has a fixed native liquidation boundary on each exposure
+// and debit regime. Use the earlier of the model and applicable account mark.
+function liquidationBoundary(ctx) {
+  const leg=ctx.market.hl;
+  const current=Object.values(ctx.book.positions).find(p=>p.venue==='hl' && p.asset===ctx.market.id && p.pool===leg.pool);
+  const cache=new Map();
+  return (qty,debit)=>{
+    const key=qty+'/'+debit;
+    if (cache.has(key)) return cache.get(key);
+    let mark=liquidationMark(ctx.book,ctx.market,qty,ctx.checks.catalog,debit);
+    let source='cross-model';
+    const reference=current && dec(qty).eq(current.qty) ? leg.currentLiquidation : null;
+    if (reference!=null && (mark==null || dec(reference).minus(mark).times(qty).gte(0))) {
+      mark=reference; source='account-reference';
+    }
+    const result=mark==null?null:{mark,source};
+    cache.set(key,result);
+    return result;
+  };
 }
 
-function endpoint(test,initial,end,dry=false,admission=null) {
-  const numbers=metrics(test,admission);
+// Include the first crossing, never the unreachable endpoint beyond it.
+// Inside a tier, IM and both components of signed free collateral are affine.
+function reachedPoints(path) {
+  if (!path?.proof?.continuous || !path.checkpoints?.length) return [];
+  const hit=path.firstBreach;
+  if (!hit) return path.checkpoints;
+  const chunk=path.checkpoints.slice(0,hit.segment);
+  const edge=path.checkpoints[hit.segment], prev=chunk.at(-1);
+  let t=dec('1');
+  if (prev && !dec(edge.mark).eq(prev.mark)) t=dec(hit.mark).minus(prev.mark).div(dec(edge.mark).minus(prev.mark));
+  function at(field) {
+    if (edge[field]==null || (prev && prev[field]==null)) return null;
+    return prev?out(dec(prev[field]).plus(dec(edge[field]).minus(prev[field]).times(t))):edge[field];
+  }
+  return [...chunk,{mark:hit.mark,marginUsed:at('marginUsed'),free:at('free'),maintenance:hit.maintenance,
+    surplus:out(dec(hit.equity).minus(hit.maintenance))}];
+}
+
+function metrics(test,admission,row,boundary) {
+  const points=[];
+  const old=out(dec(row.hl).minus(row.paths?.fail?.hl?.adjustment??'0'));
+  function append(path,qty,debit) {
+    const reached=reachedPoints(path);
+    if (!reached.length) return;
+    const root=dec(qty).isZero()?null:boundary(qty,debit);
+    const sign=dec(qty).cmp(0);
+    for (const p of reached) {
+      const distance=root?out(max(0,dec(p.mark).minus(root.mark).times(sign))):null;
+      points.push({...p,liquidationDistance:distance,liquidationMark:root?.mark??null,source:root?.source??null});
+    }
+  }
+  append(test?.before,old,'0');
+  // Without a common stopping time for a PF breach we cannot attribute a
+  // later Hype mark to an open hedge. Keep only its independently proven prefix.
+  const pfReached=!test?.pfPath || (test.pfPath.status==='pass' && test.pfPath.proof?.continuous);
+  if (pfReached && (!admission || admission.status==='pass') && (!test?.before || test.before.status==='pass'))
+    append(test?.path,row.hl,test?.debit??'0');
+  const low=extreme(points,'surplus',-1), high=extreme(points,'marginUsed',1);
+  const lowest=extreme(points,'free',-1), distance=extreme(points,'liquidationDistance',-1);
+  return {maxMarginUsed:high?.marginUsed??null,minSurplus:low?.surplus??null,maintenance:low?.maintenance??null,
+    minFreeCollateral:lowest?out(max(0,lowest.free)):null,maxCollateralDeficit:lowest?out(max(0,dec(lowest.free).neg())):null,
+    minLiquidationDistance:distance?.liquidationDistance??null,liquidationMark:distance?.liquidationMark??null,
+    distanceMark:distance?.mark??null,distanceSource:distance?.source??null};
+}
+
+function endpoint(test,row,end,dry,admission,boundary) {
+  const numbers=metrics(test,admission,row,boundary);
   const stopped=admission && admission.status!=='pass';
-  const cash=dry || stopped?null:test?.settlement?.[end==='fail'?'personal':'hype']??null;
+  const cash=dry || stopped || test?.pathStatus!=='pass'?null:test.settlement?.[end==='fail'?'personal':'hype']??null;
   const status=dry?'unknown':stopped?admission.status:test?.status==='insufficient'?'fail':test?.status??'unknown';
-  return {...numbers,cash,initialMargin:admission?.point?.initial??initial,status,
+  // Known insufficient visible quantity rejects a configured exit even though
+  // the missing price makes its cash outcome unverifiable.
+  const verified=!dry && status!=='unknown' && (cash!=null || status==='fail' && test?.status!=='insufficient');
+  return {...numbers,cash,initialMargin:admission?.point?.initial??row.initial??null,status,verified,
+    admission:admission?.point?{status:admission.status,mark:admission.point.mark,
+      free:admission.point.free,maintenanceSurplus:admission.point.surplus}:null,
     pathStatus:stopped?'unknown':test?.pathStatus??'unknown',
     reason:dry?'可见深度无法全量退出':stopped?admission.reason:test?.reason??null,
-    pfMark:test?.settlement?.pfMark??null,hypeMark:test?.settlement?.hlMark??null,
+    pfMark:cash==null?null:test.settlement.pfMark,hypeMark:cash==null?null:test.settlement.hlMark,
     debit:test?.debit??null,funding:test?.funding??null};
 }
 
@@ -102,13 +158,23 @@ function bounds(row,cases,ctx) {
   }
   const issue=observed.find(e=>e.status==='fail' && e.cash==null)??observed.find(e=>e.status==='unknown');
   const worst=issue?{id:issue.id,label:issue.label,endpoint:issue.endpoint,reason:issue.reason??'未取得可达结算结果'}:binding;
+  const minFailure=limit(observed.filter(e=>e.endpoint==='fail'),'cash',-1);
+  const minSuccess=limit(observed.filter(e=>e.endpoint==='success'),'cash',-1);
+  const fail=minFailure?out(dec(minFailure.value).minus(ctx.book.B)):null;
+  const success=minSuccess?out(dec(minSuccess.value).minus(r)):null;
+  const distance=extreme(observed,'minLiquidationDistance',-1);
   return {key:[row.sign,row.i,row.j].join('/'),leverage:row.lev==null?null:String(row.lev),
-    openingInitial:row.initial??null,minFailure:limit(observed.filter(e=>e.endpoint==='fail'),'cash',-1),
-    minSuccess:limit(observed.filter(e=>e.endpoint==='success'),'cash',-1),
-    maxMarginUsed:limit(observed,'maxMarginUsed',1),minSurplus:limit(observed,'minSurplus',-1),worstCase:worst};
+    openingInitial:row.initial??null,openingFree:row.free!=null && row.verification?.initial==='pass'?
+      {value:out(max(0,row.free)),id:'opening',label:'调仓完成',endpoint:'open'}:null,
+    minFailure,minSuccess,cashBuffers:{fail,success,minimum:fail==null||success==null?null:out(min(fail,success))},
+    maxMarginUsed:limit(observed,'maxMarginUsed',1),minSurplus:limit(observed,'minSurplus',-1),
+    minFreeCollateral:limit(observed,'minFreeCollateral',-1),maxCollateralDeficit:limit(observed,'maxCollateralDeficit',1),
+    minLiquidationDistance:distance?{...limit(observed,'minLiquidationDistance',-1),
+      mark:distance.distanceMark,liquidationMark:distance.liquidationMark,source:distance.distanceSource,
+      unit:ctx.market.hl.quoteCurrency??null}:null,worstCase:worst};
 }
 
-export function pressureSummary(ctx,row,liquidity) {
+export function pressureSummary(ctx,row,liquidity,pathAudit={}) {
   if (!ctx.checks || !ctx.book.positions) return null; // Older display-only history.
   const amounts=inputs(ctx.checks), individual=['basis','async','delay','jump','funding'];
   const rates=ctx.checks.fundingRatesBps??[];
@@ -116,6 +182,7 @@ export function pressureSummary(ctx,row,liquidity) {
   const active=id=>id==='funding' && scheduled ||
     amounts[id]!=null && amounts[id]!=='' && dec(String(amounts[id])).gt(0);
   const cases=[];
+  const boundary=liquidationBoundary(ctx);
   const leg=ctx.market.hl,sign=dec(row.hl).cmp(0);
   const delay=ctx.checks.stress?.delayBps??'0';
   const adjustment=row.paths?.fail?.hl?.adjustment??'0';
@@ -126,10 +193,11 @@ export function pressureSummary(ctx,row,liquidity) {
   function add(id,check,{configured=true,reason=null,delayed=false}={}) {
     const fail=check?.('fail'), pass=check?.('pass');
     if(configured && (fail?.status!=='pass' || pass?.status!=='pass')) retryLeverage=false;
-    const f=endpoint(fail,row.initial,'fail',id==='D',delayed?admission:null);
-    const s=endpoint(pass,row.initial,'pass',id==='D',delayed?admission:null);
+    const f=endpoint(fail,row,'fail',id==='D',delayed?admission:null,boundary);
+    const s=endpoint(pass,row,'pass',id==='D',delayed?admission:null,boundary);
     const status=overall([f.status,s.status]);
-    cases.push({id,label:labels[id],configured,status,fail:f,success:s,reason:reason??f.reason??s.reason});
+    const verified=configured && f.verified && s.verified;
+    cases.push({id,label:labels[id],configured,status,verified,fail:f,success:s,reason:reason??f.reason??s.reason});
   }
   add('A',end=>liquidity[end]?.full);
   add('B',end=>liquidity[end]);
@@ -160,11 +228,42 @@ export function pressureSummary(ctx,row,liquidity) {
       add(id,basisUnknown?null:end=>exitLiquidity(ctx,row,end,i,shock),
         {delayed:shock.delayed,reason:basisUnknown?'缺少有效的基差参照汇率':null});
   }
+  // Additional modeled paths have their own ledgers. Reuse those actual
+  // endpoints, including the recovery leg after a temporary dislocation.
+  const additional={
+    basisWiden:active('basis'),basisNarrow:active('basis'),basisFavorable:active('basis'),
+    dislocation:active('basis') || active('async') || active('jump'),
+    asyncExit:active('basis') || active('async') || active('jump'),
+    delayedFill:active('delay') || active('jump') || active('basis') || active('funding')
+  };
+  for (const [id,enabled] of Object.entries(additional)) {
+    if (!enabled || !pathAudit.fail?.[id] && !pathAudit.pass?.[id]) continue;
+    add(id,end=>{
+      const path=pathAudit[end]?.[id];
+      if (!path) return null;
+      const settlement=path.settlement;
+      const floor=end==='fail'?dec(ctx.book.B).plus(ctx.params.recoveryBuffer??'0'):dec(ctx.params.R);
+      const cash=settlement?.[end==='fail'?'personal':'hype'];
+      const verifiedPath=path.status==='pass' && path.proof?.continuous && cash!=null;
+      const meets=verifiedPath && dec(cash).gte(floor) &&
+        dec(path.worst.surplus).gte(ctx.checks.minMaintenanceSurplus??'0');
+      return {path,settlement,debit:path.debit??'0',before:id==='delayedFill'?pathAudit[end]?.beforeFill:null,
+        pathStatus:verifiedPath?'pass':path.status==='fail'?'fail':'unknown',
+        status:verifiedPath?(meets?'pass':'fail'):path.status==='fail'?'fail':'unknown',
+        reason:verifiedPath?(meets?null:'路径资金或维持余量低于门槛'):'路径结算未核实'};
+    },{delayed:id==='delayedFill' && active('delay')});
+  }
   const configured=cases.filter(c=>c.configured).map(c=>c.status);
   // Preserve exchange size, leverage, cross-pool availability and other hard
   // gates of the underlying candidate; e.g. a blocked order cannot open.
   if (row.verification?.initial!=='pass') configured.push(row.verification?.initial??'unknown');
   if (!row.physical && row.reason?.status) configured.push(row.reason.status);
-  return {cases,missing,retryLeverage,status:overall(configured),fullStress:!missing.length && ctx.checks.basisRate!=null,
+  const status=overall(configured);
+  const verified=cases.filter(c=>c.verified),unverified=cases.filter(c=>!c.verified);
+  const passed=verified.filter(c=>c.status==='pass').length;
+  const coverage={total:cases.length,verified:verified.length,unverified:unverified.length,passed,
+    failed:verified.length-passed,allSpecifiedPassed:passed===cases.length && status==='pass',
+    verifiedLabels:verified.map(c=>c.label),unverifiedLabels:unverified.map(c=>c.label)};
+  return {cases,missing,retryLeverage,status,coverage,fullStress:coverage.allSpecifiedPassed,
     ...bounds(row,cases,ctx)};
 }

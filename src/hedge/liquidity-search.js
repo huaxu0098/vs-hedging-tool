@@ -42,10 +42,11 @@ function nativeEndpoints(ctx,pf,profile) {
 
 // Cash is affine in the Hype lot index inside each entry/exit depth segment.
 // Outward tolerance retains numerical boundary lots for exact ledger admission.
-function cashBand(lo,hi,left,right,minimum) {
+function cashBand(lo,hi,left,right,minimum,extraRecovery) {
   let from=lo, to=hi;
   for (const end of ['fail','pass']) {
-    const a=left[end].minus(minimum).plus('1e-12'), b=right[end].minus(minimum).plus('1e-12');
+    const floor=end==='fail' ? max(minimum,extraRecovery) : minimum;
+    const a=left[end].minus(floor).plus('1e-12'), b=right[end].minus(floor).plus('1e-12');
     if (a.lt(0) && b.lt(0)) return null;
     if (a.lt(0)===b.lt(0)) continue;
     const x=dec(String(lo)).minus(a.times(hi-lo).div(b.minus(a)));
@@ -58,8 +59,8 @@ function cashBand(lo,hi,left,right,minimum) {
 // Within a price segment the lower envelope of the two affine C-path cash
 // headrooms peaks at an endpoint or at the crossing of the two lines. Trying
 // that integer lot first gives a useful incumbent even in wide cash bands.
-function* competitiveLots(first,last,margins,incumbent) {
-  const band=cashBand(first,last,margins(first),margins(last),incumbent());
+function* competitiveLots(first,last,margins,incumbent,extraRecovery) {
+  const band=cashBand(first,last,margins(first),margins(last),incumbent(),extraRecovery);
   if (!band) return;
   const [lo,hi]=band;
   const left=margins(lo),right=margins(hi);
@@ -76,16 +77,18 @@ function* competitiveLots(first,last,margins,incumbent) {
     if (value.gt(bound)) { peak=j; bound=value; }
   }
   yield peak;
-  const rest=cashBand(lo,hi,left,right,incumbent());
+  const rest=cashBand(lo,hi,left,right,incumbent(),extraRecovery);
   if (rest) for (let j=rest[0];j<=rest[1];j++) if (j!==peak) yield j;
 }
 
-function score(row, failureFloor, reserve) {
+function score(row, failureFloor, reserve, maintenanceFloor) {
   const p=row.pressureSummary;
   if (!row.configuredPass || p?.status!=='pass' || ![p.minFailure,p.minSuccess,p.minSurplus,p.maxMarginUsed]
-    .every(metric=>metric?.value!=null)) return null;
-  const headroom=min(dec(p.minFailure.value).minus(failureFloor),dec(p.minSuccess.value).minus(reserve));
-  return headroom.lt(0) ? null : {row,headroom,surplus:dec(p.minSurplus.value),peakMargin:dec(p.maxMarginUsed.value)};
+    .every(metric=>metric?.value!=null) || p.cashBuffers?.minimum==null) return null;
+  const surplus=dec(p.minSurplus.value);
+  if (dec(p.minFailure.value).lt(failureFloor) || dec(p.minSuccess.value).lt(reserve) ||
+      surplus.lt(maintenanceFloor)) return null;
+  return {row,headroom:dec(p.cashBuffers.minimum),surplus,peakMargin:dec(p.maxMarginUsed.value)};
 }
 
 function safer(candidate,best) {
@@ -99,16 +102,22 @@ function safer(candidate,best) {
 
 export function searchLiquidityMaximum(scan,inspect,pending=false,ctx=scan.ctx) {
   const eligible=scan.sets.eligible ?? scan.sets.both;
-  const result={status:'none',key:null,checked:0,reason:'没有同时满足两端资金、保证金和撤档退出条件的仓位'};
-  if (pending || !scan.complete) return {...result,status:'incomplete',reason:pending?'分成待结算':'数量网格搜索未完成'};
+  const scope=ctx.checks.stress ? 'configured' : 'bookOnly';
+  const result={status:'none',key:null,checked:0,scope,configuredStatus:'none',liveSafety:'unverified',
+    allSpecified:{status:'none',key:null,reason:'已配置条件下无可行仓位，增加指定压力条件后仍无解'},
+    reason:'没有同时满足两端资金、保证金和撤档退出条件的仓位'};
+  const incomplete=reason=>({...result,status:'incomplete',configuredStatus:'unknown',reason,
+    allSpecified:{status:'unverified',key:null,reason}});
+  if (pending || !scan.complete) return incomplete(pending?'分成待结算':'数量网格搜索未完成');
   if (dec(ctx.checks.basisBps ?? '0').gt(0) && ctx.checks.basisRate==null)
-    return {...result,status:'incomplete',reason:'已配置基差压力，双边基差方向缺少有效参照汇率'};
+    return incomplete('已配置基差压力，双边基差方向缺少有效参照汇率');
   if (ctx.params.externalPriced===false)
-    return {...result,status:'incomplete',reason:'已到账外部资金缺少有效计值，本金保护待核实'};
+    return incomplete('已到账外部资金缺少有效计值，本金保护待核实');
   if (!eligible.largest) return result;
   const {book,market,checks,params}=ctx, profile=profileInputs(book,params,market);
   const hl=market.hl, old=position(book,'hl');
-  const failure=dec(book.B).plus(params.recoveryBuffer ?? '0').minus(book.external);
+  const extraRecovery=dec(params.recoveryBuffer ?? '0');
+  const failure=dec(book.B).minus(book.external);
   const reserve=dec(params.R);
   const delayUnit=dec(hl.mark).times(hl.multiplier).times(hl.fx).times(checks.stress?.delayBps ?? '0').div(10000);
   // The adverse funding schedule values the position at its peak path mark,
@@ -126,9 +135,10 @@ export function searchLiquidityMaximum(scan,inspect,pending=false,ctx=scan.ctx) 
       d.hl.cuts=[...new Set([...d.hl.cuts,lot])].sort((a,b)=>a-b);
   }
   const top=Math.min(eligible.largest.i,Math.max(...directions.map(d=>d.pf.cap)));
-  const floor=dec(book.B).plus(params.recoveryBuffer ?? '0');
+  const floor=dec(book.B).plus(extraRecovery);
+  const maintenanceFloor=dec(checks.minMaintenanceSurplus ?? '0');
   for (let i=top; i>=1; i--) {
-    let best=null, unknown=false;
+    let best=null, unknownBound=null;
     const incumbent=()=>best?.headroom ?? dec('0');
     for (const d of directions) {
       if (i>d.pf.cap) continue;
@@ -154,16 +164,20 @@ export function searchLiquidityMaximum(scan,inspect,pending=false,ctx=scan.ctx) 
         for (const cut of [0,...d.hl.cuts]) {
           const end=Math.min(cut,hi);
           if (end<lo) continue;
-          for (const j of competitiveLots(lo,end,margins,incumbent)) {
+          for (const j of competitiveLots(lo,end,margins,incumbent,extraRecovery)) {
             result.checked++;
             const row=inspect({i,j,sign:d.sign});
-            const candidate=score(row,floor,reserve);
+            const candidate=score(row,floor,reserve,maintenanceFloor);
             if (candidate && safer(candidate,best)) best=candidate;
             const v=row.verification??{};
             const verdicts=[row.pressureSummary?.status,v.path,v.initial,v.liquidation,row.depthStatus];
             if (checks.fullStress) verdicts.push(v.stress);
             if (!candidate && !verdicts.includes('fail') && !verdicts.includes('insufficient') &&
-                (row.configuredPass || verdicts.some(status=>status==null || status==='unknown'))) unknown=true;
+                (row.configuredPass || verdicts.some(status=>status==null || status==='unknown'))) {
+              const upper=margins(j);
+              const bound=min(upper.fail,upper.pass).plus('1e-12');
+              unknownBound=unknownBound==null?bound:max(unknownBound,bound);
+            }
           }
           lo=end+1;
           if (lo>hi) break;
@@ -173,12 +187,19 @@ export function searchLiquidityMaximum(scan,inspect,pending=false,ctx=scan.ctx) 
     // No smaller PF position can win once all candidates at this size have
     // been compared. Unresolved required scenarios at higher lots preclude
     // publishing a smaller position as the verified maximum.
-    if (best) {
-      const row=best.row, full=checks.fullStress && row.pressureSummary.fullStress;
-      return {...result,status:full?'feasible':'conditional',reason:full
-        ? '已通过配置的价格、资金费与退出压力' : '已配置项目通过，完整压力未验证',key:row.key,row};
+    if (unknownBound!=null && (!best || unknownBound.gte(best.headroom))) {
+      return incomplete(best?'同一最大规模有已配置压力待核实，并列候选排序未完成':'较大仓位有已配置的压力项目尚无法核实');
     }
-    if (unknown) return {...result,status:'incomplete',reason:'较大仓位有已配置的压力项目尚无法核实'};
+    if (best) {
+      const row=best.row, full=row.pressureSummary.coverage?.allSpecifiedPassed===true;
+      const reason=full?'所有指定压力下的最大候选已核验':
+        scope==='bookOnly'?'A–C 已配置盘口压力下的最大候选':'已配置盘口、价格或资金费压力下的最大候选';
+      const missing=row.pressureSummary.coverage?.unverifiedLabels ?? [];
+      return {...result,status:full?'feasible':'conditional',configuredStatus:'pass',
+        scope:full?'allSpecified':scope,reason,key:row.key,row,
+        allSpecified:full?{status:'verified',key:row.key,reason}:
+          {status:'unverified',key:null,reason:missing.length?'待核验：'+missing.join('、'):'尚未取得全部指定压力下的最大仓位证明'}};
+    }
   }
   return result;
 }

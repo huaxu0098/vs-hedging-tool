@@ -415,6 +415,8 @@ try {
   const readState=()=>run(`(()=>{const e=id=>document.getElementById(id);return {id:e('scan-desk').dataset.resultId,
     historical:e('current').dataset.historical,note:e('snapshot-note').innerText,status:e('scan-status').textContent,
     targets:[...e('plan-columns').rows[0].cells].slice(1).map(c=>c.dataset.point),state:e('scan-desk').dataset.state,
+    pressure:[...e('plan-rows').rows].filter(row=>['cashBuffer','coverage','minFailure','minSuccess'].includes(row.dataset.metric))
+      .map(row=>[...row.cells].slice(1).map(td=>td.textContent)),calculatedAt:e('scan-desk').dataset.calculatedAt,
     promotion:getComputedStyle(e('max-risk')).display}})()`);
   const blocked=await readState();
   assert.equal(blocked.historical,'true'); assert.equal(blocked.state,'paused');
@@ -424,7 +426,8 @@ try {
   await wait("document.getElementById('scan-desk').dataset.state==='recovering' && window.scanTest.held.length>0",20000);
   const recovering=await readState();
   assert.equal(recovering.historical,'true');assert.equal(recovering.id,blocked.id);
-  assert.deepEqual(recovering.targets,blocked.targets);assert.doesNotMatch(recovering.status,/当前数据有效/);
+  assert.deepEqual(recovering.targets,blocked.targets);assert.deepEqual(recovering.pressure,blocked.pressure);
+  assert.equal(recovering.calculatedAt,blocked.calculatedAt);assert.doesNotMatch(recovering.status,/当前数据有效/);
   await run("window.scanTest.hold=false;window.scanTest.held.at(-1).send()");
   await wait(ready+" && document.getElementById('scan-desk').dataset.resultId!=="+JSON.stringify(blocked.id),45000);
   const restored=await readState();

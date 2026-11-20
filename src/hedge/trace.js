@@ -28,7 +28,7 @@ export function bookIdentity(market) {
   })));
 }
 
-export const modelVersion = 'AUTO-0.21.7';
+export const modelVersion = 'AUTO-0.21.8';
 
 export function calculationTrace(rules, accounts, market, rates, at, settings = {}) {
   const model = modelVersion;

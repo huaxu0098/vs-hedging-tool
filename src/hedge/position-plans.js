@@ -202,7 +202,7 @@ export function recordFromInspection(ctx, row, pairs = {fail:reachableLedgers(ct
   const liquid=exits.every(test=>test?.status==='pass');
   const depthStatus=exits.some(test=>test?.status==='fail') ? 'fail' :
     exits.some(test=>test?.status==='insufficient') ? 'insufficient' : liquid ? 'pass' : 'unknown';
-  const pressure=pressureSummary(ctx,row,liquidity);
+  const pressure=pressureSummary(ctx,row,liquidity,pathAudit);
   const verification=row.verification && {...row.verification};
   if (pressure) {
     // A priced endpoint on an existing risk path is still a hard gate.
@@ -226,7 +226,7 @@ export function recordFromInspection(ctx, row, pairs = {fail:reachableLedgers(ct
       pressure.worstCase={id:'path',label:'账户与持仓路径核验',endpoint:null,
         reason:row.failStop??row.passStop??row.reason?.label??row.reason?.code??'已配置路径未满足资金或保证金约束'};
     }
-    if (verification?.stress==='pass') verification.stress=pressure.status;
+    if (verification?.stress==='pass') verification.stress=pressure.status==='pass' && !pressure.fullStress?'unknown':pressure.status;
   }
   return {
     sign, i, j, key: pointKey(row), h: row.h,

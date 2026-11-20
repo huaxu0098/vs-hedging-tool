@@ -610,6 +610,8 @@ main.live-desk {padding-block:14px}
 #scale-table[hidden] {display:none}
 
 #plan-stress:not(:empty) + #plan-caption:not(:empty)::before {content:' · '}
+#pressure-scope-note {margin:1px 0 4px; color:#654d2d; font-size:12px; line-height:1.3}
+#pressure-scope-note strong {font-weight:600}
 
 #max-risk {display:flex; flex-wrap:wrap; align-items:baseline; gap:2px 12px; margin:3px 0 7px;
   padding:5px 9px; border-left:3px solid #ae6e27; background:#f8f1e5; color:#70461c; font-size:12px}
@@ -688,6 +690,10 @@ main.live-desk {padding-block:14px}
 }
 
 @media(min-width:781px) and (max-height:820px) {
+  #scan-desk {row-gap:4px}
+  #scan-desk h2 {margin-bottom:4px}
+  #ratio-intervals,#scan-results {padding-top:4px}
+  #snapshot-note {font-size:13px; line-height:1.4; padding-block:4px}
   #scan-results .plan-matrix :is(th,td) {padding-block:0;line-height:1.15}
   #max-risk {margin:2px 0; padding-block:2px}
 }
@@ -701,9 +707,14 @@ main.live-desk {padding-block:14px}
 #current[data-historical="true"] #scan-results .plan-matrix :is(th,td):nth-child(3) {background:#e9eeea; color:#42584b}
 #scan-results .plan-matrix thead th[data-pressure-status="fail"] small {color:#88441e}
 #scan-results .plan-matrix :is([data-metric="minFailure"],[data-metric="minSuccess"]) td {font-weight:650}
+#scan-results .plan-matrix [data-metric="cashBuffer"] :is(th,td) {font-weight:700}
+#scan-results .plan-matrix [data-metric="cashBuffer"] td.negative-buffer {color:#9a3425}
 #positions-view details > summary {cursor:pointer; color:#285a47; font-size:13px}
 #plan-evidence details {margin:4px 0; border-top:1px solid #d2ded6; padding:6px 0}
 #plan-evidence p {color:#53665c; margin:4px 0; font-size:12px}
+.pressure-metrics {display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:6px 16px; margin:8px 0}
+.pressure-metrics dt {font-size:12px; color:#50645b}
+.pressure-metrics dd {margin:1px 0; font-weight:600; font-variant-numeric:tabular-nums}
 #plan-evidence table {font-size:12px; font-variant-numeric:tabular-nums; border-collapse:collapse}
 #plan-evidence td small {display:block; font-weight:normal; color:#53665c}
 @media(max-width:640px) {

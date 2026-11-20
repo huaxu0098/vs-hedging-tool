@@ -94,7 +94,8 @@ test('延迟到达时的开仓初保可单独淘汰低档杠杆，持仓期维�
   const row=planRecord({ctx},p),shock=row.pressureSummary;
   const delay=shock.cases.find(c=>c.id==='delay');
   assert.equal(row.leverage,'2');assert.equal(shock.status,'fail');assert.equal(shock.retryLeverage,true);
-  assert.equal(delay.fail.status,'fail');assert.equal(delay.fail.cash,null);assert.ok(dec(delay.fail.minSurplus).gt(0));
+  assert.equal(delay.fail.status,'fail');assert.equal(delay.fail.cash,null);assert.ok(dec(delay.fail.admission.maintenanceSurplus).gt(0));
+  assert.equal(delay.fail.minSurplus,null); // 拒绝调仓，目标仓从未实际占用保证金。
   assert.match(delay.reason,/初始保证金|可用抵押品/);
 });
 
@@ -155,4 +156,87 @@ test('已有反向原仓由延迟前路径单独承受，延迟成本按跨零�
   const incomplete=planRecord({ctx},{sign:1,i:10,j:2});
   assert.equal(incomplete.pressureSummary.cases.find(x=>x.id==='delay').status,'unknown');
   assert.equal(incomplete.configuredPass,false);
+});
+
+const noAssumptions={basis:'',async:'',delay:'',jump:'',funding:''};
+
+test('A–C 可报价与全情景认证分别计数，D 缺退出价，零幅度和缺值均保留未知',()=>{
+  const {pressureSummary:p}=planRecord({ctx:fixture({...noAssumptions,delay:'0'})},{sign:1,i:10,j:2});
+  assert.deepEqual([p.coverage.total,p.coverage.verified,p.coverage.unverified,p.coverage.passed,p.coverage.failed],[9,3,6,3,0]);
+  assert.deepEqual(p.coverage.verifiedLabels,p.cases.slice(0,3).map(c=>c.label));
+  assert.equal(p.fullStress,false);
+  assert.equal(p.coverage.allSpecifiedPassed,false);
+  const d=p.cases.find(c=>c.id==='D');
+  assert.equal(d.verified,false);assert.equal(d.fail.cash,null);assert.equal(d.success.cash,null);
+  const all=planRecord({ctx:fixture()},{sign:1,i:10,j:2});
+  assert.deepEqual(all.pressureSummary.coverage.unverifiedLabels,[d.label]);
+  assert.equal(all.coverage,'conditional');assert.equal(all.pressureSummary.fullStress,false);
+  assert.notEqual(all.verification.stress,'pass');
+});
+
+test('C 最差失败回收500.0040与成功留存100.0171分别追溯，额外保本缓冲独立准入',()=>{
+  const ctx=fixture(noAssumptions);
+  const point={sign:1,i:10,j:2};
+  const run=()=>planRecord({ctx},point).pressureSummary;
+  // Adjust two input equities/rules on a real quantity grid. Hype's starting
+  // balance shifts both exits equally; the PF success target only moves success.
+  const base=run();
+  const newHL=dec(ctx.book.hl).plus(dec('500.0040').minus(base.minFailure.value));
+  ctx.book.hl=newHL.toString();ctx.market.hl.free=newHL.toString();
+  ctx.book.B='500';
+  const successNow=dec(run().minSuccess.value);
+  const pf=ctx.market.pf,hl=ctx.market.hl;
+  const pfSlope=dec('10').times(dec('1').minus(pf.rate));
+  const hypeSlope=dec('-2').minus(dec('2').times(hl.rate));
+  ctx.book.challengeTarget=dec(ctx.book.challengeTarget).plus(dec('100.0171').minus(successNow).times(pfSlope).div(hypeSlope)).toString();
+  ctx.params.R='100';
+  let p=run();
+  assert.equal(p.minFailure.id,'C');assert.equal(p.minSuccess.id,'C');
+  close(p.minFailure.value,'500.004');close(p.minSuccess.value,'100.0171');
+  close(p.cashBuffers.fail,'0.004');close(p.cashBuffers.success,'0.0171');close(p.cashBuffers.minimum,'0.004');
+  assert.equal(p.status,'pass');
+  ctx.params.recoveryBuffer='0.005'; p=run();
+  assert.equal(p.status,'fail');
+  close(p.cashBuffers.minimum,'0.004'); // B 未变；只收紧准入标准。
+  assert.ok(p.coverage.failed>=1);
+  assert.equal(p.cases.find(c=>c.id==='C').verified,true);
+});
+
+test('路径峰值计入同池占用，实际可用最低为零，签名抵押缺口不归入清算损失',()=>{
+  const ctx=fixture(noAssumptions);
+  ctx.book.challengeTarget='1420';
+  Object.assign(ctx.market.hl,{hold:'8',otherMaintenance:'1.2',free:'142'});
+  ctx.params.R='40';
+  const row=planRecord({ctx},{sign:1,i:10,j:2}),p=row.pressureSummary;
+  assert.equal(row.leverage,'2');
+  const path=row.liquidity.pass.two.path;
+  const worst=path.checkpoints.at(-1);
+  assert.ok(dec(worst.surplus).gt(0));assert.ok(dec(worst.free).lt(0));
+  const reached=['pass','fail'].flatMap(end=>[row.liquidity[end].full,row.liquidity[end],row.liquidity[end].two])
+    .flatMap(e=>e.path.checkpoints);
+  const extrema=(field,order)=>reached.reduce((a,b)=>dec(b[field]).cmp(a[field])===order?b:a);
+  close(p.openingInitial,dec(row.hl).abs().times(ctx.market.hl.mark).div(row.leverage));
+  close(p.openingFree.value,row.free);
+  close(p.maxMarginUsed.value,extrema('marginUsed',1).marginUsed);
+  assert.ok(dec(p.maxMarginUsed.value).gt(p.openingInitial));
+  close(p.maxCollateralDeficit.value,dec(extrema('free',-1).free).neg());close(p.minFreeCollateral.value,'0');
+  close(p.minSurplus.value,extrema('surplus',-1).surplus);
+  assert.ok(p.minLiquidationDistance.value);assert.equal(p.minLiquidationDistance.source,'cross-model');
+  close(p.minLiquidationDistance.value,dec(p.minLiquidationDistance.liquidationMark).minus(extrema('mark',1).mark));
+  assert.ok(p.cases.find(c=>c.id==='C').success.cash);
+});
+
+test('提前清算在首次触线截断；不足量拒绝全量结算且不产生已核验现金',()=>{
+  const ctx=fixture({...noAssumptions,async:'8000'});
+  const row=planRecord({ctx},{sign:1,i:10,j:2}),p=row.pressureSummary;
+  const lag=p.cases.find(c=>c.id==='async');
+  assert.equal(lag.verified,true);assert.equal(lag.success.cash,null);assert.equal(lag.success.status,'fail');
+  close(p.minLiquidationDistance.value,'0');close(p.minSurplus.value,'0');
+  // A reached liquidation before an oversized jump ends. The margin and the
+  // implied deficit stop at liquidation, not at the counterfactual jump end.
+  const root=dec(p.minLiquidationDistance.liquidationMark);
+  close(lag.success.maxMarginUsed,root.times(dec(row.hl).abs()).div(row.leverage));
+  ctx.market.hl.asks=ctx.market.hl.asks.slice(0,2);
+  const c=planRecord({ctx},{sign:1,i:10,j:2}).pressureSummary.cases.find(c=>c.id==='C');
+  assert.equal(c.status,'fail');assert.equal(c.verified,false);assert.equal(c.fail.cash,null);
 });

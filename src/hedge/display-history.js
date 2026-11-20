@@ -1,5 +1,5 @@
 import { planObjectives, recordFromInspection } from './position-plans.js';
-import { dec, out } from './math.js';
+import { dec, min, out } from './math.js';
 import { modelVersion, bookIdentity } from './trace.js';
 
 // The same immutable publication feeds all target views, including after a reload.
@@ -9,6 +9,30 @@ function freezeTree(value) {
     for (const child of Object.values(value)) freezeTree(child);
   }
   return value;
+}
+
+// Reject mismatched cash, coverage and witnesses before any view can publish the frame.
+function verifyPressureSummary(row,scan) {
+  const summary=row.pressureSummary, {cases,coverage,cashBuffers} = summary;
+  const known=cases.filter(c=>c.verified);
+  if (new Set(cases.map(c=>c.id)).size!==cases.length || coverage.total!==cases.length ||
+      coverage.verified!==known.length || coverage.unverified!==cases.length-known.length ||
+      coverage.passed!==known.filter(c=>c.status==='pass').length ||
+      coverage.failed!==known.length-coverage.passed ||
+      coverage.allSpecifiedPassed!==(coverage.passed===cases.length && summary.status==='pass'))
+    throw Error('本帧压力情景的核验计数不一致');
+  function buffer(minimum,threshold,endpoint) {
+    if (minimum==null) return null;
+    const witness=cases.find(c=>c.id===minimum.id);
+    if (!witness?.configured || witness[endpoint]?.cash!==minimum.value)
+      throw Error('本帧最低现金缺少可对账的情景');
+    return out(dec(minimum.value).minus(threshold));
+  }
+  const fail=buffer(summary.minFailure,scan.ctx.book.B,'fail');
+  const success=buffer(summary.minSuccess,scan.ctx.params.R,'success');
+  const both=fail==null || success==null ? null : out(min(fail,success));
+  if (!cashBuffers || cashBuffers.fail!==fail || cashBuffers.success!==success || cashBuffers.minimum!==both)
+    throw Error('目标仓位的最差现金缓冲与本帧资金门槛不一致');
 }
 
 function finalizeSnapshot(view) {
@@ -40,7 +64,13 @@ function finalizeSnapshot(view) {
         throw Error('压力资金极值与本帧情景不一致');
     }
   }
-  for (const row of targets.filter(Boolean)) {
+  if (trace.model===modelVersion && pressure) {
+    const all=pressure.allSpecified;
+    if (all?.key!=null && (!pressure.row?.pressureSummary?.coverage?.allSpecifiedPassed || all.key!==pressure.key))
+      throw Error('全部指定压力最大值缺少对应候选的完整核验');
+  }
+  for (const row of new Set(targets.filter(Boolean))) {
+    if (trace.model===modelVersion && row.pressureSummary) verifyPressureSummary(row,view.ratioScan);
     if (row.pressureSummary && (row.pressureSummary.key!==row.key || row.pressureSummary.leverage!==row.leverage)) throw Error('压力结果与本帧目标仓位不一致');
     if (dec(row.pf).cmp(0) !== row.sign || (dec(row.hl).cmp(0) && dec(row.hl).cmp(0) !== -row.sign))
       throw Error('双边有符号目标与计算方向不一致');
@@ -94,7 +124,7 @@ export function publicationState(result,snapshot,market,blocked=false) {
   if (!result.ratioScan || !snapshot || !trace ||
       trace.id!==snapshot.snapshotId || trace.marketId!==snapshot.quoteSnapshotId ||
       trace.accountsId!==snapshot.accountSnapshotId || trace.rulesId!==snapshot.rulesVersion ||
-      trace.model!==snapshot.solverVersion || result.finishedAt!==snapshot.calculatedAt) return 'updating';
+      trace.model!==modelVersion || trace.model!==snapshot.solverVersion || result.finishedAt!==snapshot.calculatedAt) return 'updating';
   if (snapshot.bookIdentity !== bookIdentity(market)) return 'updating';
   return 'ready';
 }
@@ -102,6 +132,7 @@ export function publicationState(result,snapshot,market,blocked=false) {
 export function createSolutionSnapshot(result) {
   const scan = result.baseScan ?? result.ratioScan;
   const { inputs, ...trace } = result.trace;
+  if (trace.model!==modelVersion) throw Error('求解器版本已变更，本帧仅可作为历史记录');
   if (![trace.id,trace.marketId,trace.accountsId,trace.rulesId,trace.model,trace.at].every(Boolean))
     throw Error('计算快照缺少行情、账户或规则版本');
   const { sets, buckets, representative, analysis, complete } = scan;
@@ -169,10 +200,16 @@ export function displayHistory(storage) {
       previousKey = scope;
       previous = null;
       try {
-        const saved = JSON.parse(storage.getItem(key(scope)) ?? storage.getItem(key(scope,'AUTO-0.21.6')) ?? storage.getItem(key(scope,'AUTO-0.21.5')) ?? storage.getItem(key(scope,'AUTO-0.21.4')) ?? storage.getItem(key(scope,'AUTO-0.21.3')) ?? storage.getItem(key(scope,'AUTO-0.21.2')) ?? storage.getItem(key(scope,'AUTO-0.21.1')));
+        const versions=[modelVersion,'AUTO-0.21.7','AUTO-0.21.6','AUTO-0.21.5','AUTO-0.21.4','AUTO-0.21.3','AUTO-0.21.2','AUTO-0.21.1'];
+        let stored;
+        for (const version of versions) {
+          stored=storage.getItem(key(scope,version));
+          if (stored!=null) break;
+        }
+        const saved=stored?JSON.parse(stored):null;
         if (
           saved?.scope === scope &&
-          [modelVersion,'AUTO-0.21.6','AUTO-0.21.5','AUTO-0.21.4','AUTO-0.21.3','AUTO-0.21.2','AUTO-0.21.1'].includes(saved.view?.trace?.model) &&
+          versions.includes(saved.view?.trace?.model) &&
           saved.view.ratioScan?.complete &&
           Array.isArray(saved.view.ratioScan.buckets) &&
           saved.view.ratioScan.ctx?.market?.pf &&

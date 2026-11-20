@@ -220,7 +220,8 @@ function buildMarket(data, r, a, currencies) {
     market[key] = {
       symbol: q.symbol,
       underlying: asset,
-      unit: (isPF ? currencies.pf : currencies.hl).quantityUnit,
+      unit: currencies[key].quantityUnit,
+      quoteCurrency: currencies[key].quoteAsset,
       type: 'linear',
       mappingVerified: true,
       multiplier: currencies.legs[key].multiplier,
@@ -468,10 +469,11 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
     }
     delete result.pressureContext;
     if (result.autoStatus==='AUTO_FEASIBLE' &&
-        (pressure.status!=='feasible' || pressure.row?.coverage!=='verified' ||
+        (pressure.allSpecified.status!=='verified' || pressure.row?.coverage!=='verified' ||
         ordinary.plans.rows.some(row=>ordinary.plans.targetKeys.includes(row.key) && row.coverage!=='verified'))) {
       result.autoStatus='AUTO_PARTIAL';
-      result.unverified=[...(result.unverified??[]),'部分目标的退出深度、路径资金或全仓数据未通过完整核验'];
+      result.unverified=[...(result.unverified??[]),pressure.allSpecified.status==='unverified'
+        ?pressure.allSpecified.reason:'部分目标的退出深度、路径资金或全仓数据未通过完整核验'];
     }
   }
   if (result.autoStatus==='AUTO_FEASIBLE' && !result.ratioScan && !result.needsSearch) {
