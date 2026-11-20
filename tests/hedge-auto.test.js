@@ -789,6 +789,20 @@ test('OPT05 两腿各自新鲜仍触发相对时间熔断，包括标记价及�
   assert.equal(x.adjust, undefined);
   assert.match(x.issues.join(' '), /账户熔断/);
 });
+test('盘口时差 1088 ms 超过阈值时停止发起求解，恢复到边界后重新接受', () => {
+  const f=fixture();
+  f.m.hl.markAt=at;
+  const check=lag=>{
+    f.m.hl.bookAt=new Date(t-lag).toISOString();
+    return calculateCurrent({...inputs,quoteSkewMs:'1000'},f.a,f.m,{},t,{deferAuto:true});
+  };
+  assert.ok(check(0).needsSearch);
+  const blocked=check(1088);
+  assert.equal(blocked.timing.quoteSkew,1088);
+  assert.ok(!blocked.needsSearch && !blocked.candidate);
+  assert.match(blocked.issues.join(' '),/行情熔断/);
+  assert.ok(check(1000).needsSearch);
+});
 test('OPT06 独立清算核对覆盖正反向、多档、真实现仓参考不符和无正价交点', async () => {
   const { crossCheckRoot } = await import('../src/hedge/cross-check.js');
   const leg = {
@@ -2010,4 +2024,40 @@ test('真实数量回归：0.01685 与 0.03370 BTC 的全仓保证金分别复�
   const a=get(small), b=get(large);
   assert.equal(a.leverage,b.leverage);
   assert.ok(dec(b.initial).eq(dec(a.initial).times(2)));
+});
+
+test('固定杠杆与自动杠杆对照使用同一对大小仓，并独立核对逐档抵押品', () => {
+  for (const account of ['flat','held']) {
+    const f=fixture();
+    if (account==='held') {
+      Object.assign(f.a.hl,{qty:'1',anchor:'95',currentMarginCredit:'20',free:'100'});
+      f.a.pf.qty='-2';
+    }
+    const scan=scanFixture({},f).ratioScan;
+    const {fixed,comparison,rows}=scan.plans;
+    assert.ok(comparison);
+    if (account==='flat') assert.ok(fixed.rows);
+    const auto=[comparison.small,comparison.large].map(key=>rows.find(r=>r.key===key));
+    const grids=auto.map(row=>inspectRatio(scan.ctx,row,{includeLeverageGrid:true}).leverageGrid);
+    const common=grids[0].filter(l=>l.status==='pass' && l.leverage &&
+      grids[1].some(other=>other.status==='pass' && other.leverage===l.leverage));
+    if (!common.length) {
+      assert.match(fixed.reason,/没有.*共同杠杆/);
+      assert.equal(fixed.rows,undefined);
+      continue;
+    }
+    assert.equal(Number(fixed.leverage),Math.min(...common.map(l=>l.leverage)));
+    const equity=profileInputs(scan.ctx.book,scan.ctx.params,scan.ctx.market).C_hl;
+    for (const [index,row] of fixed.rows.entries()) {
+      const level=grids[index].find(l=>String(l.leverage)===fixed.leverage);
+      assert.equal(row.key,auto[index].key);
+      assert.equal(row.initial,level.initial);
+      assert.equal(row.free,level.freeAfter);
+      assert.ok(dec(row.marginRate).eq(dec(row.initial).div(equity)));
+      for(const key of ['h','pf','hl','fail','success','liquidation','distance']) assert.equal(row[key],auto[index][key]);
+      assert.equal(row.leverage,fixed.leverage);
+    }
+    const [small,large]=fixed.rows;
+    assert.ok(dec(large.initial).times(small.hypeValue).minus(dec(small.initial).times(large.hypeValue)).abs().lt('1e-38'));
+  }
 });

@@ -26,7 +26,7 @@ const install = `(() => {
           pfMark:s.ctx.market.pf.mark,hlMark:s.ctx.market.hl.mark, count:s.sets.legal.count,
           revaluation:r.revaluation, sequence:data.version, protect:s.ctx.book.B, reserve:s.ctx.params.R,
           plans:['最大 PF 仓位','失败回收优先','成功留存优先'].map(label=>s.plans.rows.find(row=>row.labels.includes(label))).filter(Boolean),
-          comparison:s.plans.comparison, comparisonRows:s.plans.rows.filter(row=>row.labels.includes('同 h 规模对照')),
+          fixed:s.plans.fixed, comparison:s.plans.comparison, comparisonRows:s.plans.rows.filter(row=>row.labels.includes('同 h 规模对照')),
           joint:{count:s.sets.both.count,min:s.sets.both.min,max:s.sets.both.max,minCount:s.sets.both.minCount,maxCount:s.sets.both.maxCount,
             counts:s.buckets.map(bin=>[bin.edgeKey,bin.both])}, rep:rep && {pf:rep.pfValue, hl:rep.hypeValue, fail:rep.fail, success:rep.success},
           bins:s.buckets.flatMap((b,index)=>{
@@ -135,7 +135,7 @@ try {
         leverage:plan.leverage+'×',initial:money(plan.initial),marginRate:pct(plan.marginRate,2),free:money(plan.free),distance
       })) assert.equal(cells[field],expected,field+' / '+key);
       if(i===0) {
-        assert.match(f.warning,/最大基础情景可行仓位，压力安全性未验证/);
+        assert.match(f.warning,dec(plan.failDelta).lte('0.01') ? /基础情景可行，但缓冲极薄，压力风险未验证/ : /最大基础情景可行仓位，压力安全性未验证/);
         for(const field of ['marginRate','free','distance']) assert.ok(f.warning.includes(cells[field]));
       }
       if(plan.both) assert.ok(dec(plan.fail).gte(f.protect) && dec(plan.success).gte(f.reserve));
@@ -184,51 +184,48 @@ try {
     if (width>=1000) assert.ok(layout.table <= height, JSON.stringify(layout));
     evidence.viewports.push(layout);
   }
-  assert.ok(await run("!document.querySelector('#scale-details').open && !document.querySelector('#desk-details').open && document.getElementById('plan-columns').rows[0].cells.length===4 && !document.body.innerText.includes('全部目标仓位')"));
+  assert.ok(await run("!document.getElementById('positions-view').open && !document.querySelector('#desk-details').open && document.getElementById('plan-columns').rows[0].cells.length===4 && !document.body.innerText.includes('全部目标仓位')"));
   for (const f of frames) {
     assert.equal(f.joint.counts.find(([key]) => key === 'joint')[1],f.joint.count);
     assert.ok(f.joint.counts.every(([key,n]) => key==='joint' || n===0));
     assert.ok(f.joint.minCount>0 && f.joint.maxCount>0);
   }
   await b.click('#scale-link');
-  assert.ok(await run("document.getElementById('scale-details').open && document.getElementById('desk-details').open"));
+  assert.ok(await run("document.getElementById('positions-view').open && !document.getElementById('desk-details').open && !document.getElementById('live-view').open"));
   const comparison = await run(`(() => {
     const e=id=>document.getElementById(id), id=e('scan-desk').dataset.resultId;
     const result=window.scanTest.results[id], read=id=>[...e(id).rows].map(tr=>[...tr.cells].map(td=>td.textContent));
-    return {id, result:result.comparison, plans:result.comparisonRows, cells:read('scale-rows'),
-      headline:e('scale-caption').textContent,source:e('scan-source').textContent};
+    return {id, auto:result.comparison, autoPlans:result.comparisonRows, autoCells:read('scale-rows'),
+      fixed:result.fixed,fixedCells:read('fixed-scale-rows'), source:e('scan-source').textContent,
+      targets:[...e('position-list-rows').rows].map(r=>r.dataset.point), winners:result.plans.map(r=>r.key)};
   })()`);
-  const {result,plans,cells}=comparison;
-  assert.equal(cells.length,16);
-  const small=plans.find(p=>p.key===result.small), large=plans.find(p=>p.key===result.large);
-  for (const [index,key] of ['pf','pfValue','hl','hypeValue','initial','marginRate','failDelta','success','distance','leverage','maintenance','free','otherInitial','liquidation','baseSurplus','stressSurplus'].entries()) {
-    const val=row=>['pf','hl'].includes(key)?dec(row[key]).abs():dec(row[key]);
-    if (small[key]==null || large[key]==null) { assert.equal(cells[index][3],'未验证'); continue; }
-    for(const p of [small,large]) assert.ok(dec(p.initial).eq(dec(p.hypeValue).div(p.leverage)));
-    const delta=val(large).minus(val(small));
-    assert.ok(delta.eq(result.delta[key]));
-    const displayed=cells[index][3].replace('−','-').split(' ')[0];
-    const digits=['pf','hl','leverage'].includes(key) ? delta.decimalPlaces() : ['failDelta','success'].includes(key) || (['initial','pfValue','hypeValue','maintenance','free','otherInitial','baseSurplus','stressSurplus'].includes(key)&&delta.abs().lt(1)&&!delta.isZero()) ? 4 : 2;
-    const expected=key==='marginRate'?delta.times(100):delta;
-    assert.ok(dec(displayed).eq(expected.toDecimalPlaces(digits)),key+' '+displayed+' / '+expected);
+  assert.deepEqual(comparison.targets,comparison.winners);
+  for (const [pair,plans,cells] of [[comparison.auto,comparison.autoPlans,comparison.autoCells],
+    [comparison.fixed?.comparison,comparison.fixed?.rows,comparison.fixedCells]]) {
+    if(!pair) {assert.equal(cells.length,0);continue;}
+    const small=plans.find(p=>p.key===pair.small), large=plans.find(p=>p.key===pair.large);
+    assert.equal(cells.length,12);
+    for (const [index,key] of ['pf','pfValue','hl','hypeValue','initial','marginRate','failDelta','success','distance','leverage','free','fail'].entries()) {
+      const val=row=>['pf','hl'].includes(key)?dec(row[key]).abs():dec(row[key]);
+      if (small[key]==null || large[key]==null) { assert.equal(cells[index][3],'未验证'); continue; }
+      const delta=val(large).minus(val(small));
+      assert.ok(delta.eq(pair.delta[key]),key);
+      for(const [col,p] of [small,large].entries()) {
+        assert.ok(dec(p.initial).eq(dec(p.hypeValue).div(p.leverage)));
+        const printed=dec(cells[index][col+1].split(' ')[0].replace('%',''));
+        const expected=key==='marginRate'?val(p).times(100):val(p);
+        assert.ok(printed.minus(expected).abs().lte('0.005'),key+' printed '+printed+' / '+expected);
+      }
+      const displayed=dec(cells[index][3].replace('−','-').split(' ')[0]);
+      const expected=key==='marginRate'?delta.times(100):delta;
+      assert.ok(displayed.minus(expected).abs().lte('0.005'),key);
+    }
   }
+  if (comparison.fixed?.rows) assert.equal(comparison.fixed.rows[0].leverage,comparison.fixed.rows[1].leverage);
   assert.match(comparison.source,/预设资金规划.*规划空仓/);
-  if(result.delta.distance!=null) assert.match(comparison.headline,/强平距离(?:缩短|增加|相同)/);
   evidence.scaleComparison=comparison;
-  await b.click('#scale-details > summary');
-  await b.click('#grid-disclosure > summary');
-  await b.click('#plan-view');
-  await wait("document.querySelector('#grid-caption').textContent.includes('第 1 页')");
-  const first=await run("document.querySelector('#grid-rows tr').dataset.point");
-  await b.click('#plan-next');
-  assert.match(await b.text('#grid-caption'), /第 2 页/);
-  assert.notEqual(await run("document.querySelector('#grid-rows tr').dataset.point"),first);
-  await b.click('#plan-prev');
-  assert.match(await b.text('#grid-caption'), /第 1 页/);
-  await b.click('#plan-last');
-  assert.ok(await run("document.getElementById('plan-next').disabled && document.getElementById('grid-rows').rows.length>0"));
-  await b.click('#plan-close');
-  assert.match(await b.text('#plan-columns'), /失败端回收缓冲优先/);
+  await b.click('#desk-views button[aria-controls="live-view"]');
+  assert.ok(await run("document.getElementById('live-view').open && !document.getElementById('plan-next')"));
   // Hold one legitimate request, supersede it with a new rule, then deliver
   // the old response after dispatch. It must never become visible.
   await run('window.scanTest.hold=true');
@@ -261,6 +258,29 @@ try {
   assert.deepEqual(changed.shown, changed.plans.map(p=>p.key));
   assert.ok(changed.plans.every(p=>dec(p.success).gte(changed.reserve)));
   evidence.fundingChange = {reserve:changed.reserve, targets:changed.shown};
+  // Tighten only the allowed skew across real market observations. Hold the
+  // first recovered job to observe the gap between feed recovery and publication.
+  await run("window.scanTest.held=[];window.scanTest.hold=true");
+  await set('#quoteSkewMs','0','input');
+  await wait("document.getElementById('scan-status').textContent.includes('行情熔断')",20000);
+  const readState=()=>run(`(()=>{const e=id=>document.getElementById(id);return {id:e('scan-desk').dataset.resultId,
+    historical:e('current').dataset.historical,note:e('snapshot-note').innerText,status:e('scan-status').textContent,
+    targets:[...e('plan-columns').rows[0].cells].slice(1).map(c=>c.dataset.point),state:e('scan-desk').dataset.state,
+    promotion:getComputedStyle(e('max-risk')).display}})()`);
+  const blocked=await readState();
+  assert.equal(blocked.historical,'true'); assert.equal(blocked.state,'paused');
+  assert.match(blocked.note,/历史快照.*新目标建议已暂停/); assert.doesNotMatch(blocked.status,/当前数据有效/);
+  assert.equal(blocked.promotion,'none');
+  await set('#quoteSkewMs','3000','input');
+  await wait("document.getElementById('scan-desk').dataset.state==='recovering' && window.scanTest.held.length>0",20000);
+  const recovering=await readState();
+  assert.equal(recovering.historical,'true');assert.equal(recovering.id,blocked.id);
+  assert.deepEqual(recovering.targets,blocked.targets);assert.doesNotMatch(recovering.status,/当前数据有效/);
+  await run("window.scanTest.hold=false;window.scanTest.held.at(-1).send()");
+  await wait(ready+" && document.getElementById('scan-desk').dataset.resultId!=="+JSON.stringify(blocked.id),45000);
+  const restored=await readState();
+  assert.equal(restored.historical,'false');assert.equal(restored.note,'');assert.match(restored.status,/当前数据有效/);
+  evidence.breaker={blocked,recovering,restored};
   assert.ok(evidence.observation.elapsedMs >= 60000 && evidence.observation.quoteChanges > 1);
   assert.equal(evidence.observation.neighborBlanks, 0);
   assert.equal(evidence.observation.neighborRemounts, 0);

@@ -1,5 +1,5 @@
 import { sumPostings } from './settlement-ledger.js';
-import { executionDetail } from './solver.js';
+import { executionDetail, profileInputs } from './solver.js';
 import { dec, out } from './math.js';
 import { exactRatio, adjacentScale, inspectRatio, ratioSlice, scalesPerBlock, lastLotAtRatio } from './ratio-scan.js';
 
@@ -188,8 +188,12 @@ export function buildPlanReport(scan, pending = false) {
   for (const point of examples) add(point, '同 h 规模对照');
   if (!points.size)
     for (const point of pagePoints(scan, index, null, 3).rows) add(point, '合法规模');
+  const levelsByPoint = new Map();
   const rows = [...points.values()].map(({labels,...point}) => {
-    const row = planRecord(scan, point);
+    const compare = labels.includes('同 h 规模对照');
+    const inspected = inspectRatio(scan.ctx, point, {includeLeverageGrid:compare});
+    const row = recordFromInspection(scan.ctx, inspected);
+    if (compare) levelsByPoint.set(row.key, inspected.leverageGrid);
     if (labels.some(l => l.endsWith('优先') || l === '最大 PF 仓位') &&
         (!ratioSlice(scan,row.sign,row.i,'eligible').some(([lo,hi]) => lo <= row.j && row.j <= hi) ||
           !row.both || row.failStop || row.passStop ||
@@ -203,7 +207,25 @@ export function buildPlanReport(scan, pending = false) {
     group.push(row);
     fractions.set(row.fraction, group);
   }
-  return { index, rows: [...fractions.values()].flat(), comparison: scaleComparison(rows), pending, eligible: pending ? 0 : eligible.count };
+  const comparison = scaleComparison(rows);
+  const fixed = comparison ? fixedScaleComparison(rows, comparison, levelsByPoint, profileInputs(scan.ctx.book, scan.ctx.params, scan.ctx.market).C_hl) : null;
+  return { index, rows: [...fractions.values()].flat(), comparison, fixed, pending, eligible: pending ? 0 : eligible.count };
+}
+
+// Cross margin shares the same settlement ledger and maintenance path at a given
+// target. Read each target's own fixed-setting funding row, including switch constraints.
+function fixedScaleComparison(rows, pair, levelsByPoint, equity) {
+  const keys = [pair.small, pair.large];
+  const grids = keys.map(key => levelsByPoint.get(key).filter(row => row.status === 'pass' && row.leverage));
+  const small = grids[0].find(row => grids[1].some(other => other.leverage === row.leverage));
+  if (!small) return { reason:'两种规模没有同时通过保证金及清算校验的共同杠杆档位' };
+  const large = grids[1].find(row => row.leverage === small.leverage);
+  const fixed = [small,large].map((level, index) => {
+    const plan = rows.find(row => row.key === keys[index]);
+    return { ...plan, leverage:String(level.leverage), initial:level.initial, free:level.freeAfter,
+      marginRate:dec(equity).gt(0) ? out(dec(level.initial).div(equity)) : null };
+  });
+  return { leverage:String(small.leverage), rows:fixed, comparison:scaleComparison(fixed) };
 }
 
 // Pair actual evaluations from the same frame, direction and exact exposure
@@ -215,7 +237,7 @@ export function scaleComparison(rows) {
   if (!small.fraction || small.fraction !== large.fraction || small.sign !== large.sign || small.i === large.i)
     return null;
   const delta = {};
-  for (const key of ['pf','pfValue','hl','hypeValue','initial','marginRate','failDelta','success','distance','leverage','maintenance','free','otherInitial','liquidation','baseSurplus','stressSurplus']) {
+  for (const key of ['pf','pfValue','hl','hypeValue','initial','marginRate','fail','failDelta','success','distance','leverage','maintenance','free','otherInitial','liquidation','baseSurplus','stressSurplus']) {
     if (small[key] == null || large[key] == null) { delta[key] = null; continue; }
     const value = row => key === 'pf' || key === 'hl' ? dec(row[key]).abs() : dec(row[key]);
     delta[key] = out(value(large).minus(value(small)));

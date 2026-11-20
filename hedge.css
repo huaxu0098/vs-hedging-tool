@@ -597,50 +597,10 @@ main.live-desk {padding-block:14px}
 .bands-heading nav {display:flex;gap:6px}
 .bands-heading button {min-height:25px;padding:2px 9px;font:inherit;font-size:12px}
 #scan-results .plan-caption {margin:0 0 5px;font-size:12px;color:#53665f}
-.exact-plans td {line-height:1.25;font-weight:600}
-.exact-plans td small {font-weight:400;color:#50645b;line-height:1.32;font-variant-numeric:tabular-nums}
-.exact-plans th:first-child {width:15%}
-.exact-plans th:last-child {width:22%}
-.exact-plans tr.qualified td:first-child {color:#15563e}
-#scan-results .bands-heading nav {width:auto;margin:0}
 @media(max-width:780px) {
   #scan-results .bands-heading {display:flex;align-items:center;flex-wrap:wrap}
-  #scan-results .bands-heading h2 {flex:none}
   #scan-results .table-wrap {overflow:auto;overscroll-behavior-x:contain}
-  #scan-results .exact-plans {display:table;width:865px;table-layout:fixed}
-  #scan-results .exact-plans thead {display:table-header-group;position:static;width:auto;height:auto;clip-path:none}
-  #scan-results .exact-plans tbody {display:table-row-group}
-  #scan-results .exact-plans tr {display:table-row;padding:0}
-  #scan-results .exact-plans th,#scan-results .exact-plans td {display:table-cell;padding:4px 5px;font-size:12px}
-  #scan-results .exact-plans td::before {content:none}
-  #scan-results .exact-plans td small {display:block;font-size:11px}
-  #scan-results .exact-plans th:first-child {width:90px}
-  #scan-results .exact-plans td:first-child,#scan-results .exact-plans th:first-child {
-    position:sticky;left:0;background:#fbfcfa;border-right:1px solid #c7d2ca
-  }
-  #scan-results .exact-plans tr.qualified td:first-child {background:#eef5ef}
-  #scan-results .exact-plans th:nth-child(2),#scan-results .exact-plans th:nth-child(3) {width:121px}
-  .plan-caption::after {content:' · 左右滑动查看各仓位资金与风险'}
 }
-
-#scan-status {font:inherit;color:inherit}
-#scan-desk #segment-report {border-top:1px solid #b8c7be;margin-top:7px;padding-top:4px}
-#segment-report h3 {font-size:13px;margin:1px 0}
-#segment-list {display:flex;gap:0;overflow:auto;padding:2px 0}
-#segment-list>div {flex:1 0 auto;border-left:1px solid #d1dcd4;padding:0 7px}
-#segment-list>div:first-child {border:0;padding-left:0}
-#segment-list b,#segment-list small {display:block;font-variant-numeric:tabular-nums;font-size:12px}
-#segment-list small {color:#52665f}
-#segment-list button,#segment-report button,#grid-detail button {width:auto;min-height:20px;font:inherit;font-size:12px;padding:1px 5px;cursor:pointer}
-#segment-list button {border:0;background:transparent;color:#16614c;text-decoration:underline}
-#segment-list button:disabled {cursor:default;text-decoration:none;color:#66726c}
-#segment-list button[aria-pressed=true] {background:#e0eee4;font-weight:bold}
-#grid-detail nav {width:auto;display:flex;gap:5px;align-items:center;justify-content:flex-end;flex-wrap:wrap;margin:7px 0 4px}
-#grid-caption {margin-right:auto;font-size:12px}
-#scan-results .exact-plans td,#scan-results .exact-plans th {padding-block:3px}
-#grid-detail[hidden],#segment-report[hidden] {display:none}
-@media(max-width:780px){#segment-list>div {flex:0 0 auto} #grid-caption {width:100%}}
-
 #scale-details {margin:6px 0 0;border-top:1px solid #d1dcd4;padding:5px 0}
 #scale-details summary {color:#214f42;cursor:pointer;font-size:13px;font-weight:600}
 #scale-caption {font-size:13px;margin:6px 0;color:#50645b}
@@ -648,7 +608,6 @@ main.live-desk {padding-block:14px}
 #scale-table :is(th,td) {padding:4px 8px;text-align:right;border-bottom:1px solid #d7e0dc}
 #scale-table :is(th,td):first-child {text-align:left}
 #scale-table[hidden] {display:none}
-#grid-disclosure .table-wrap {overflow:auto}
 
 #plan-stress:not(:empty) + #plan-caption:not(:empty)::before {content:' · '}
 
@@ -669,4 +628,43 @@ main.live-desk {padding-block:14px}
   #max-risk a {margin-left:0}
   #scan-results .plan-matrix :is(th,td) {padding:3px; font-size:11px; overflow-wrap:anywhere}
   #scan-results .plan-matrix thead th {line-height:1.3}
+}
+
+#desk-views {display:flex; gap:0; border-bottom:1px solid #bccbc1; margin:0 0 7px; padding:0}
+#desk-views button {width:auto; min-height:25px; border:0; border-radius:0; border-bottom:2px solid transparent;
+  background:transparent; padding:3px 13px; color:#51685b; font:inherit; font-size:13px; cursor:pointer}
+#desk-views button[aria-expanded="true"] {color:#174d3b; border-color:#267656; font-weight:700}
+#current > details[name="workbench-view"] {margin:0; padding:0; border:0; background:transparent}
+#current > details[name="workbench-view"] > summary {display:none}
+#position-list, #fixed-scale-table {width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums}
+#positions-view :is(th,td) {padding:3px 8px; text-align:right}
+#positions-view :is(th,td):first-child {text-align:left}
+#positions-view h2 {font-size:16px; margin:8px 0}
+#positions-view h3 {font-size:14px; margin:12px 0 4px}
+#fixed-scale-caption {font-size:13px; color:#50645b; margin:6px 0}
+.history-label {display:none; font-size:12px; font-weight:600; color:#755323}
+#snapshot-note {margin:0 0 6px; padding:5px 10px; border-left:3px solid #98713d; background:#f6f0e6; color:#684f2d}
+#current[data-historical="true"] .history-label {display:inline}
+#current[data-historical="true"] :is(#scan-representative,#max-risk,#plan-caption) {display:none}
+#current[data-historical="true"] :is(#scan-focus,#ratio-intervals,#plan-comparison,#positions-view) {color:#516158}
+#current[data-historical="true"] :is(#scan-focus strong,#scan-both,#plan-rows td) {color:#516158}
+#current[data-historical="true"] #desk-state {color:#79551e}
+@media(min-width:781px) {
+  #current .desk-title {margin-bottom:4px}
+  #scan-desk {row-gap:6px}
+  #scan-results .plan-matrix :is(th,td) {padding-block:1px}
+  main.live-desk {padding-top:8px}
+}
+
+@media(min-width:1000px) {
+  #scale-details {display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:20px}
+  #scale-details h2 {grid-column:1/-1}
+  #scale-details :is(td,th) {min-width:0; font-size:12px; white-space:normal}
+}
+#current[data-historical="true"] #plan-columns small::before {content:'历史快照 · '}
+@media(max-width:520px) {
+  #desk-state {min-height:1.35em}
+  #desk-views {margin-bottom:3px}
+  #scan-desk {row-gap:4px}
+  #scan-focus .scan-rep {margin-top:3px}
 }

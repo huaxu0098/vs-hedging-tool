@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { calculateCurrent } from '../../src/hedge/current.js';
 import { dec } from '../../src/hedge/math.js';
-import { planRecord, segmentPage, pointKey } from '../../src/hedge/position-plans.js';
 import { openTestBrowser } from './chrome.js';
 const b = await openTestBrowser({ current: true });
 const { run, wait, click, set, send, text } = b;
@@ -39,7 +38,7 @@ async function record(label) {
 }
 try {
   await send('Page.navigate', { url: (process.env.CURRENT_URL ?? b.url) + '/' });
-  await wait("!!document.querySelector('#desk-details > summary#scan-config')");
+  await wait("!!document.querySelector('#desk-views #scan-config')");
   assert.equal(await run("document.querySelector('#desk-details').open"), false);
   assert.ok(
     await run(
@@ -184,26 +183,14 @@ try {
   const phr = await text('#scan-position');
   if (!phr.includes('仅作路径对照')) assert.ok(parseFloat(await text('#scan-fail-cash')) >= 501);
   await record('安全缓冲改为 1 U 后重新求解');
-  // Capture the trusted input, native grid coordinates and clicked rows within
+  // Capture the trusted input and displayed target keys within
   // one UI event so that new ticks cannot mix versions during the comparison.
   const guarded = await run(`(() => {
     const el = id => document.getElementById(id);
     const box = el('trace-inputs').parentElement;
     box.open = true; box.ontoggle();
-    const sections = [];
-    for (const button of el('segment-list').querySelectorAll('button[data-kind="both"]:enabled')) {
-      const readRows = () => [...el('grid-rows').rows].map(row => ({
-        key:row.dataset.point, fraction:row.dataset.ratio, size:row.dataset.pfSize,
-        fail:row.cells[3].firstChild.nodeValue, success:row.cells[4].firstChild.nodeValue,
-        qualified:row.classList.contains('qualified')
-      }));
-      button.click();
-      const first = readRows();
-      el('plan-last').click();
-      sections.push({edge:button.parentNode.dataset.edge, first, last:readRows()});
-    }
-    el('plan-close').click();
-    return {sections, threshold:el('joint-threshold').textContent, id:el('trace-id').textContent,
+    const targets = [...el('position-list-rows').rows].map(tr => tr.dataset.point);
+    return {targets, threshold:el('joint-threshold').textContent, id:el('trace-id').textContent,
       input:JSON.parse(el('trace-inputs').textContent), at:el('trace-sources').textContent.match(/计算于 (\\S+)/)[1]};
   })()`);
   assert.match(guarded.threshold,/501(?:\.0+)? \/ ≥100/);
@@ -211,26 +198,14 @@ try {
   const current = calculateCurrent(g.rules,g.accounts,g.market,g.rates,Date.parse(guarded.at),g.options);
   assert.ok(guarded.id.endsWith(current.trace.id));
   const scan = current.ratioScan;
-  assert.equal(guarded.sections.length,scan.sets.both.count ? 1 : 0);
+  assert.deepEqual(guarded.targets, ['最大 PF 仓位','失败回收优先','成功留存优先']
+    .map(label=>scan.plans.rows.find(r=>r.labels.includes(label))?.key).filter(Boolean));
   assert.ok(scan.buckets.every(bin => bin.edgeKey === 'joint' ? bin.both === scan.sets.both.count : bin.both === 0));
-  for (const section of guarded.sections) {
-    const n = scan.buckets.findIndex(bin => bin.edgeKey === section.edge);
-    const range = scan.buckets[n].ranges.both;
+  if (scan.sets.both.count) {
+    const range=scan.sets.both.range;
     assert.ok(dec(range.failure[0]).gte(501) && dec(range.successHype[0]).gte(100));
-    for (const [side, pageNum] of [['first',1],['last',Number.MAX_SAFE_INTEGER]]) {
-      const points = segmentPage(scan,n,'both',pageNum,5).points;
-      assert.deepEqual(section[side].map(row => row.key), points.map(pointKey));
-      for (const [i, point] of points.entries()) {
-        const r = planRecord(scan,point), row = section[side][i];
-        assert.ok(row.qualified && r.both);
-        assert.equal(row.fraction,r.fraction);
-        assert.equal(row.size,dec(r.pf).abs().toString());
-        assert.equal(row.fail,dec(r.fail).toFixed(4)+' U');
-        assert.equal(row.success,dec(r.success).toFixed(4)+' U');
-      }
-    }
   }
-  console.log('BUFFER_GRID_OK',JSON.stringify({sections:guarded.sections.length, count:scan.sets.both.count,
+  console.log('BUFFER_TARGETS_OK',JSON.stringify({targets:guarded.targets, count:scan.sets.both.count,
     failure:scan.sets.both.range?.failure, success:scan.sets.both.range?.successHype}));
   await set('#recoveryBuffer', '', 'input');
   await ready();

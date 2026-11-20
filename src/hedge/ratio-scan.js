@@ -377,7 +377,7 @@ function stoppedBeforeExit(ctx, c, key) {
   }
   return null;
 }
-export function inspectRatio(ctx, point) {
+export function inspectRatio(ctx, point, { includeLeverageGrid = false } = {}) {
   const { market, book, checks, params } = ctx,
     p = profileInputs(book, params, market);
   const pf = out(decimal(market.pf.step).times(point.i).times(point.sign)),
@@ -446,6 +446,7 @@ export function inspectRatio(ctx, point) {
     bufferRate: ratio(buffer, market.hl.mark),
     free: c.availableAfter,
     lev: c.candidateLeverage,
+    ...(includeLeverageGrid && { leverageGrid: c.leverageGrid ?? [] }),
     payout: c.expectedUserPayout,
     physical,
     covers,

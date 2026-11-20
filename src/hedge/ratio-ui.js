@@ -1,4 +1,4 @@
-import { planRecord, segmentPage, scaleComparison } from './position-plans.js';
+import { scaleComparison } from './position-plans.js';
 import { dec } from './math.js';
 import { inspectRatio, ratioSlice } from './ratio-scan.js';
 import { capitalGroups, reportGroups, subsetGroups, recoveryCushion } from './range-report.js';
@@ -495,60 +495,11 @@ function renderAnalysis(scan) {
   write('ratio-change', message);
 }
 
-const pageSize = 5;
-let drill = null;
-let lastPage = 1;
-
 function binLabel(bin) {
   if (bin.edgeKey === 'below') return 'h < ' + pct(bin.through);
   if (bin.edgeKey === 'above') return 'h > ' + pct(bin.above);
   if (bin.edgeKey === 'joint') return intervalText(bin.above, bin.through, ' ≤ h ≤ ');
   return '全部合法比例';
-}
-
-// Keep the same buttons focused while quotes or threshold values move.
-function renderSegmentIndex(scan) {
-  const list = $('segment-list');
-  const bins = (scan?.buckets ?? []).filter(bin => bin.legal);
-  $('segment-report').hidden = !bins.length;
-  const existing = new Map([...list.children].map(el => [el.dataset.edge,el]));
-  let at = 0;
-  for (const bin of bins) {
-    const key = bin.edgeKey ?? 'history-' + at;
-    let item = existing.get(key);
-    if (!item) {
-      item = document.createElement('div');
-      item.dataset.edge = key;
-      item.append(document.createElement('b'), document.createElement('small'));
-      for (const kind of ['legal','both']) {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.dataset.kind = kind;
-        item.append(button);
-      }
-    }
-    existing.delete(key);
-    if (list.children[at] !== item) list.insertBefore(item,list.children[at] ?? null);
-    at++;
-    const [label, sizes, all, both] = item.children;
-    const range = binLabel(bin);
-    const update = (el, value) => { if (el.textContent !== value) el.textContent = value; };
-    update(label, range);
-    const quantityRange = side => {
-      const [lo, hi] = bin.ranges.legal[side + 'Qty'];
-      return (lo === hi ? lo : lo + '–' + hi) + ' ' + scan.ctx.market[side].unit;
-    };
-    update(sizes, 'PF ' + quantityRange('pf'));
-    sizes.title = 'PF ' + quantityRange('pf') + ' · Hype ' + quantityRange('hl');
-    for (const [button, kind, name] of [[all,'legal','全部'],[both,'both','交集']]) {
-      update(button, kind === 'legal' ? '全部仓位' : !bin.both ? '无交集' : bin.both < bin.legal ? '部分达标' : '全部达标');
-      button.disabled = !scan.pageIndex || !bin[kind];
-      button.title = range + ' · ' + name + ' ' + bin[kind].toLocaleString() + ' 个合法仓位';
-      button.setAttribute('aria-label',button.title);
-      button.setAttribute('aria-pressed',String(drill?.edge === key && drill.kind === kind));
-    }
-  }
-  for (const item of existing.values()) item.remove();
 }
 
 // Names kept in saved solver records are mapped to the three user-facing objectives.
@@ -644,34 +595,35 @@ function renderComparison(scan, stress) {
   $('max-risk').hidden = !max;
   if (!max) return;
   const scope = scan.complete ? '' : '已扫描范围内的';
-  const warning = baseOnly ? '最大基础情景可行仓位，压力安全性未验证' :
+  const thin = max.fail != null && recoveryCushion(max.fail, scan.ctx.book.B).thin;
+  const warning = baseOnly && thin ? '基础情景可行，但缓冲极薄，压力风险未验证' :
+    baseOnly ? '最大基础情景可行仓位，压力安全性未验证' :
     !stress || partial ? '最大条件目标仓位，压力安全性未验证' : '最大条件目标仓位，按已配置压力估算';
   write('max-risk-title', scope + warning);
   const highestUse = max.marginRate != null && winners.slice(1).every(p =>
     p?.marginRate != null && dec(max.marginRate).gt(p.marginRate));
   write('max-risk-values', 'Hype 保证金占权益 ' + pct(max.marginRate,2) +
     (highestUse ? '（三方案最高）' : '') + '，可用抵押品 ' +
-    usd(max.free) + '，成功线至强平距离 ' + distanceText(max, scan) + '。');
+    usd(max.free) + '，失败回本缓冲 ' + settlementAmount(max.failDelta) + '，成功线至强平距离 ' + distanceText(max, scan) + '。');
   $('scale-link').hidden = !scan.plans.comparison;
 }
 
-function renderScaleComparison(scan, comparison, small, large) {
+function renderScaleComparison(scan, comparison, small, large, fixed = false) {
+  const prefix = fixed ? 'fixed-scale' : 'scale';
   const valid = !!(small && large && comparison);
-  $('scale-table').hidden = !valid;
-  let marginExplanation = '';
-  if (valid && small.leverage && large.leverage) {
-    marginExplanation = '小仓保证金取 ' + usd(small.hypeValue) + ' ÷ ' + small.leverage +
-      '，大仓取 ' + usd(large.hypeValue) + ' ÷ ' + large.leverage + '。';
+  $(prefix + '-table').hidden = !valid;
+  let caption = fixed && scan?.plans?.fixed?.reason || '没有可核对的同方向、同一精确比例规模对照。';
+  if (valid) {
+    const method = fixed ? '两仓固定使用共同通过校验的最低档 ' + small.leverage + '×' :
+      '独立择档，小仓 ' + small.leverage + '×，大仓 ' + large.leverage + '×';
+    const change = comparison.delta.distance;
+    const distanceNote = change == null ? '强平距离未验证' : dec(change).isZero() ? '强平距离相同' :
+      '强平距离' + (dec(change).lt(0) ? '缩短 ' : '增加 ') + fmt(dec(change).abs(),2) + ' ' + scan.plans.hlQuote;
+    caption = '目标比例 ' + pct(small.h) + ' · ' + method + ' · ' + distanceNote +
+      '。小仓' + (small.both ? '满足' : '未同时满足') + '两端保护条件，大仓' +
+      (large.both ? '满足' : '未同时满足') + '两端保护条件。';
   }
-  const distanceChange = valid ? comparison.delta.distance : null;
-  const distanceNote = distanceChange == null ? '' : dec(distanceChange).isZero() ? ' 强平距离相同。' :
-    ' 扩仓后强平距离' + (dec(distanceChange).lt(0) ? '缩短 ' : '增加 ') +
-      fmt(dec(distanceChange).abs(),2) + ' ' + scan.plans.hlQuote + '。';
-  write('scale-caption', valid ? '目标比例 ' + pct(small.h) + ' · PF ' +
-    (small.sign > 0 ? '多 / Hype 空' : '空 / Hype 多') + '。' + marginExplanation + distanceNote +
-    ' 小仓' + (small.both ? '满足' : '未同时满足') + '两端保护条件，大仓' +
-    (large.both ? '满足' : '未同时满足') + '两端保护条件。' :
-    '当前没有同方向、同一精确比例的两个目标规模可供比较。');
+  write(prefix + '-caption', caption);
   const body = document.createElement('tbody');
   if (valid) {
     const qty = side => v => dec(v).abs() + ' ' + scan.ctx.market[side].unit;
@@ -681,13 +633,12 @@ function renderScaleComparison(scan, comparison, small, large) {
       ['Hype 初始保证金','initial',usd], ['保证金占权益','marginRate',v => pct(v,2)],
       ['失败回收减保护本金','failDelta',settlementAmount], ['成功后 Hype 剩余','success',settlementAmount],
       ['成功线至 Hype 强平距离','distance',v => fmt(v,2)+' '+scan.plans.hlQuote],
-      ['自动杠杆','leverage',v => v+' 倍'], ['目标仓位维持保证金','maintenance',usd],
-      ['开仓后可用抵押品','free',usd], ['其他仓位及挂单占用','otherInitial',usd],
-      ['预计强平标记价','liquidation',v => fmt(v,2)+' '+scan.plans.hlQuote],
-      ['基础路径最低维持余量','baseSurplus',usd], ['已配置压力下最低维持余量','stressSurplus',usd]
+      [fixed ? '固定杠杆' : '自动杠杆','leverage',v => v+' 倍'], ['开仓后可用抵押品','free',usd],
+      ['失败后个人回收','fail',settlementAmount]
     ];
     for (const [label,key,format] of metrics) {
       const row = body.insertRow();
+      row.dataset.metric = key;
       row.insertCell().textContent = label;
       for (const plan of [small,large])
         row.insertCell().textContent = plan[key] == null ? '未验证' : format(plan[key]);
@@ -701,96 +652,43 @@ function renderScaleComparison(scan, comparison, small, large) {
       row.insertCell().textContent = text;
     }
   }
-  patchRows($('scale-rows'),body);
+  patchRows($(prefix + '-rows'),body);
 }
 
 function renderPlans(scan) {
-  const report = scan?.plans, indexed = !!scan?.pageIndex;
-  let segment = null;
-  if (!indexed) drill = null;
-  if (drill?.edge != null) {
-    segment = scan.buckets.findIndex(bin => bin.edgeKey === drill.edge && bin[drill.kind]);
-    if (segment < 0) drill = null;
+  const report = scan?.plans;
+  const riskBody = document.createElement('tbody');
+  const positionRows = document.createElement('tbody');
+  for (const [label,name] of objectives) {
+    const r = report?.rows.find(row => row.labels.includes(label));
+    if (!r) continue;
+    const tr = positionRows.insertRow();
+    tr.dataset.point = r.key;
+    for (const value of [name, targetQty(r.pf,scan.ctx.market.pf) + ' / ' + usd(r.pfValue),
+      targetQty(r.hl,scan.ctx.market.hl) + ' / ' + usd(r.hypeValue), settlementAmount(r.fail),settlementAmount(r.success)])
+      tr.insertCell().textContent = value;
   }
-  renderSegmentIndex(scan);
-  $('plan-view').disabled = !indexed || !scan.sets.legal.count;
-  const details = document.createElement('tbody'),
-    riskBody = document.createElement('tbody');
+  $('position-list').hidden = !positionRows.rows.length;
+  $('positions-empty').hidden = !!positionRows.rows.length;
+  patchRows($('position-list-rows'),positionRows);
   const marks = new Map((report?.rows ?? []).map(r => [r.key,r]));
   const comparison = report?.comparison ?? (report && scaleComparison(report.rows));
-  const small = marks.get(comparison?.small), large = marks.get(comparison?.large);
-  renderScaleComparison(scan,comparison,small,large);
-  let detailRows = [];
-  if (drill) {
-    const page = segmentPage(scan,segment,drill.kind,drill.page,pageSize);
-    drill.page = page.page;
-    lastPage = page.pages;
-    detailRows = page.points.map(p => marks.get([p.sign,p.i,p.j].join('/')) ?? planRecord(scan,p));
-    write('grid-caption', (segment == null ? '全部合法仓位' : binLabel(scan.buckets[segment]) +
-      (drill.kind === 'both' ? ' · 双保护交集' : ' · 全部规模')) +
-      ' · 第 ' + page.page + ' 页 / ' + page.pages.toLocaleString() + ' 页');
-    $('plan-prev').disabled = $('plan-first').disabled = page.page <= 1;
-    $('plan-next').disabled = $('plan-last').disabled = page.page >= page.pages;
-  }
-  $('grid-detail').hidden = !drill;
+  renderScaleComparison(scan,comparison,marks.get(comparison?.small),marks.get(comparison?.large));
+  const fixed = report?.fixed;
+  renderScaleComparison(scan,fixed?.comparison,fixed?.rows?.[0],fixed?.rows?.[1],true);
   write('plan-caption', !report ? '' : report.pending ? '分成待到账' :
     report.legacy ? '历史条件目标' : !report.eligible ? '当前门槛下无合格方案' :
     scan.complete ? '按两端现金约束筛选' : '限已扫描规模');
   const units = side => scan.ctx.market[side].unit === 'contract' ? '张' : scan.ctx.market[side].unit;
-  const cell = (tr, first, ...lines) => {
-    const td = tr.insertCell();
-    td.append(document.createTextNode(first));
-    for (const line of lines.filter(Boolean)) {
-      const detail = document.createElement('small');
-      detail.textContent = line;
-      td.append(detail);
-    }
-    return td;
-  };
-  const sideCell = (tr, qty, value, side, fill) => {
-    const size = dec(qty);
-    const price = fill?.price;
-    const quote = side === 'pf' ? scan.plans.pfQuote : scan.plans.hlQuote;
-    const legCell = cell(tr, (size.isZero() ? '空仓 ' : size.gt(0) ? '多 ' : '空 ') + size.abs() + ' ' + units(side), usd(value));
-    if (price != null) legCell.title = '本次调整 ' + fill.delta + ' ' + units(side) + '，预计成交均价 ' + price + ' ' + quote;
-  };
-  const ratioLabel = formatRatios([...(report?.rows ?? []), ...detailRows]);
-  const riskKeys = new Set();
-  function appendGridPlan(body, r) {
-    const tr = body.insertRow();
-    tr.dataset.point = r.key;
-    tr.dataset.ratio = r.fraction ?? r.h;
-    tr.dataset.pfSize = dec(r.pf).abs().toString();
-    tr.className = r.both ? 'qualified' : '';
-    cell(tr, ratioLabel(r), '条件目标仓位').title =
-      (r.fraction ? '精确敏感度比 ' + r.fraction + ' · ' : '') + '数量网格 ' + r.key;
-    sideCell(tr, r.pf, r.pfValue, 'pf', r.pfFill);
-    sideCell(tr, r.hl, r.hypeValue, 'hl', r.hlFill);
-    cell(tr, r.failStop || settlementAmount(r.fail), r.failStop ? '清算结余未知' : '本金 ' + signedCash(r.failDelta) + (recoveryCushion(r.fail,scan.ctx.book.B).thin ? ' · 极薄缓冲' : ''),
-      r.failStop || r.failHype === r.fail ? '' : 'Hype ' + settlementAmount(r.failHype));
-    cell(tr, r.passStop || settlementAmount(r.success), r.passStop ? '清算结余未知' : '个人较本金 ' + signedCash(r.successDelta));
-    const protection = r.both ? '双保护达标' : [
-      r.coversWithBuffer === false && r.covers ? '回本缓冲不足' : !r.covers ? '失败回收不足' : '',
-      !r.survives ? '成功留存不足' : ''
-    ].filter(Boolean).join(' · ') || '条件待核实';
-    const risk = r.physical ? protection + (r.profitable ? ' · 双路径净盈利' : '') :
-      (r.failStop || r.passStop || r.reason);
-    cell(tr, risk, '保证金 ' + usd(r.initial) + '（' + (r.leverage ? r.leverage + '×，' : '') + pct(r.marginRate, 1) + '）',
-      '强平距 ' + distanceText(r, scan));
-  }
   function appendRisk(r) {
     const cost = k => [r.failCost, r.passCost].map(v => v ? fmt(v[k], 4) : '未知').join(' / ');
-    if (riskKeys.has(r.key)) return;
-    riskKeys.add(r.key);
     const detail = riskBody.insertRow();
     for (const str of [pct(r.h) + ' · PF ' + r.pf + ' ' + units('pf'), r.hl + ' ' + units('hl'),
       r.leverage ? r.leverage + '×' : '—', usd(r.initial) + ' · ' + pct(r.marginRate, 2), usd(r.maintenance),
       usd(r.otherInitial), usd(r.free), usd(r.baseSurplus), usd(r.stressSurplus), r.liquidation == null ? '无已验证交点' : fmt(r.liquidation, 4) + ' ' + report.hlQuote,
       r.distance == null ? '无已验证交点' : fmt(r.distance, 4) + ' ' + report.hlQuote, cost('fees') + ' U', cost('slippage') + ' U']) detail.insertCell().textContent = str;
   }
-  for (const r of detailRows) appendGridPlan(details,r);
-  for (const r of [...(report?.rows ?? []), ...detailRows]) appendRisk(r);
-  patchRows($('grid-rows'), details);
+  for (const r of report?.rows ?? []) appendRisk(r);
   patchRows($('plan-risk-rows'), riskBody);
 }
 
@@ -982,16 +880,23 @@ export function renderScan(result, m, r, plan, status) {
     );
   else if (!displayed?.ratioScan?.representative?.row?.funded)
     write('scan-funded', 'Funded 分成 · 等待有效快照，到账状态待核实');
-  const state = waitingForMarket ? 'loading' : result.frameState ?? 'paused',
+  const timing = observed.timing;
+  const quoteBreak = timing?.quoteSkew > timing?.quoteLimit;
+  const state = quoteBreak ? 'paused' : waitingForMarket ? 'loading' : result.frameState ?? 'paused',
     id = tr?.id ?? '';
   const stamp = tr ? '结果时间 ' + new Date(tr.at).toLocaleDateString('zh-CN') + ' ' + time(tr.at) : '';
   const desk = $('scan-desk');
   if (desk.dataset.state !== state) desk.dataset.state = state;
   if (desk.dataset.resultId !== id) desk.dataset.resultId = id;
   const currentInputs = state === 'ready';
-  const reason = networkError || observed.currencies?.error || specError || result.issues?.[0] || status;
+  const reason = quoteBreak ? '行情熔断 · 双边盘口或标记时差 ' + timing.quoteSkew +
+    ' ms，阈值 ' + timing.quoteLimit + ' ms' : networkError || observed.currencies?.error || specError || result.issues?.[0] || status;
   let validity;
-  if (currentInputs) {
+  if (quoteBreak) {
+    validity = tr ? reason : reason + ' · 暂停新目标建议';
+  } else if (state === 'recovering') {
+    validity = tr ? '行情和输入已恢复，正在重新计算' : '输入就绪，首次计算中';
+  } else if (currentInputs) {
     validity = '当前数据有效 · 条件估算';
     if (displayed?.ratioScan?.complete === false) validity += '（部分网格）';
   } else if (state === 'updating') {
@@ -1004,6 +909,11 @@ export function renderScan(result, m, r, plan, status) {
   }
   const completedAt = displayed?.finishedAt ?? tr?.at;
   const lastTime = completedAt ? new Date(completedAt).toLocaleString('zh-CN',{hour12:false}) : '—';
+  const historical = !!tr && (quoteBreak || !['ready','updating'].includes(state) || !result.ratioScan);
+  const main = $('current');
+  if (main.dataset.historical !== String(historical)) main.dataset.historical = String(historical);
+  $('snapshot-note').hidden = !historical;
+  write('snapshot-note', historical ? '历史快照 · ' + lastTime + '。新目标建议已暂停，以下资金、区间与仓位仅供核对。' : '');
   write('scan-status', validity + ' ｜ 最近成功计算 ' + lastTime);
   write(
     'scan-runtime',
@@ -1029,20 +939,13 @@ export function renderScan(result, m, r, plan, status) {
 }
 export function setupScan() {
   initComparison();
-  $('scale-link').onclick = () => {
-    $('desk-details').open = true;
-    $('scale-details').open = true;
-  };
-  $('plan-view').onclick = () => { drill = {edge:null,kind:'legal',page:1}; renderPlans(frame); };
-  $('segment-list').onclick = event => {
-    const button = event.target.closest('button');
-    if (!button || button.disabled) return;
-    drill = {edge:button.parentElement.dataset.edge,kind:button.dataset.kind,page:1};
-    renderPlans(frame);
-  };
-  $('plan-close').onclick = () => { drill = null; renderPlans(frame); };
-  for (const [id, next] of [['first',()=>1],['prev',p=>p-1],['next',p=>p+1],['last',()=>lastPage]])
-    $('plan-' + id).onclick = () => { if (drill) { drill.page = next(drill.page); renderPlans(frame); } };
+  const buttons = [...$('desk-views').querySelectorAll('button')];
+  for (const button of buttons) {
+    const panel = $(button.getAttribute('aria-controls'));
+    button.onclick = () => { panel.open = true; };
+    panel.addEventListener('toggle', () => button.setAttribute('aria-expanded',String(panel.open)));
+  }
+  $('scale-link').onclick = () => { $('positions-view').open = true; };
   for (const id of ['desk-details', 'audit-details', 'scan-detail'])
     $(id).addEventListener('toggle', auditText);
   $('subset-detail').ontoggle = renderSubsets;

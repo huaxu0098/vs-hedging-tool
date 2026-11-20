@@ -19,6 +19,13 @@
         <h1>对冲比例与目标仓位</h1>
         <span id="scan-source"></span><small id="desk-state" role="status"><span id="scan-status">连接行情</span></small>
       </div>
+      <nav id="desk-views" aria-label="工作台视图">
+        <button type="button" aria-controls="live-view" aria-expanded="true">实时结果</button>
+        <button type="button" aria-controls="positions-view" aria-expanded="false">仓位明细</button>
+        <button type="button" id="scan-config" aria-controls="desk-details" aria-expanded="false">高级设置</button>
+      </nav>
+      <p id="snapshot-note" hidden></p>
+      <details id="live-view" name="workbench-view" open><summary hidden>实时结果</summary>
       <div id="scan-desk">
         <section class="scan-quotes" aria-labelledby="book-heading">
           <h2 id="book-heading">实时盘口</h2>
@@ -33,7 +40,7 @@
           </table>
         </section>
         <section id="scan-focus" aria-labelledby="cash-heading">
-          <h2 id="cash-heading">资金结果</h2>
+          <h2 id="cash-heading">资金结果 <small class="history-label">历史快照</small></h2>
           <div id="scan-cash" class="scan-paths">
             <div><h3>失败后 · 个人回收</h3><strong id="scan-fail-cash">—</strong><small id="scan-fail-summary"></small></div>
             <div><h3 id="scan-pass-title">通过后 · Hype 剩余</h3><strong id="scan-pass-cash">—</strong><small id="scan-pass-summary"></small></div>
@@ -41,7 +48,7 @@
           <p class="scan-rep"><b id="scan-representative"></b> <span id="scan-position"></span></p>
         </section>
         <section id="ratio-intervals" aria-labelledby="range-heading">
-          <h2 id="range-heading">自动比例区间</h2>
+          <h2 id="range-heading">自动比例区间 <small class="history-label">历史快照</small></h2>
           <dl class="scan-sets">
             <div><dt>失败端本金回收<span id="capital-threshold"></span></dt><dd id="scan-protect">—</dd></div>
             <div><dt>成功端最低留存<span id="reserve-threshold"></span></dt><dd id="scan-survive">—</dd></div>
@@ -50,7 +57,7 @@
           </dl>
         </section>
         <section id="scan-results" aria-labelledby="bands-heading">
-          <div class="bands-heading"><h2 id="bands-heading">三种条件目标方案</h2><small><span id="plan-stress"></span><span id="plan-caption"></span></small></div>
+          <div class="bands-heading"><h2 id="bands-heading">三种条件目标方案 <small class="history-label">历史快照</small></h2><small><span id="plan-stress"></span><span id="plan-caption"></span></small></div>
           <div id="max-risk" hidden>
             <strong id="max-risk-title"></strong>
             <span id="max-risk-values"></span>
@@ -65,22 +72,22 @@
           <p id="bands-empty" hidden></p>
         </section>
       </div>
-      <details id="desk-details"><summary id="scan-config">高级详情</summary>
-      <details class="desk-group" id="scale-details"><summary>同一比例的仓位规模对照</summary>
-        <p id="scale-caption"></p>
-        <div class="table-wrap"><table id="scale-table"><thead><tr><th scope="col">指标</th><th scope="col">较小目标</th><th scope="col">较大目标</th><th scope="col">扩仓变化</th></tr></thead>
-          <tbody id="scale-rows"></tbody></table></div>
       </details>
-      <details class="desk-group" id="grid-disclosure"><summary>完整目标仓位网格与分页</summary>
-          <div id="segment-report" hidden>
-            <div class="bands-heading"><h3>合法数量网格分段</h3><button type="button" id="plan-view" disabled>全部目标仓位</button></div>
-            <div id="segment-list" aria-label="各比例段的全部仓位与合格交集"></div>
+      <details id="positions-view" name="workbench-view"><summary hidden>仓位明细</summary>
+        <h2>三个方案的目标仓位 <small class="history-label">历史快照</small></h2>
+        <p id="positions-empty" hidden>当前没有可展示的合格目标方案。</p>
+        <div class="table-wrap"><table id="position-list"><thead><tr><th>方案</th><th>PF 数量 / 名义额</th><th>Hype 数量 / 名义额</th><th>失败回收</th><th>成功后 Hype 剩余</th></tr></thead><tbody id="position-list-rows"></tbody></table></div>
+        <section id="scale-details">
+          <h2>同一比例的扩仓对照 <small class="history-label">历史快照</small></h2>
+          <div class="scale-method"><h3>A · 固定杠杆</h3><p id="fixed-scale-caption"></p>
+          <div class="table-wrap"><table id="fixed-scale-table"><thead><tr><th>指标</th><th>较小目标</th><th>较大目标</th><th>扩仓变化</th></tr></thead><tbody id="fixed-scale-rows"></tbody></table></div>
           </div>
-          <div id="grid-detail" hidden>
-            <nav aria-label="仓位明细分页"><strong id="grid-caption"></strong><button type="button" id="plan-first">首页</button><button type="button" id="plan-prev">上一页</button><button type="button" id="plan-next">下一页</button><button type="button" id="plan-last">末页</button><button type="button" id="plan-close">收起明细</button></nav>
-            <div class="table-wrap" tabindex="0" role="region" aria-label="当前比例分段的逐仓明细"><table class="bands-table exact-plans"><thead id="grid-columns"><tr><th scope="col">目标比例 / 优先条件</th><th scope="col">PF 目标方向与仓位</th><th scope="col">Hype 目标方向与仓位</th><th scope="col">失败回收 / 本金差额</th><th scope="col">成功剩余 / 本金差额</th><th scope="col">保护结果 / Hype 风险</th></tr></thead><tbody id="grid-rows"></tbody></table></div>
+          <div class="scale-method"><h3>B · 自动杠杆</h3><p id="scale-caption"></p>
+          <div class="table-wrap"><table id="scale-table"><thead><tr><th>指标</th><th>较小目标</th><th>较大目标</th><th>扩仓变化</th></tr></thead><tbody id="scale-rows"></tbody></table></div>
           </div>
+        </section>
       </details>
+      <details id="desk-details" name="workbench-view"><summary hidden>高级设置</summary>
       <details class="desk-group" id="account-details"><summary>账户、持仓与资金规则</summary>
         <div class="selectors">
           <label

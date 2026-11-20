@@ -98,7 +98,7 @@ export function displayHistory(storage) {
           buckets,
           representative,
           analysis,
-          plans: scan.plans && { rows: scan.plans.rows, comparison:scan.plans.comparison, eligible: scan.plans.eligible, pending: scan.plans.pending, pfQuote: scan.plans.pfQuote, hlQuote: scan.plans.hlQuote },
+          plans: scan.plans && { rows: scan.plans.rows, comparison:scan.plans.comparison, fixed:scan.plans.fixed, eligible: scan.plans.eligible, pending: scan.plans.pending, pfQuote: scan.plans.pfQuote, hlQuote: scan.plans.hlQuote },
           complete,
           ctx: {
             book: { B: book.B },

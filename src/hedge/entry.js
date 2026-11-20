@@ -424,6 +424,7 @@ function freshnessLabel(at, seconds) {
 }
 const history = displayHistory(localStorage);
 let worker = null, running = null, completed = null, lastGood = null, failure = null;
+let interruptedScope = null;
 let version = 0, wantedKey = null, lastStart = -Infinity, wakeTimer, workerTimer;
 function scanScope() {
   return JSON.stringify([asset(), state.fundingView, useAPI() ? $('wallet').value.trim().toLowerCase() : 'manual', r.stage]);
@@ -442,7 +443,8 @@ function currentFrame(a, m, t) {
   const base = calculateCurrent(r, a, m, rates, t, { deferAuto: true });
   const retained = lastGood?.result;
   const paused = () => ({ ...base, retained, frameState:'paused' });
-  if (!base.needsSearch) {
+  if (!base.needsSearch || base.timing?.quoteSkew > base.timing?.quoteLimit) {
+    interruptedScope = scope;
     if (running || completed || failure || wantedKey) cancelAuto();
     return paused();
   }
@@ -465,6 +467,8 @@ function currentFrame(a, m, t) {
   const waiting = (state, reason) => {
     // A newer quote may arrive before every worker delivery. Publish accepted
     // frames to both views while keeping rules/account revisions isolated.
+    if (state === 'updating' && interruptedScope === scope)
+      return { ...base, retained, frameState:'recovering', trigger, refreshPending:true };
     if (state === 'updating' && lastGood?.context === context)
       return { ...retained, observed:base, retained, frameState:state, trigger, refreshPending:true };
     return { ...base, retained, frameState:state, trigger, refreshPending:state === 'updating',
@@ -492,6 +496,7 @@ function currentFrame(a, m, t) {
       // eligible snapshot can be displayed with its own time while it is being
       // superseded. Scope/rule changes cancel the request before this callback.
       if (!result?.ratioScan) {
+        interruptedScope = scope;
         const message = error ?? result?.issues?.join(' · ') ?? '本帧缺少完整计算结果';
         failure = { context, message, retryAt:performance.now()+2000 };
         wakeTimer = setTimeout(render, 2010);
@@ -502,13 +507,18 @@ function currentFrame(a, m, t) {
         } };
         // Recheck the original clocks, account and eligibility before publication.
         // A long worker task may have crossed a deadline or a quote TTL.
-        const eligible = calculateCurrent(r, a, m, frameRates, Date.now(), {deferAuto:true}).needsSearch;
-        if (eligible) {
+        const now = Date.now();
+        const fresh = calculateCurrent(r, a, m, frameRates, now, {deferAuto:true});
+        const live = market();
+        const latest = calculateCurrent(r, {pf:account('pf'), hl:account('hl')}, live, rates, now, {deferAuto:true});
+        if (scope === scanScope() && fresh.needsSearch && latest.needsSearch &&
+            !(latest.timing.quoteSkew > latest.timing.quoteLimit)) {
+          interruptedScope = null;
           completed.result.ratioScan.analysis.change = ratioChanges(lastGood?.result, completed.result);
           lastGood = completed;
           history.record(scope, completed.result);
         }
-        else completed = null;
+        else { completed = null; interruptedScope = scope; }
       }
       render();
     };
@@ -807,7 +817,7 @@ function renderConditions(result, a, m, plan) {
   put('lev-equity-heading', scenario + '权益');
   put('candidate-surplus-heading', scenario + '最低维持余量');
   put('candidate-cash-heading', scenario + '最差个人现金');
-  const t = result.timing;
+  const t = (result.observed ?? result).timing;
   const age = (n) => (n == null ? '未知' : (n / 1000).toFixed(1) + ' 秒');
   put(
     'clock-skew',
@@ -817,7 +827,7 @@ function renderConditions(result, a, m, plan) {
           '，年龄 ' +
           age(t.quoteAges.pf) +
           ' / Hype 盘口 ' +
-          (m.hl?.asOf ?? '未取得') +
+          (t.clocks.hl.bookAt ?? '未取得') +
           '，年龄 ' +
           age(t.quoteAges.hl) +
           ' · 标记年龄 VS ' +
@@ -911,6 +921,7 @@ function render() {
     if (result.calculationMarket) m = result.calculationMarket;
   } catch (e) {
     cancelAuto();
+    interruptedScope = scanScope();
     result = {
       autoStatus: r.mode === 'auto' ? 'AUTO_DATA_BLOCKED' : null,
       retained: lastGood?.scope === scanScope() ? lastGood.result : null,

@@ -92,7 +92,7 @@ try {
     for (const [id, value] of Object.entries(changes)) await input(id, value);
     await wait(ready + " && document.getElementById('plan-stress').textContent.includes(" + JSON.stringify(coverage) + ")",45000);
     assert.deepEqual(await labels(),Array(3).fill(scenario));
-    assert.equal((await text('#max-risk-title')).includes('压力安全性未验证'),incomplete);
+    assert.equal(/压力(?:安全性|风险)未验证/.test(await text('#max-risk-title')),incomplete);
   }
   await input('R_success','5000');
   await wait("document.querySelector('#plan-caption').textContent.includes('无合格方案')",45000);
