@@ -8,7 +8,7 @@ import {
   ratioSlice,
   adjacentScale
 } from '../src/hedge/ratio-scan.js';
-import { createSolutionSnapshot, displayHistory } from '../src/hedge/display-history.js';
+import { createSolutionSnapshot, displayHistory, publicationState } from '../src/hedge/display-history.js';
 import { pagePoints, planRecord, recordFromInspection, pointKey, scaleComparison, segmentPage } from '../src/hedge/position-plans.js';
 import { ratioChanges } from '../src/hedge/ratio-analysis.js';
 import { exactRatio, ratioBin } from '../src/hedge/ratio-scan.js';
@@ -743,7 +743,7 @@ test('OPT02 搜索范围记录双边方向、步长和数量上限，预算中�
   const partial = calculateCurrent(inputs, f.a, f.m, {}, t, { searchBudget: 1 });
   assert.equal(partial.search.complete, false);
   assert.ok(!partial.maximum?.complete);
-  assert.equal(full.trace.model, 'AUTO-0.21.4');
+  assert.equal(full.trace.model, 'AUTO-0.21.5');
 });
 test('OPT03 PF 虚拟保证金、目标 Hype 初始、其他占用及调仓后真实可用分别核验', () => {
   const f = fixture();
@@ -2446,4 +2446,103 @@ test('途中初保缺口 151.62 U 时保留独立清算证据，断档路径不�
   const unproven=run().at(-1);
   assert.equal(unproven.status,'unknown');
   assert.equal(unproven.proof.continuous,false);
+});
+
+
+test('保证金分工：成功途中 357.50 U 追加缺口和 83.26 U 维持余量可同时成立',()=>{
+  const m=demoMarket('unit'), book=createBook({id:'im-admission',mode:'demo',time:at});
+  Object.assign(m.hl,{mark:'100',rate:'0',leverage:'3',hold:'0',otherMaintenance:'0',
+    asks:[['100','20']],bids:[['100','20']],tiers:[{from:'0',mmr:'0.0125',deduction:'0'}]});
+  book.hl='474.257';
+  const walk=()=>validateMargin(book,m,'hl','-10',['0','37.382'],undefined,'0',{openFree:'140'});
+  const [open,path]=walk();
+  assert.equal(open.status,'pass');
+  const w=path.worst;
+  assert.deepEqual([w.equity,w.initial,w.additionalIMShortfall,w.maintenance,w.surplus].map(x=>dec(x).toFixed(2)),
+    ['100.44','457.94','357.50','17.17','83.26']);
+  assert.equal(w.freeCollateral,'0'); assert.equal(path.firstBreach,null);
+  assert.equal(path.status,'pass'); assert.ok(path.proof.continuous);
+  m.hl.hold='12'; delete m.hl.otherMaintenance;
+  assert.equal(walk().at(-1).status,'unknown');
+});
+
+test('保证金分工：保持与减持原全仓不重新交初保，加仓、翻向和改设杠杆单独准入',()=>{
+  const f=fixture();
+  Object.assign(f.a.hl,{qty:'-4',equity:'100',free:'0',currentMarginCredit:'200',leverage:'2'});
+  const {ctx}=scanFixture({B:'100',R_success:'10',R_free:'0',utilization:'1'},f).ratioScan;
+  const m={...ctx.market,hl:{...ctx.market.hl,configuredLeverage:'2',leverage:'2'}};
+  const admit=(target,lev='2')=>validateMargin(ctx.book,{...m,hl:{...m.hl,leverage:lev}},'hl',target,['0'],undefined,'0',{openFree:'0'});
+  for(const q of ['-4','-3']){
+    const [entry,hold]=admit(q);
+    assert.equal(entry.requiredForTrade,false); assert.equal(entry.status,'pass');
+    assert.equal(hold.firstBreach,null);
+  }
+  for(const [q,l] of [['-5','2'],['4','2'],['-4','1']]){
+    assert.equal(admit(q,l)[0].status,'fail');
+  }
+});
+
+test('原生基差与异步退出：两种 PF 方向、两个终点逐一重算，撤档改变平仓成本与现金',()=>{
+  for (const sign of [1,-1]) {
+    const f=fixture();
+    for(const l of [f.m.pf,f.m.hl])
+      l.levels=[[['99.9','12'],['99.4','20']],[['100.1','12'],['100.7','20']]];
+    const scan=scanFixture({B:'120',R_success:'10',R_free:'0',adverseBps:'50',jumpBps:'10',delayBps:'10',
+      pfFee:'0.0001',hlFee:'0.0005',fundingDebit:'0.01'},f).ratioScan;
+    const row=planRecord(scan,{sign,i:10,j:2});
+    for(const end of ['fail','pass']) {
+      const cases=row.pathAudit[end],base=cases.base.settlement;
+      assert.ok(base);
+      assert.ok(dec(cases.basisAdverse.settlement.hype).lt(base.hype));
+      assert.ok(dec(cases.basisFavorable.settlement.hype).gt(base.hype));
+      assert.ok(dec(cases.asyncExit.settlement.hlMark).minus(base.hlMark).times(row.hl).lt(0));
+      assert.equal(cases.asyncExit.checkpoints.at(-1).mark,cases.asyncExit.settlement.hlMark);
+      assert.notEqual(cases.dislocation.settlement.hlMark,cases.asyncExit.settlement.hlMark);
+      const reduced=row.liquidity[end], amount=reduced.settlement;
+      for(const side of ['pf','hl']) {
+        assert.equal(row.depth[end][side].exit.slippage,'0');
+        assert.equal(reduced.depth[side].coverageRatio,'1'); assert.equal(reduced.depth[side].uncovered,'0');
+        const lost=dec(row[side]).isPositive()?'0.5':'0.6';
+        assert.ok(dec(reduced.extraExitCost[side]).eq(dec(row[side]).abs().times(lost)));
+        assert.equal(reduced.depth[side].slippage,'0');
+        assert.equal(reduced.withdrawn[side].coverageRatio,'0'); assert.equal(reduced.withdrawn[side].vwap,null);
+        assert.equal(reduced.withdrawn[side].uncovered,out(dec(row[side]).abs()));
+      }
+      assert.ok(reduced.path.proof.continuous);
+      assert.ok(dec(amount.pfEquity).minus(end==='fail'?'900':'1100').abs().lt('1e-35'));
+      assert.equal(amount.hlPrice,reduced.depth.hl.vwap);
+      assert.ok(dec(amount.hype).lt(base.hype));
+      assert.equal(amount.hype,amount.personal);
+    }
+  }
+});
+
+test('撤去退出最优档后可见数量不足，按实际覆盖量报告，不给出全量均价、滑点或现金',()=>{
+  const f=fixture();
+  f.m.hl.levels=[[['100','5'],['99','1']],[['100','5'],['101','1']]];
+  const scan=scanFixture({},f).ratioScan, plan=planRecord(scan,{sign:1,i:10,j:2});
+  for(const end of ['fail','pass']) {
+    const test=plan.liquidity[end], leg=test.depth.hl;
+    assert.equal(test.status,'insufficient'); assert.equal(test.settlement,null);
+    assert.equal(leg.covered,'1'); assert.equal(leg.coverageRatio,'0.5'); assert.equal(leg.uncovered,'1');
+    assert.equal(leg.vwap,null); assert.equal(leg.slippage,null);
+    assert.equal(test.withdrawn.hl.slippage,null); assert.equal(test.extraExitCost.hl,null);
+  }
+  assert.equal(plan.coverage,'conditional');
+});
+
+test('发布帧：仅同一盘口深度、账户、规则、版本和完成时间可以发布为当前',()=>{
+  const f=fixture(), result=scanFixture({},f);
+  result.frameState='ready'; result.calculationMarket=f.m; result.finishedAt=at;
+  const snap=createSolutionSnapshot(result);
+  const state=(r=result,m=f.m,blocked=false)=>publicationState(r,snap,m,blocked);
+  assert.equal(state(),'ready');
+  const quote=structuredClone(f.m); quote.hl.levels[0].push(['99','2']);
+  assert.equal(state(result,quote),'updating');
+  for(const change of [{accountsId:'other'},{rulesId:'other'},{model:'older'},{marketId:'other'}])
+    assert.equal(state({...result,trace:{...result.trace,...change}}),'updating');
+  assert.equal(state({...result,finishedAt:'late'}),'updating');
+  assert.equal(state(result,f.m,true),'paused');
+  assert.equal(state({...result,frameState:'recovering'}),'recovering');
+  assert.equal(state(),'ready');
 });

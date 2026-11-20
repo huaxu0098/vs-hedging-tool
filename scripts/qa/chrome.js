@@ -109,7 +109,7 @@ export async function openTestBrowser({ hedge = false, current = false } = {}) {
         await delay(80);
       }
       const status = await run(
-        "['notice','verdict','feed-health','vs-paste-error'].map(k=>document.getElementById(k)?.textContent).filter(Boolean).join(' | ')"
+        "['scan-status','scan-source','notice','verdict','feed-health','vs-paste-error'].map(k=>document.getElementById(k)?.textContent).filter(Boolean).join(' | ')"
       );
       throw Error('等待页面条件超时 ' + expression + ' ' + status + ' ' + faults.join(' / '));
     }

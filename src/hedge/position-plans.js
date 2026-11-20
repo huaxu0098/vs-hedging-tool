@@ -1,3 +1,4 @@
+import { exitLiquidity } from './exit-liquidity.js';
 import { adjustmentAfterOrders } from './order-adjustment.js';
 import { sumPostings, settlementBridge, settlementTolerance, checkSignedPath, checkPFBoundary } from './settlement-ledger.js';
 import { executionDetail, profileInputs } from './solver.js';
@@ -154,7 +155,7 @@ function pathEvidence(ctx,row,key) {
   return Object.fromEntries(Object.entries(cases).map(([name,test])=>{
     if (test.shift == null || test.status!=='pass' || test.proof?.continuous!==true ||
         (cases.base.pfStatus && cases.base.pfStatus!=='pass') || row.verification.initial!=='pass' ||
-        cases.beforeFill?.status==='fail' && name==='delayedFill') return [name,test];
+        (cases.beforeFill && cases.beforeFill.status!=='pass')) return [name,test];
     const nativeMove=out(dec(test.shift).times(leg.factor));
     const fill=fillEvidence(out(dec(hl.target).neg()),leg,nativeMove);
     if (!['covered','noTrade'].includes(fill.status)) return [name,{...test,settlementIssue:'平仓深度未验证'}];
@@ -190,6 +191,15 @@ export function recordFromInspection(ctx, row, pairs = {fail:reachableLedgers(ct
   const pathAudit={fail:pathEvidence(ctx,row,'fail'),pass:pathEvidence(ctx,row,'pass')};
   const profile = ctx.book.positions ? profileInputs(ctx.book,ctx.params,ctx.market) : null;
   const paths = {fail:endpoint(ctx,row,'fail',pairs.fail,profile),pass:endpoint(ctx,row,'pass',pairs.pass,profile)};
+  const liquidity={fail:exitLiquidity(ctx,row,'fail'),pass:exitLiquidity(ctx,row,'pass')};
+  const liquid=Object.values(liquidity).every(test=>test?.status==='pass');
+  const settlementOK=Object.entries(pathAudit).every(([end,group])=>group &&
+    Object.values(group).every(test=>test.shift==null || (test.settlement && (end==='fail'
+      ? dec(test.settlement.personal).gte(dec(ctx.book.B).plus(ctx.params.recoveryBuffer??'0'))
+      : dec(test.settlement.hype).gte(ctx.params.R)))));
+  const stress=row.verification?.stress;
+  const verification=row.verification && {...row.verification,stress:stress==='pass' && (!liquid || !settlementOK)
+    ? Object.values(liquidity).some(test=>test?.status==='unknown' || !test) ? 'unknown' : 'fail' : stress};
   return {
     sign, i, j, key: pointKey(row), h: row.h,
     fraction: ctx.market.pf.factor ? exactRatio(ctx.market, row.pf, row.hl) : null,
@@ -204,9 +214,9 @@ export function recordFromInspection(ctx, row, pairs = {fail:reachableLedgers(ct
     successPersonal: row.passStop ? null : row.successPersonal,
     successDelta: row.passStop ? null : out(dec(row.successPersonal).minus(ctx.book.B)),
     failStop: row.failStop, passStop: row.passStop,
-    pathAudit, verification:row.verification,
+    pathAudit, verification, liquidity,
     depth:{fail:orderEvidence(ctx,row,'fail'),pass:orderEvidence(ctx,row,'pass')},
-    coverage: ctx.checks?.fullStress && row.crossChecked &&
+    coverage: verification?.stress==='pass' && ctx.checks?.fullStress && row.crossChecked &&
       Object.values(pathAudit).every(group=>group?.basisWiden && group?.basisNarrow &&
         Object.values(group).every(test=>test.status==='pass' && test.proof?.continuous &&
           (test.shift==null || test.settlement!=null))) ? 'verified' : 'conditional',
@@ -317,7 +327,7 @@ export function buildPlanReport(scan, pending = false) {
         (!ratioSlice(scan,row.sign,row.i,'eligible').some(([lo,hi]) => lo <= row.j && row.j <= hi) ||
           !row.both || row.failStop || row.passStop ||
           dec(row.failDelta).lt(scan.ctx.params.recoveryBuffer ?? '0')))
-      throw Error('优先方案与失败保护、成功留存或清算校验不一致');
+      throw Error('优先方案与失败保护、成功留存或清算校验不一致 · '+row.key+' · '+(row.failStop ?? row.passStop ?? row.reason ?? '资金门槛'));
     return { ...row, labels };
   });
   const fractions = new Map();

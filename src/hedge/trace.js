@@ -20,7 +20,15 @@ function fingerprint(json) {
   return [a, b].map((n) => (n >>> 0).toString(16).padStart(8, '0')).join('');
 }
 
-export const modelVersion = 'AUTO-0.21.4';
+// Keep venue marks, source clocks and every visible size/price in the same identity.
+export function bookIdentity(market) {
+  return fingerprint(canonical(['pf','hl'].map(side=>{
+    const q=market?.[side];
+    return q ? [q.mark,q.markAt??q.asOf,q.bookAt??q.asOf,q.levels] : null;
+  })));
+}
+
+export const modelVersion = 'AUTO-0.21.5';
 
 export function calculationTrace(rules, accounts, market, rates, at, settings = {}) {
   const model = modelVersion;

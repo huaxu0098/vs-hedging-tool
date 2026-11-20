@@ -60,6 +60,7 @@ export function segments(book, market, v, sign, old, applyCaps = true, audit = n
               .div(nominal)
           )
     );
+  if (applyCaps && v==='hl' && held.gt(0)) ceiling=max(ceiling,min(held,exit));
   if (applyCaps && l.maxQty != null) ceiling = min(ceiling, l.maxQty);
   if (applyCaps && l.capacity && credit == null)
     ceiling = min(ceiling, max(held, held.plus(l.capacity[sign > 0 ? 0 : 1])));
@@ -109,12 +110,13 @@ export function segments(book, market, v, sign, old, applyCaps = true, audit = n
           previous = credit != null ? dec(credit) : dec(old).abs().times(nominal).div(l.leverage);
         const avail = l.directionalFree?.[delta.lt(0) ? 1 : 0] ?? l.free;
         const marked = projectSettlementEquity(book, market, v, out(q), '0', 'mark_equity');
+        const reducing = v==='hl' && held.gt(0) && q.abs().lte(held);
         return [
-          marked
+          reducing && dec(l.utilization ?? '1').eq(1) ? dec('0') : marked
             .times(l.utilization ?? '1')
             .minus(im)
             .minus(l.hold ?? '0'),
-          avail == null
+          reducing && dec(l.reserve ?? '0').isZero() ? dec('0') : avail == null
             ? null
             : dec(avail)
                 .minus(im)

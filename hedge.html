@@ -40,7 +40,7 @@
           </table>
         </section>
         <section id="scan-focus" aria-labelledby="cash-heading">
-          <h2 id="cash-heading">资金结果 <small class="history-label">历史快照</small> <time id="cash-calculated-at"></time></h2>
+          <h2 id="cash-heading">资金结果 <small class="history-label"></small> <time id="cash-calculated-at"></time></h2>
           <div id="scan-cash" class="scan-paths">
             <div><h3>失败后 · 个人回收</h3><strong id="scan-fail-cash">—</strong><small id="scan-fail-summary"></small></div>
             <div><h3 id="scan-pass-title">通过后 · Hype 剩余</h3><strong id="scan-pass-cash">—</strong><small id="scan-pass-summary"></small></div>
@@ -48,7 +48,7 @@
           <p class="scan-rep"><b id="scan-representative"></b> <span id="scan-position"></span></p>
         </section>
         <section id="ratio-intervals" aria-labelledby="range-heading">
-          <h2 id="range-heading">自动比例区间 <small class="history-label">历史快照</small></h2>
+          <h2 id="range-heading">自动比例区间 <small class="history-label"></small></h2>
           <dl class="scan-sets">
             <div><dt>失败端本金回收<span id="capital-threshold"></span></dt><dd id="scan-protect">—</dd></div>
             <div><dt>成功端最低留存<span id="reserve-threshold"></span></dt><dd id="scan-survive">—</dd></div>
@@ -57,7 +57,7 @@
           </dl>
         </section>
         <section id="scan-results" aria-labelledby="bands-heading">
-          <div class="bands-heading"><h2 id="bands-heading">三种条件目标方案 <small class="history-label">历史快照</small></h2><small><span id="plan-stress"></span><span id="plan-caption"></span></small></div>
+          <div class="bands-heading"><h2 id="bands-heading">三种条件目标方案 <small class="history-label"></small></h2><small><span id="plan-stress"></span><span id="plan-caption"></span></small></div>
           <div id="max-risk" hidden>
             <strong id="max-risk-title"></strong>
             <span id="max-risk-values"></span>
@@ -74,12 +74,12 @@
       </div>
       </details>
       <details id="positions-view" name="workbench-view"><summary hidden>仓位明细</summary>
-        <h2>三个方案的目标仓位 <small class="history-label">历史快照</small></h2>
-        <p class="position-assumptions">平仓沿用本快照的可见深度。点差成本相对买卖中价，滑点相对同侧首档。路径进度表示条件价格位置，实际发生时间未知。可用抵押品按新增仓位估算，可提款额另按平台规则核算。</p>
+        <h2>三个方案的目标仓位 <small class="history-label"></small></h2>
+        <p class="position-assumptions">基础平仓沿用本快照可见深度。撤档压力按两边平仓侧最优档消失重算，未来流动性和成交价待核实。点差成本相对买卖中价，滑点相对同侧首档。路径进度表示条件价格位置，实际发生时间未知。可用抵押品按新增仓位估算，可提款额另按平台规则核算。</p>
         <p id="positions-empty">等待首份计算快照</p>
         <div class="table-wrap"><table id="position-list" hidden><thead><tr><th>方案</th><th>PF 数量 / 名义额</th><th>Hype 数量 / 名义额</th><th>失败路径 · 个人回收</th><th>成功路径 · Hype 剩余</th></tr></thead><tbody id="position-list-rows"></tbody></table></div>
         <section id="scale-details">
-          <h2>同一比例的扩仓对照 <small class="history-label">历史快照</small></h2>
+          <h2>同一比例的扩仓对照 <small class="history-label"></small></h2>
           <div class="scale-method"><h3>A · 固定杠杆</h3><p id="fixed-scale-caption"></p>
           <div class="table-wrap"><table id="fixed-scale-table"><thead><tr><th>指标</th><th>较小目标</th><th>较大目标</th><th>扩仓变化</th></tr></thead><tbody id="fixed-scale-rows"></tbody></table></div>
           </div>

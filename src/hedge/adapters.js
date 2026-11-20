@@ -110,6 +110,11 @@ export function decodeWS(msg, scope) {
     const fills = msg.channel === 'userFills';
     return normalizeFlows(fills ? d.fills : d.fundings, fills ? 'fill' : 'funding', scope);
   }
+  if (msg.channel === 'activeAssetCtx') {
+    check(d?.coin === scope.symbol && d.ctx?.oraclePx != null && d.ctx?.funding != null, 'INVALID_PERP_CTX');
+    return {symbol:d.coin,mark:out(positive(norm(d.ctx.markPx))),oracle:out(positive(norm(d.ctx.oraclePx))),
+      funding:norm(d.ctx.funding),receivedAt:scope.receivedAt,occurredAt:null};
+  }
   if (msg.channel === 'l2Book') {
     check(
       d?.coin === scope.symbol && Number.isFinite(d.time) && d.levels?.length === 2,
@@ -289,6 +294,7 @@ export function subscribeHype(scope, receive, onStatus, refresh) {
       onStatus('connected');
       refresh();
       const subscriptions = [{ type: 'l2Book', coin: scope.symbol }];
+      if (scope.markStream) subscriptions.push({type:'activeAssetCtx',coin:scope.symbol});
       if (scope.user)
         subscriptions.push(
           { type: 'clearinghouseState', user: scope.user, dex: scope.dex },

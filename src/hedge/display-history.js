@@ -1,6 +1,6 @@
 import { planObjectives, recordFromInspection } from './position-plans.js';
 import { dec, out } from './math.js';
-import { modelVersion } from './trace.js';
+import { modelVersion, bookIdentity } from './trace.js';
 
 // The same immutable publication feeds all target views, including after a reload.
 function freezeTree(value) {
@@ -63,6 +63,22 @@ function finalizeSnapshot(view) {
   });
 }
 
+// A ready worker result can be presented as current only for the same atomic
+// publication and the same observed book/mark clocks. The scheduler separately
+// compares the complete depth, account inputs and economic rules before commit.
+export function publicationState(result,snapshot,market,blocked=false) {
+  if (blocked) return 'paused';
+  const state=result.frameState ?? 'paused';
+  if (state!=='ready') return state;
+  const trace=result.trace;
+  if (!result.ratioScan || !snapshot || !trace ||
+      trace.id!==snapshot.snapshotId || trace.marketId!==snapshot.quoteSnapshotId ||
+      trace.accountsId!==snapshot.accountSnapshotId || trace.rulesId!==snapshot.rulesVersion ||
+      trace.model!==snapshot.solverVersion || result.finishedAt!==snapshot.calculatedAt) return 'updating';
+  if (snapshot.bookIdentity !== bookIdentity(market)) return 'updating';
+  return 'ready';
+}
+
 export function createSolutionSnapshot(result) {
   const scan = result.ratioScan;
   const { inputs, ...trace } = result.trace;
@@ -71,6 +87,7 @@ export function createSolutionSnapshot(result) {
   const { sets, buckets, representative, analysis, complete } = scan;
   const { book, params, market } = scan.ctx;
   const view = {
+    bookIdentity: bookIdentity(result.calculationMarket),
     prices: Object.fromEntries(
       ['pf', 'hl'].map((side) => {
         const q = result.calculationMarket[side],
@@ -132,10 +149,10 @@ export function displayHistory(storage) {
       previousKey = scope;
       previous = null;
       try {
-        const saved = JSON.parse(storage.getItem(key(scope)) ?? storage.getItem(key(scope,'AUTO-0.21.3')) ?? storage.getItem(key(scope,'AUTO-0.21.2')) ?? storage.getItem(key(scope,'AUTO-0.21.1')));
+        const saved = JSON.parse(storage.getItem(key(scope)) ?? storage.getItem(key(scope,'AUTO-0.21.4')) ?? storage.getItem(key(scope,'AUTO-0.21.3')) ?? storage.getItem(key(scope,'AUTO-0.21.2')) ?? storage.getItem(key(scope,'AUTO-0.21.1')));
         if (
           saved?.scope === scope &&
-          [modelVersion,'AUTO-0.21.3','AUTO-0.21.2','AUTO-0.21.1'].includes(saved.view?.trace?.model) &&
+          [modelVersion,'AUTO-0.21.4','AUTO-0.21.3','AUTO-0.21.2','AUTO-0.21.1'].includes(saved.view?.trace?.model) &&
           saved.view.ratioScan?.complete &&
           Array.isArray(saved.view.ratioScan.buckets) &&
           saved.view.ratioScan.ctx?.market?.pf &&

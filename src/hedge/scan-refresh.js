@@ -11,6 +11,7 @@ export function scanKeys(rules, accounts, market, rates, scope) {
       levels,
       mark,
       markAt,
+      markSource,
       oracle,
       funding,
       bookAt,

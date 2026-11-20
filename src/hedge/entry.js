@@ -347,7 +347,7 @@ function renderRisk(result, accounts, market) {
   const sources = [];
   if (market.spec)
     sources.push('VS 保证金规格 · Vest exchangeInfo' + (market.specAt ? ' ' + clock(market.specAt) : ''));
-  if (market.hl?.markAt) sources.push('Hype 档位 · 主网 meta ' + clock(market.hl.markAt));
+  if (market.hl?.tiersAt) sources.push('Hype 档位 · 主网 meta ' + clock(market.hl.tiersAt));
   sources.push('VS 单边费率 ' + pct(r.pfFee || null) + '（本机设置）');
   sources.push(
     'Hype 单边费率 ' +
@@ -426,11 +426,13 @@ let version = 0, wantedKey = null, lastStart = -Infinity, wakeTimer, workerTimer
 function scanScope() {
   return JSON.stringify([asset(), state.fundingView, useAPI() ? $('wallet').value.trim().toLowerCase() : 'manual', r.stage]);
 }
-function cancelAuto() {
+function cancelAuto(keepIdleWorker=false) {
   clearTimeout(workerTimer);
   clearTimeout(wakeTimer);
-  worker?.terminate();
-  worker = workerContext = null;
+  if (!keepIdleWorker || running) {
+    worker?.terminate();
+    worker = workerContext = null;
+  }
   running = completed = failure = wantedKey = null;
   version++;
 }
@@ -442,7 +444,7 @@ function currentFrame(a, m, t) {
   const paused = () => ({ ...base, retained, frameState:'paused' });
   if (!base.needsSearch || base.timing?.quoteSkew > base.timing?.quoteLimit) {
     interruptedScope = scope;
-    if (running || completed || failure || wantedKey) cancelAuto();
+    if (running || completed || failure || wantedKey) cancelAuto(true);
     return paused();
   }
   const {context, key} = scanKeys(r, a, m, rates, [scope, $('quote-source').value, m.source,
@@ -1888,7 +1890,7 @@ function render() {
   }
   if (m.hl?.symbol) fxRows.push('Hyperliquid ' + m.hl.symbol +
     ' Perpetual · metaAndAssetCtxs (coin ' + m.hl.symbol + ', asset id ' + (m.hl.assetId ?? '未知') + ') · ' +
-    (m.hl.bookSource ?? 'l2Book') + ' · Mark ' + (m.hl.mark ?? '未知') + ' / Oracle ' + (m.hl.oracle ?? '未知') +
+    (m.hl.bookSource ?? 'l2Book') + ' · '+(m.hl.markSource ?? '标记价')+' · Mark ' + (m.hl.mark ?? '未知') + ' / Oracle ' + (m.hl.oracle ?? '未知') +
     '。Mark 用于估值；Oracle 是参考指数，App 图表和逐笔成交的 Last 可与二者不同。' +
     ' 数量小数位 ' + m.hl.sizeDecimals + '，合约最大杠杆 ' + (m.hl.maxLeverage ?? '未知') +
     '，当前账户保证金模式 ' + (a.hl.marginMode ?? '未知') + '。');

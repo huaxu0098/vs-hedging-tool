@@ -389,6 +389,11 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
     attachRepresentative(result, r);
     result.ratioScan.analysis = analyzeRatios(result, r);
     result.ratioScan.plans = { ...buildPlanReport(result.ratioScan, result.autoStatus === 'AUTO_PAYOUT_PENDING'), pfQuote: result.currencies.pf.quoteAsset, hlQuote: result.currencies.hl.quoteAsset };
+    if (result.autoStatus==='AUTO_FEASIBLE' &&
+        result.ratioScan.plans.rows.some(row=>result.ratioScan.plans.targetKeys.includes(row.key) && row.coverage!=='verified')) {
+      result.autoStatus='AUTO_PARTIAL';
+      result.unverified=[...(result.unverified??[]),'部分目标的退出深度、路径资金或全仓数据未通过完整核验'];
+    }
   }
   result.missingFields = [];
   const add = (id, label) => {

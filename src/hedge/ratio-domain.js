@@ -1,4 +1,5 @@
 import { dec, out, estimateFill } from './math.js';
+import { preservesCrossExposure } from './solver.js';
 import { segments } from './auto.js';
 
 export const unit = (l) => dec(l.multiplier).times(l.fx);
@@ -47,6 +48,11 @@ function entryChecks(ctx, venue, sign, i, lev) {
       .minus(v.notional)
       .minus(hold.times(lev))
   ];
+  const reducing = venue==='hl' && preservesCrossExposure(old,v.q,l.configuredLeverage,lev);
+  if (reducing) {
+    checks[0] = dec('0');
+    if (dec(l.utilization ?? '1').eq(1)) checks[1] = dec('0');
+  }
   if (!order.isZero()) checks.push(v.delta.times(order.cmp(0)).minus(order.abs()));
   if (!v.delta.isZero()) checks.push(v.delta.abs().minus(l.minQty), v.entry.minus(l.minNotional));
   if (venue === 'pf') {
@@ -55,12 +61,15 @@ function entryChecks(ctx, venue, sign, i, lev) {
   } else {
     const room = avail.plus(l.currentMarginCredit ?? '0'),
       cap = room.minus(free).times(lev).minus(v.notional);
-    checks.push(cap, cap.plus(v.marked.minus(ctx.book.hl).times(lev)));
+    if (!free.isZero()) {
+      checks.push(cap, cap.plus(v.marked.minus(ctx.book.hl).times(lev)),
+        v.marked.minus(hold).minus(free).times(lev).minus(v.notional));
+    } else if (!reducing) checks.push(cap,cap.plus(v.marked.minus(ctx.book.hl).times(lev)));
     if (l.capacity && (lev <= Number(l.configuredLeverage) || v.q.isZero()))
       checks.push(dec(l.capacity[side]).minus(v.delta.abs()));
     if (!v.q.isZero() && !order.isZero() && String(lev) !== l.configuredLeverage) checks.push(dec('-1'));
     if (!v.q.isZero() && !old.isZero() && String(lev) !== l.configuredLeverage) {
-      checks.push(room.times(lev).minus(oldN));
+      checks.push(room.times(lev).minus(oldN), dec(ctx.book.hl).minus(hold).times(lev).minus(oldN));
       const oldTier = l.tiers.findLast((t) => oldN.gte(t.from));
       if (!order.isZero() || lev > Number(oldTier.maxLeverage)) checks.push(dec('-1'));
     }

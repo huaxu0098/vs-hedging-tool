@@ -360,3 +360,14 @@ test('A29 单参考点与显式有限集合各自携带毛分成', () => {
     assert.ok(Math.abs(Number(x.expectedUserPayout) - (Number(x.targetEquity) - 10000) * 0.8) < 1e-6);
   assert.deepEqual(solve(a, m, config).targets, ['10100']);
 });
+
+
+test('Hype BTC 永续推送仅更新同品种标记价，接收时间独立于盘口和风险档位',()=>{
+  const scope={symbol:'BTC',receivedAt:'2026-11-20T15:43:29.100Z'};
+  const msg={channel:'activeAssetCtx',data:{coin:'BTC',ctx:{markPx:'61020',oraclePx:'61021',funding:'0.0000125'}}};
+  const q=decodeWS(msg,scope);
+  assert.equal(q.mark,'61020'); assert.equal(q.receivedAt,scope.receivedAt);
+  assert.equal(q.occurredAt,null);
+  assert.throws(()=>decodeWS({...msg,data:{...msg.data,coin:'ETH'}},scope));
+  assert.throws(()=>decodeWS({...msg,data:{coin:'BTC',ctx:{markPx:'1'}}},scope));
+});

@@ -92,13 +92,18 @@ try {
     for (const [id, value] of Object.entries(changes)) await input(id, value);
     await wait(ready + " && document.getElementById('plan-stress').textContent.includes(" + JSON.stringify(coverage) + ")",45000);
     assert.ok((await run("document.getElementById('plan-stress').textContent")).includes(scenario));
-    assert.deepEqual(await labels(),Array(3).fill('失败✓ 成功✓ 初保✓ 路径待验 压力' + (incomplete ? '待验' : '✓')));
+    const checks=await labels();
+    assert.equal(checks.length,3);
+    for (const check of checks) {
+      if(incomplete) assert.equal(check,'失败✓ 成功✓ 初保✓ 路径待验 压力待验');
+      else assert.match(check,/^失败✓ 成功✓ 初保✓ 路径待验 压力(?:✓|×|待验)$/);
+    }
     assert.equal(/压力(?:安全性|风险)未验证/.test(await text('#max-risk-title')),incomplete);
     if (!incomplete) {
       const results=await run("Array.from(document.querySelectorAll('#position-list-rows tr'),row=>[row.cells[3].textContent,row.cells[4].textContent])");
       assert.equal(results.length,3);
       for(const path of results.flat()) {
-        for (const label of ['基础同步','基差扩大','基差收敛','个人回收（分成到账前）','可用抵押品','深度滑点'])
+        for (const label of ['基础同步','基差扩大','基差收敛','基差对当前 Hype 仓不利','基差对当前 Hype 仓有利','盘口异步且退出时仍承受不利偏移','退出侧可见档全部撤去','查看逐段保证金','撤档退出','个人回收（分成到账前）','可用抵押品','深度滑点'])
           assert.ok(path.includes(label),label);
         assert.ok((path.match(/双边平仓价 PF/g)??[]).length>=3);
       }

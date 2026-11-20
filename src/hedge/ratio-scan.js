@@ -245,6 +245,15 @@ function cell(ctx, p, pfSegment, hypeSegment, common) {
     risk.push(plane([point[0],denominator.times(l.mark).plus(point[1]),0,0],true));
     riskAt(point,[funding,decimal(0)]);
   }
+  // Both signs of a configured basis move need a valid native price even
+  // when a move improves the position's cash (e.g. a short near zero).
+  if (nonflat && checks.basisBps != null && decimal(checks.basisBps).gt(0)) {
+    const down=decimal(l.mark).times(checks.basisBps).div(10000).neg();
+    for (const s of shifts) {
+      const point=shiftPx(s,down);
+      risk.push(plane([point[0],denominator.times(l.mark).plus(point[1]),0,0],true));
+    }
+  }
   const ref = position(book, 'hl');
   if (
     nonflat &&
@@ -436,6 +445,22 @@ function auditHypePaths(ctx,c) {
           shift,offset:out(offset),gapBefore:out(gap),gapAfter:out(gap.plus(offset)),
           adverse:offset.times(q).lt(0),referenceRate:fx};
       }
+    }
+    // A widening absolute premium can help either side. Signed shocks describe
+    // the economics of this particular position independently of the premium.
+    const side=decimal(q).cmp(0);
+    if (basis != null && side) {
+      const adverse=decimal(leg.mark).times(basis).div(10000).times(-side);
+      for (const [name,offset] of [['basisAdverse',adverse],['basisFavorable',adverse.neg()]]) {
+        const shift=out(decimal(end).plus(offset.div(factor)));
+        paths[name]={...walk(market,q,['0',shift],'0',c.availableAfter),shift,nativeOffset:out(offset)};
+      }
+    }
+    if (!excursion.isZero()) {
+      const shifted=out(decimal(end).plus(excursion));
+      const debit=checks.stress?.fundingDebit ?? '0';
+      paths.asyncExit={...walk(market,q,['0',out(excursion),shifted],debit,c.availableAfter),
+        shift:shifted,nativeOffset:out(excursion.times(factor)),debit};
     }
     if (!excursion.isZero())
       paths.dislocation = walk(market,q,['0',out(excursion),out(decimal(end).plus(excursion)),end],

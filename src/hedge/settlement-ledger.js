@@ -42,7 +42,7 @@ export function presentLedger(ledger, digits = 4) {
   return { entries, total, rounding: new D(rounding).toFixed(digits) };
 }
 
-export function settlementBridge(cash, l, target, adjustment, shift, entry, exit, friction = '0') {
+export function settlementBridge(cash, l, target, adjustment, shift, entry, exit, friction = '0', exitBook = l) {
   const qty = dec(target),
     delta = dec(adjustment),
     unit = dec(l.multiplier).times(l.fx);
@@ -54,7 +54,7 @@ export function settlementBridge(cash, l, target, adjustment, shift, entry, exit
   const entryBest = delta.isZero() ? null : (delta.gt(0) ? l.asks : l.bids)[0][0];
   const exitBest = qty.isZero()
     ? null
-    : dec((qty.gt(0) ? l.bids : l.asks)[0][0]).plus(dec(shift).times(l.factor));
+    : dec((qty.gt(0) ? exitBook.bids : exitBook.asks)[0][0]).plus(dec(shift).times(l.factor));
   const entrySpread = delta.isZero() ? dec('0') : delta.times(unit).times(mark.minus(entryBest));
   const exitSpread = qty.isZero() ? dec('0') : qty.times(unit).times(exitBest.minus(exitMark));
   const debit = (v) => out(dec(v).neg());

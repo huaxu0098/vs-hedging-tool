@@ -229,11 +229,18 @@ export function continuousTiers(tiers) {
         dec(tier.deduction).minus(all[i-1].deduction)
           .minus(dec(tier.from).times(dec(tier.mmr).minus(all[i-1].mmr))).abs().lte('1e-30')));
 }
+// A same-setting hold or reduction introduces no new cross exposure. Opening
+// across zero and changing the leverage setting require a new admission check.
+export function preservesCrossExposure(old, target, configured, leverage) {
+  return !old.isZero() && (target.isZero() ||
+    (String(configured) === String(leverage) && old.times(target).gt(0) && target.abs().lte(old.abs())));
+}
 export function validateMargin(s, m, v, q, shifts, catalog = { [m.id]: m }, funding = '0', audit = null) {
   const l = m[v],
     unknown = () => [constraint('MARGIN_UNVERIFIED', null, '0', 'U', 'missing')];
   if (!l.leverage || !l.tiers?.length || l.hold == null || l.marginMode !== 'cross' || !l.pool)
     return unknown();
+  if (v==='hl' && l.otherMaintenance==null && !dec(l.hold).isZero()) return unknown();
   const continuous=continuousTiers(l.tiers);
   if (!continuous && !audit) return unknown();
   let otherInitial = nonnegative(l.hold),
@@ -258,6 +265,10 @@ export function validateMargin(s, m, v, q, shifts, catalog = { [m.id]: m }, fund
       'U'
     )
   ];
+  if (v === 'hl' && preservesCrossExposure(qty(pos(s,m,v)),dec(q),l.configuredLeverage,l.leverage)) {
+    checks[0].requiredForTrade=false;
+    checks[0].status='pass';
+  }
   const startEquity = dec(checks[0].actual);
   const signed = dec(q).times(value(l));
   // With fixed cross-pool holdings, marked equity is affine and maintenance
@@ -302,7 +313,8 @@ export function validateMargin(s, m, v, q, shifts, catalog = { [m.id]: m }, fund
       const free=limit == null ? null : min(limit,headroom);
       checkpoints.push({mark:out(mark),legIndex,progress,equity:out(equity),initial:out(targetIM),
         otherUsed:out(otherInitial),marginUsed:out(used),maintenance:out(required),surplus:out(excess),
-        initialHeadroom:out(headroom),free:free===null?null:out(free),
+        initialHeadroom:out(headroom), additionalIMShortfall:out(max(0,headroom.neg())),
+        free:free===null?null:out(free),
         freeCollateral:free===null?null:out(max(0,free))});
     }
   }
@@ -360,7 +372,8 @@ export function liquidationMark(s, m, q, catalog = { [m.id]: m }, debit = '0') {
   const l = m.hl,
     qty = dec(q);
   if (qty.isZero() || l.marginMode !== 'cross' || !l.tiers?.length || l.hold == null) return null;
-  let other = nonnegative(l.otherMaintenance ?? l.hold);
+  if (l.otherMaintenance==null && !dec(l.hold).isZero()) return null;
+  let other = nonnegative(l.otherMaintenance ?? '0');
   for (const p of Object.values(s.positions).filter((p) => p.venue === 'hl' && p.asset !== m.id)) {
     const spec = catalog[p.asset]?.hl;
     if (!spec || p.pool !== l.pool || spec.marginMode !== 'cross') return null;
@@ -566,7 +579,7 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
       if (l.maxQty != null)
         constraints.push(constraint(venue + '_POSITION_LIMIT', l.maxQty, out(size.abs()), l.unit));
       const margin = constraints.find((c) => c.code === venue + '_INITIAL_MARGIN');
-      if (margin && l.utilization != null)
+      if (margin && l.utilization != null && (margin.requiredForTrade!==false || dec(l.utilization).lt(1)))
         constraints.push(
           constraint(
             venue + '_UTILIZATION',
@@ -583,11 +596,9 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
             venue + '_FREE_RESERVE',
             free == null
               ? null
-              : out(
-                  dec(free)
-                    .minus(change)
-                    .minus(exec(l, out(delta)).fee)
-                ),
+              : out(margin?.requiredForTrade===false
+                  ? max(0,min(dec(margin.actual).minus(margin.required),dec(free).minus(change).minus(exec(l,out(delta)).fee)))
+                  : dec(free).minus(change).minus(exec(l,out(delta)).fee)),
             l.reserve,
             'U'
           )
@@ -676,7 +687,8 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
     for (const [key, shift] of Object.entries(lines)) {
       const bound = out(dec(shift).plus(transient));
       const shifts = ['0',out(transient),bound,shift];
-      const valid = shifts.every(x => sourcePrice(m.hl,x).gt(0));
+      const basisWidth=dec(options.basisBps ?? '0').times(m.hl.mark).div(10000);
+      const valid = shifts.every(x => sourcePrice(m.hl,x).gt(0)) && sourcePrice(m.hl,shift).gt(basisWidth);
       const test = valid ? validateMargin(s,m,'hl',hlQty,shifts,options.catalog,
         options.stress?.fundingDebit ?? '0').at(-1) : constraint('INVALID_PATH_PRICE','-1','0','价格单位');
       const ref = h.eq(qty(pos(s,m,'hl'))) ? m.hl.currentLiquidation : null;

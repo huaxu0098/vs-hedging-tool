@@ -1,7 +1,7 @@
 // Hyperliquid cross-margin: position size and collateral determine maintenance and liquidation.
 // Only initial margin, switch funding and the exchange's current-setting order capacity vary by setting.
-import { dec, out, max } from './math.js';
-import { constraint, evaluateCandidate, maintenance } from './solver.js';
+import { dec, out, max, min } from './math.js';
+import { constraint, evaluateCandidate, maintenance, preservesCrossExposure } from './solver.js';
 
 export function validLeverageCap(value) {
   if (!['string', 'number'].includes(typeof value) || !/^[1-9]\d*$/.test(String(value))) return null;
@@ -113,15 +113,23 @@ export function evaluateLeverageGrid(book, market, profile, pf, hl, checks, fixe
         '账户上限'
       )
     ];
+    const reducing = preservesCrossExposure(old,target,leg.configuredLeverage,lev);
+    if (reducing) {
+      extra[0].status = 'pass';
+      extra[0].requiredForTrade = false;
+      if (dec(leg.utilization ?? '1').eq(1)) extra[1].status = 'pass';
+    }
     if (available != null) {
-      const free = dec(available).plus(credit).minus(margin).minus(executionCost);
+      const headroom=min(dec(initial.actual).minus(total),
+        dec(available).plus(credit).minus(margin).minus(executionCost));
+      const free=reducing ? max(0,headroom) : headroom;
       extra.push(constraint('hl_FREE_RESERVE', out(free), leg.reserve ?? '0', 'U', '账户可用抵押品'));
       // If the exchange setting must change first, the current open position must also fit it.
       if (n && leg.configuredLeverage !== lev && !old.isZero())
         extra.push(
           constraint(
             'hl_SWITCH_MARGIN',
-            out(dec(available).plus(credit)),
+            out(min(dec(available).plus(credit),dec(book.hl).minus(other))),
             out(oldNotional.div(lev)),
             'U',
             '调档前现仓'
@@ -155,7 +163,7 @@ export function evaluateLeverageGrid(book, market, profile, pf, hl, checks, fixe
       initial: out(margin),
       marginUsed: out(total),
       postEntryEquity: initial.actual,
-      freeAfter: extra.find((c) => c.code === 'hl_FREE_RESERVE')?.actual ?? null,
+      freeAfter: available == null ? null : out(max(0,extra.find(c => c.code === 'hl_FREE_RESERVE').actual)),
       freeFloor: leg.reserve ?? '0',
       successEquity: base.hlBeforePayout,
       maintenance: funding.maintenanceMargin,
@@ -198,7 +206,7 @@ export function evaluateLeverageGrid(book, market, profile, pf, hl, checks, fixe
     candidateLeverage: best.row.leverage,
     requiredInitialMargin: best.row.initial,
     otherInitialMargin: out(other),
-    availableAfter: best.extra.find((c) => c.code === 'hl_FREE_RESERVE')?.actual ?? null,
+    availableAfter: best.row.freeAfter,
     roundGain:
       code === 'FEASIBLE' && book.ref != null
         ? out(dec(base.pressureCashAfter).minus(book.ref).minus(book.roundIn).plus(book.roundOut))

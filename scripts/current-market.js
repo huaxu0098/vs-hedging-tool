@@ -7,7 +7,7 @@ async function publicInfo(body) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(4500),
+    signal: AbortSignal.timeout(body.type==='l2Book' ? 4500 : 25000),
     redirect: 'error'
   });
   if (!res.ok) throw Error('Hype HTTP ' + res.status);
@@ -32,9 +32,9 @@ async function readTokenIndex() {
 }
 // Deduplicate a source's outstanding request across tabs. A stalled dependency
 // must not reduce the refresh frequency of either venue's native prices.
-function refreshSource(stream, source, read) {
+function refreshSource(stream, source, read, interval=1000) {
   const previous = stream.reads[source];
-  if (previous && (previous.pending || Date.now() - previous.at < 1000)) return previous.pending;
+  if (previous && (previous.pending || Date.now() - previous.at < interval)) return previous.pending;
   const current = { at: Date.now() };
   stream.reads[source] = current;
   current.pending = read(current.at).finally(() => {
@@ -52,13 +52,14 @@ export async function currentMarket(asset, { partial = false } = {}) {
     s = { asset, errors: {}, reads: {}, startedAt: Date.now() };
     streams.set(asset, s);
     s.stopHype = subscribeHype(
-      { symbol: asset },
+      { symbol: asset, markStream:true },
       (channel, book) => {
+        if (channel === 'activeAssetCtx') s.wsMark=book;
         if (channel === 'l2Book' && (!s.wsBook || book.occurredAt >= s.wsBook.occurredAt)) s.wsBook = book;
       },
       (status) => {
         s.wsConnected = status === 'connected';
-        if (!s.wsConnected) s.wsBook = null;
+        if (!s.wsConnected) {s.wsBook=null; s.wsMark=null;}
       },
       () => {}
     );
@@ -122,6 +123,7 @@ export async function currentMarket(asset, { partial = false } = {}) {
           oracle: d.oracle,
           assetId: d.assetId,
           markAt: requestedAt,
+          markSource:'Hyperliquid REST · metaAndAssetCtxs（请求时间）',
           tiersAt: requestedAt,
           bookSource: newestBook ? 'Hyperliquid REST · l2Book' : s.hl.bookSource,
           asOf: newestBook ? d.quote.occurredAt : s.hl.asOf,
@@ -142,15 +144,17 @@ export async function currentMarket(asset, { partial = false } = {}) {
       })
       .catch((error) => {
         s.errors.hl = 'Hype 请求失败 · ' + error.message;
+        // Invalid instruments or schemas supersede any cached contract.
+        if (!['TimeoutError','AbortError','TypeError'].includes(error.name) &&
+            !/^Hype HTTP (429|5[0-9][0-9])$/.test(error.message)) s.hl=null;
       });
-  });
+  }, s.wsConnected && s.wsMark && s.wsBook && s.hl ? 15000 : 1000);
   if (!partial) await Promise.allSettled([specTask, hypeTask, tokenTask]);
   let hl = s.hl;
   if (
     hl &&
     s.wsConnected &&
     s.wsBook &&
-    Date.now() - Date.parse(s.wsBook.occurredAt) < 2500 &&
     s.wsBook.occurredAt >= hl.asOf &&
     (!s.published || s.wsBook.occurredAt >= s.published.asOf)
   ) {
@@ -181,9 +185,27 @@ export async function currentMarket(asset, { partial = false } = {}) {
           : null
       }
     };
-    s.published = hl;
   }
   const errors = { ...s.errors };
+  // The public mark stream has no exchange timestamp. Its receipt time is
+  // independent of the exchange-timestamped book and the REST tier clock.
+  if (hl) {
+    const freshSpec=Date.now()-Date.parse(hl.tiersAt)<60000;
+    if (s.wsConnected && freshSpec && s.wsMark && s.wsMark.receivedAt>=hl.markAt)
+      hl={...hl,mark:s.wsMark.mark,oracle:s.wsMark.oracle,funding:s.wsMark.funding,
+        markAt:s.wsMark.receivedAt,markSource:'Hyperliquid WebSocket · activeAssetCtx（本机接收时间）'};
+    if (s.published && hl.markAt<s.published.markAt) {
+      const {mark,markAt,markSource,oracle,funding}=s.published;
+      hl={...hl,mark,markAt,markSource,oracle,funding};
+    }
+    s.published=hl;
+    // Drop a failed REST refresh only while both independent live feeds and
+    // the verified contract are fresh. The workbench applies its own skew/TTL.
+    if (s.wsConnected && s.wsMark && s.wsBook && freshSpec &&
+        Date.now()-Date.parse(s.wsMark.receivedAt)<2500 && Date.now()-Date.parse(s.wsBook.occurredAt)<2500)
+      delete errors.hl;
+    if (!freshSpec) errors.hl ||= 'Hype 合约风险档位已过期，等待主网元数据';
+  }
   if (Date.now() - s.startedAt > 10000) {
     if (!s.quote) errors.pf ||= 'Vest 未收到匹配合约的有效盘口与标记价，正在重试';
     if (!hl) errors.hl ||= 'Hyperliquid 未收到该永续合约的行情，正在重试';

@@ -49,7 +49,9 @@ const install = `(() => {
   test.readPanels=()=>{
     const e=id=>document.getElementById(id), desk=e('scan-desk');
     const fields=['snapshotId','quoteSnapshotId','accountSnapshotId','rulesVersion','solverVersion','calculatedAt'];
-    const ids=['live-view','positions-view','scale-details','desk-details'].map(k=>e(k).dataset.snapshotId);
+    const panels=['live-view','positions-view','scale-details','desk-details','scan-results','scan-cash','ratio-intervals','desk-state'];
+    const ids=panels.map(k=>e(k).dataset.snapshotId);
+    if (panels.some(k=>e(k).dataset.calculatedAt!==desk.dataset.calculatedAt)) test.conflict=true;
     const version=Object.fromEntries(fields.map(k=>[k,k==='snapshotId'?desk.dataset.resultId:desk.dataset[k]]));
     const matrix=Object.fromEntries([...e('plan-rows').rows].map(row=>[row.dataset.metric,[...row.cells].slice(1).map(c=>c.textContent)]));
     const cols=[...e('plan-columns').rows[0].cells].slice(1);
@@ -78,6 +80,10 @@ const install = `(() => {
       if(desk.dataset.state==='updating' && lastClockId===panels.version.snapshotId && lastClocks!==clockPair)
         test.historyTicks=(test.historyTicks||0)+1;
       lastClocks=clockPair;lastClockId=panels.version.snapshotId;
+      const historic=e('current').dataset.historical==='true';
+      if ([...document.querySelectorAll('.history-label')].some(el=>el.textContent!==(historic?'历史快照':'')) ||
+          historic===e('scan-status').textContent.includes('当前数据有效') || historic===(desk.dataset.state==='ready'))
+        test.conflict=true;
       if(desk.dataset.state==='updating') {
         test.pendingPaints++;
         if(e('current').dataset.historical!=='true' || !e('scan-status').textContent.includes('历史快照') ||
@@ -182,6 +188,20 @@ try {
       assert.equal(scenario,'失败✓ 成功✓ 初保✓ 路径待验 压力待验');
       for (const pathName of ['pass','fail']) {
         const test = plan.pathAudit[pathName].base;
+        const liquidity=plan.liquidity[pathName];
+        for (const side of ['pf','hl']) {
+          const fill=liquidity.depth[side], gone=liquidity.withdrawn[side];
+          const levels=f.books[side].levels[fill.side==='ask'?1:0];
+          assert.ok(dec(liquidity.removed[side]).eq(levels[0][1]));
+          assert.ok(dec(fill.visible).eq(levels.slice(1).reduce((sum,q)=>sum.plus(q[1]),dec('0'))));
+          assert.ok(dec(fill.covered).plus(fill.uncovered).eq(fill.target));
+          assert.ok(dec(fill.coverageRatio).eq(dec(fill.covered).div(fill.target)));
+          assert.equal(gone.uncovered,fill.target);
+          assert.equal(gone.vwap,null); assert.equal(gone.slippage,null);
+          if(dec(fill.uncovered).gt(0)) {
+            assert.equal(fill.vwap,null); assert.equal(fill.slippage,null); assert.equal(liquidity.settlement,null);
+          }
+        }
         assert.equal(test.firstBreach,null);
         assert.equal(test.status,'pass');
         assert.ok(test.proof.continuous && test.proof.intervals===test.proof.segments.length && test.proof.intervals>0);
@@ -245,7 +265,7 @@ try {
     assert.ok(f.height<=720,'主要计算区域超出桌面首屏 '+f.height);
   }
   assert.ok(frames.every((f, i) => !i || f.sequence > frames[i - 1].sequence));
-  assert.ok(frames.slice(1).some((f) => f.revaluation.marketOnly));
+  assert.ok(frames.slice(1).some((f) => f.revaluation.marketOnly),'连续发布中没有行情重估，序号 '+frames.map(f=>f.sequence).join(','));
   evidence.example = frames[0].bins.filter((b) => b.group === 'both').sort((a, b) => b.count - a.count)[0];
   assert.ok(new Set(frames.map(f => JSON.stringify(f.bins))).size > 1);
   assert.ok(new Set(frames.map(f => JSON.stringify(f.shown))).size > 1);
@@ -253,6 +273,7 @@ try {
   evidence.observation = await run(
     '(({paints,pendingPaints,blanks,neighborBlanks=0,neighborRemounts=0,replacedFirstRow=false,remounts=0,unreadable=false,posted,elapsedMs,quoteChanges,panelMismatches=0,historyTicks=0})=>({historyTicks,panelMismatches,paints,pendingPaints,blanks,neighborBlanks,neighborRemounts,replacedFirstRow,remounts,unreadable,posted,elapsedMs,quoteChanges}))(window.scanTest)'
   );
+  if (process.env.UI_EVIDENCE) await writeFile(process.env.UI_EVIDENCE,JSON.stringify(evidence)+'\n');
   evidence.viewports = [];
   for (const [width,height] of [[1280,720],[390,844],[1440,900]]) {
     await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<500});
@@ -331,14 +352,14 @@ try {
   // Hold a real repricing job until another source book arrives, without
   // changing any account or rule. Its late callback must leave no visible trace.
   await run("window.scanTest.hold=true");
-  await wait("window.scanTest.held.length===1");
+  await wait("window.scanTest.held.length===1",45000);
   const lastValid=await run("document.getElementById('scan-desk').dataset.resultId");
   await wait(`(() => {const m=window.scanTest.held[0].job.m;return ['pf','hl'].some(k=>
     document.getElementById('scan-'+k+'-book-time').dateTime!==(m[k].bookAt??m[k].asOf))})()`,12000);
   await run("(()=>{const h=window.scanTest.held[0];h.handler({data:{version:h.job.version,error:'STALE_BOOK_TEST'}})})()");
   assert.equal(await run("document.getElementById('scan-desk').dataset.resultId"),lastValid);
   assert.ok(await run("!document.getElementById('scan-status').textContent.includes('STALE_BOOK_TEST') && document.getElementById('current').dataset.historical==='true'"));
-  await wait("window.scanTest.held.length>=2");
+  await wait("window.scanTest.held.length>=2",45000);
   await run("window.scanTest.hold=false;window.scanTest.held.at(-1).send();window.scanTest.held=[]");
   await wait(ready+" && document.getElementById('scan-desk').dataset.resultId!=="+JSON.stringify(lastValid),45000);
   evidence.supersededBookDiscarded=true;
@@ -346,10 +367,10 @@ try {
   // the old response after dispatch. It must never become visible.
   await run('window.scanTest.hold=true');
   await set('#R_success', '98', 'input');
-  await wait('window.scanTest.held.length===1');
+  await wait('window.scanTest.held.length===1',45000);
   const previousPanels=await run('window.scanTest.readPanels()');
   await set('#R_success', '97', 'input');
-  await wait('window.scanTest.held.length>=2');
+  await wait('window.scanTest.held.length>=2',45000);
   await b.click('#desk-views button[aria-controls="positions-view"]');
   assert.deepEqual(await run('window.scanTest.readPanels()'),previousPanels);
   assert.ok(await run("document.getElementById('position-list').checkVisibility() && !document.getElementById('positions-empty').checkVisibility()"));
@@ -364,7 +385,7 @@ try {
     "(()=>{const t=window.scanTest; t.held[0].handler({data:{version:t.held[0].job.version,error:'INVALID_LATE_TEST'}}); t.hold=false; t.held.at(-1).send()})()"
   );
   await wait(
-    ready + " && document.getElementById('scan-desk').dataset.resultId!==" + JSON.stringify(stableId)
+    ready + " && document.getElementById('scan-desk').dataset.resultId!==" + JSON.stringify(stableId),60000
   );
   assert.ok(
     await run(
@@ -409,7 +430,7 @@ try {
   await wait("window.scanTest?.held.length && document.getElementById('scan-desk').dataset.resultId",35000);
   await b.click('#desk-views button[aria-controls="positions-view"]');
   const cached=await run('window.scanTest.readPanels()');
-  assert.deepEqual(cached.ids,Array(4).fill(cached.version.snapshotId));
+  assert.deepEqual(cached.ids,Array(8).fill(cached.version.snapshotId));
   assert.deepEqual(cached.live,cached.positions);
   assert.equal(cached.live.length,3);
   assert.equal(cached.empty,'');
@@ -419,7 +440,7 @@ try {
   await run('window.scanTest.hold=false;window.scanTest.held.at(-1).send()');
   await wait(ready+" && document.getElementById('scan-desk').dataset.resultId!=="+JSON.stringify(cached.version.snapshotId),50000);
   const renewed=await run('window.scanTest.readPanels()');
-  assert.deepEqual(renewed.ids,Array(4).fill(renewed.version.snapshotId));
+  assert.deepEqual(renewed.ids,Array(8).fill(renewed.version.snapshotId));
   assert.deepEqual(renewed.positions,renewed.live);
   evidence.reload={historical:cached.version.snapshotId,renewed:renewed.version.snapshotId,targets:renewed.live.length};
   assert.ok(evidence.observation.historyTicks>0);

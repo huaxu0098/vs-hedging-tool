@@ -62,11 +62,11 @@ export function auditCross(leg, account, c, planning) {
     status: '条件估算'
   };
   const im = c.constraints.find((x) => x.code === 'hl_INITIAL_MARGIN');
-  if (!leg.tiers || leg.marginMode !== 'cross' || leg.hold == null || im?.actual == null) {
+  if (!leg.tiers || leg.marginMode !== 'cross' || leg.hold == null || (leg.otherMaintenance==null && !dec(leg.hold).isZero()) || im?.actual == null) {
     gaps.push('完整全仓维持模型');
     return audit;
   }
-  const other = leg.otherMaintenance ?? leg.hold;
+  const other = leg.otherMaintenance ?? '0';
   const unit = dec(leg.multiplier).times(leg.fx),
     mark = dec(leg.mark);
   const held = dec(String(account.qty)),
