@@ -58,8 +58,8 @@ try {
   assert.match(await text('#summary-status'), /预设规划/);
   assert.match(await text('#stress-assumptions'), /压力未配置/);
   assert.match(await text('#summary-status'), /AUTO_PARTIAL · 条件方案/);
-  assert.match(await text('#plan-rows'), /失败回收优先/);
-  assert.match(await text('#plan-rows'), /成功留存优先/);
+  assert.match(await text('#plan-columns'), /失败端回收缓冲优先/);
+  assert.match(await text('#plan-columns'), /成功端现金留存优先/);
   assert.match(await text('#success-hl'), /考核利润不可分/);
   assert.match(await text('#trace-id'), /AUTO-0.21/);
   const leverageCheck = await run(`(() => {

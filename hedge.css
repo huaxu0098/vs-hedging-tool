@@ -651,3 +651,22 @@ main.live-desk {padding-block:14px}
 #grid-disclosure .table-wrap {overflow:auto}
 
 #plan-stress:not(:empty) + #plan-caption:not(:empty)::before {content:' · '}
+
+#max-risk {display:flex; flex-wrap:wrap; align-items:baseline; gap:2px 12px; margin:3px 0 7px;
+  padding:5px 9px; border-left:3px solid #ae6e27; background:#f8f1e5; color:#70461c; font-size:12px}
+#max-risk a {margin-left:auto; color:#66421e; text-underline-offset:2px}
+.plan-matrix {width:100%; table-layout:fixed; border-collapse:collapse; font-variant-numeric:tabular-nums}
+#scan-results .plan-matrix :is(th,td) {padding:2px 9px; line-height:1.2; text-align:right; vertical-align:middle}
+#scan-results .plan-matrix th:first-child {width:25%; text-align:left}
+.plan-matrix thead th {background:#e7efe9; color:#24463a}
+.plan-matrix thead small {display:block; font-weight:400; font-size:11px; color:#54695e}
+.plan-matrix tbody th {font-weight:450; color:#486155}
+.plan-matrix td {border-bottom:1px solid #e0e7e0}
+.plan-matrix [data-metric="fail"], .plan-matrix [data-metric="success"] {background:#eff5f0; font-weight:650}
+.plan-matrix [data-metric="marginRate"] td:nth-child(2) {color:#774d20; font-weight:650}
+@media(max-width:640px) {
+  #max-risk {line-height:1.4}
+  #max-risk a {margin-left:0}
+  #scan-results .plan-matrix :is(th,td) {padding:3px; font-size:11px; overflow-wrap:anywhere}
+  #scan-results .plan-matrix thead th {line-height:1.3}
+}

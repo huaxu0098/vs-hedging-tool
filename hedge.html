@@ -50,19 +50,27 @@
           </dl>
         </section>
         <section id="scan-results" aria-labelledby="bands-heading">
-          <div class="bands-heading"><h2 id="bands-heading">条件目标仓位</h2><small><span id="plan-stress"></span><span id="plan-caption"></span></small></div>
-          <div class="table-wrap" tabindex="0" role="region" aria-label="三个自动目标仓位方案"><table class="bands-table exact-plans">
-            <thead id="plan-columns"><tr><th scope="col">目标比例 / 优先条件</th><th scope="col">PF 目标方向与仓位</th><th scope="col">Hype 目标方向与仓位</th><th scope="col">失败回收 / 本金差额</th><th scope="col">成功剩余 / 本金差额</th><th scope="col">保护结果 / Hype 风险</th></tr></thead>
-            <tbody id="plan-rows"></tbody></table></div>
-          <details id="scale-details"><summary>同一比例的仓位规模对照</summary>
-            <p id="scale-caption"></p>
-            <div class="table-wrap"><table id="scale-table"><thead><tr><th scope="col">指标</th><th scope="col">较小目标</th><th scope="col">较大目标</th><th scope="col">扩仓变化</th></tr></thead>
-              <tbody id="scale-rows"></tbody></table></div>
-          </details>
+          <div class="bands-heading"><h2 id="bands-heading">三种条件目标方案</h2><small><span id="plan-stress"></span><span id="plan-caption"></span></small></div>
+          <div id="max-risk" hidden>
+            <strong id="max-risk-title"></strong>
+            <span id="max-risk-values"></span>
+            <a id="scale-link" href="#scale-details" hidden>查看同比例扩仓差额</a>
+          </div>
+          <div id="plan-comparison" class="table-wrap" hidden>
+            <table class="plan-matrix" aria-labelledby="bands-heading">
+              <thead id="plan-columns"><tr><th scope="col">比较指标</th></tr></thead>
+              <tbody id="plan-rows"></tbody>
+            </table>
+          </div>
           <p id="bands-empty" hidden></p>
         </section>
       </div>
       <details id="desk-details"><summary id="scan-config">高级详情</summary>
+      <details class="desk-group" id="scale-details"><summary>同一比例的仓位规模对照</summary>
+        <p id="scale-caption"></p>
+        <div class="table-wrap"><table id="scale-table"><thead><tr><th scope="col">指标</th><th scope="col">较小目标</th><th scope="col">较大目标</th><th scope="col">扩仓变化</th></tr></thead>
+          <tbody id="scale-rows"></tbody></table></div>
+      </details>
       <details class="desk-group" id="grid-disclosure"><summary>完整目标仓位网格与分页</summary>
           <div id="segment-report" hidden>
             <div class="bands-heading"><h3>合法数量网格分段</h3><button type="button" id="plan-view" disabled>全部目标仓位</button></div>
@@ -70,7 +78,7 @@
           </div>
           <div id="grid-detail" hidden>
             <nav aria-label="仓位明细分页"><strong id="grid-caption"></strong><button type="button" id="plan-first">首页</button><button type="button" id="plan-prev">上一页</button><button type="button" id="plan-next">下一页</button><button type="button" id="plan-last">末页</button><button type="button" id="plan-close">收起明细</button></nav>
-            <div class="table-wrap" tabindex="0" role="region" aria-label="当前比例分段的逐仓明细"><table class="bands-table exact-plans"><thead id="grid-columns"></thead><tbody id="grid-rows"></tbody></table></div>
+            <div class="table-wrap" tabindex="0" role="region" aria-label="当前比例分段的逐仓明细"><table class="bands-table exact-plans"><thead id="grid-columns"><tr><th scope="col">目标比例 / 优先条件</th><th scope="col">PF 目标方向与仓位</th><th scope="col">Hype 目标方向与仓位</th><th scope="col">失败回收 / 本金差额</th><th scope="col">成功剩余 / 本金差额</th><th scope="col">保护结果 / Hype 风险</th></tr></thead><tbody id="grid-rows"></tbody></table></div>
           </div>
       </details>
       <details class="desk-group" id="account-details"><summary>账户、持仓与资金规则</summary>

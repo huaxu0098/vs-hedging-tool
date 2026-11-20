@@ -5,7 +5,7 @@ const b = await openTestBrowser({ current: true });
 const { send, run, wait, click, text } = b;
 const input = (id, v) => b.set('#' + id, v, 'input');
 const ready =
-  "document.querySelector('#plan-rows').textContent.includes('最大 PF 目标仓位') && document.querySelector('#scan-desk').dataset.state==='ready' && document.querySelector('#trace-id').textContent.includes('AUTO-0.21')";
+  "document.querySelector('#plan-columns th[data-point]')?.dataset.point && document.querySelector('#scan-desk').dataset.state==='ready' && document.querySelector('#trace-id').textContent.includes('AUTO-0.21')";
 try {
   await send('Page.navigate', { url: (process.env.CURRENT_URL ?? b.url) + '/' });
   await wait("!!document.getElementById('desk-details')");
@@ -21,7 +21,7 @@ try {
       at:document.querySelector('#trace-sources').textContent.match(/计算于 (\\S+)/)[1],
       stamp:document.querySelector('#trace-id').textContent,
       versions:[...new Set([...document.querySelectorAll('.frame-key')].map(el=>el.title))],
-      fields:Object.fromEntries(['plan-rows','plan-risk-rows','current-h','target-h','lev-equity-heading','candidate-surplus-heading','cash-bridge','cross-audit','deadline-clock','clock-skew','risk-values','hysteresis','missing-list'].map(k=>[k,document.getElementById(k).textContent]))};
+      fields:Object.fromEntries(['plan-comparison','plan-risk-rows','current-h','target-h','lev-equity-heading','candidate-surplus-heading','cash-bridge','cross-audit','deadline-clock','clock-skew','risk-values','hysteresis','missing-list'].map(k=>[k,document.getElementById(k).textContent]))};
   })()`);
   const { inputs, fields } = frame;
   const x = calculateCurrent(
@@ -34,8 +34,8 @@ try {
   );
   assert.ok(frame.stamp.endsWith(x.trace.id));
   assert.equal(frame.versions.length, 1);
-  assert.match(fields['plan-rows'], /失败端回收缓冲优先/);
-  assert.match(fields['plan-rows'], /成功端现金留存优先/);
+  assert.match(fields['plan-comparison'], /失败端回收缓冲优先/);
+  assert.match(fields['plan-comparison'], /成功端现金留存优先/);
   assert.ok(fields['plan-risk-rows']);
   assert.match(fields['risk-values'], /PF 模拟初始保证金/);
   assert.match(fields['risk-values'], /Hype 其他保证金占用/);
@@ -80,6 +80,25 @@ try {
   assert.deepEqual(pending.after, pending.before);
   await wait(ready + " && document.querySelector('#reserve-threshold').textContent.includes('98')",40000);
   assert.equal(await run("!!document.querySelector('#riskPreference')"),false);
+  // Edit only this isolated browser's planning rules. A committed frame owns
+  // the warning and all three scenario labels, even if a new tick is pending.
+  const labels = () => run("Array.from(document.querySelectorAll('#plan-columns small'),el=>el.textContent)");
+  for (const [changes, coverage, scenario, incomplete] of [
+    [{jumpBps:'0.01'}, '压力未配齐', '部分压力情景', true],
+    [{jumpBps:'0',adverseBps:'0',delayBps:'0',fundingDebit:'0'}, '含零压力假设', '基础情景', true],
+    [{jumpBps:'0.01',adverseBps:'0.01',delayBps:'0.01',fundingDebit:'0.00001'}, '四项压力已配置', '已配置压力情景', false],
+    [{jumpBps:'',adverseBps:'',delayBps:'',fundingDebit:''}, '压力未配置', '基础情景', true]
+  ]) {
+    for (const [id, value] of Object.entries(changes)) await input(id, value);
+    await wait(ready + " && document.getElementById('plan-stress').textContent.includes(" + JSON.stringify(coverage) + ")",45000);
+    assert.deepEqual(await labels(),Array(3).fill(scenario));
+    assert.equal((await text('#max-risk-title')).includes('压力安全性未验证'),incomplete);
+  }
+  await input('R_success','5000');
+  await wait("document.querySelector('#plan-caption').textContent.includes('无合格方案')",45000);
+  assert.ok(await run("document.querySelector('#max-risk').hidden && document.querySelector('#plan-comparison').hidden"));
+  await input('R_success','98');
+  await wait(ready,45000);
   await input('quoteSkewMs', '0');
   await wait(
     "document.querySelector('#auto-search').textContent.includes('AUTO_DATA_BLOCKED') && document.querySelector('#calc-status').textContent.includes('行情熔断')",
