@@ -88,7 +88,7 @@
         </section>
       </details>
       <details id="desk-details" name="workbench-view"><summary hidden>高级设置</summary>
-      <details class="desk-group" id="account-details"><summary>账户、持仓与资金规则</summary>
+      <details class="desk-group" id="account-details"><summary>账户与持仓</summary>
         <div class="selectors">
           <label
             >资金来源<select id="funding-view">
@@ -114,12 +114,6 @@
           >
         </div>
       <div id="funding-banner" class="funding-banner"></div>
-      <section class="card" id="plan-settings">
-        <h2 id="plan-heading">开考前资金规划</h2>
-        <div class="form plan-form" id="plan-fields"></div>
-        <p id="plan-basis"></p>
-        <label><input type="checkbox" id="plan-cross-flat" /> 本次规划采用双边全仓、空仓且无挂单</label>
-      </section>
       <section class="intake" aria-label="数据检查">
         <div>
           <h2>当前数据检查</h2>
@@ -176,72 +170,10 @@
             <p id="hl-meta"></p>
             <p id="hl-quote"></p>
           </div>
-          <div>
-            <h3>计算条件</h3>
-            <label
-              >按此阶段规则计算<select id="stage">
-                <option value="challenge">考核 · 固定失败线</option>
-                <option value="funded">出金 · 首次分成</option>
-              </select></label
-            ><label>保护本金 B（含已付报名费，U）<input id="B" inputmode="decimal" /></label
-            ><label>成功平仓后 Hype 最低权益 R_success（U）<input id="R_success" inputmode="decimal" /></label><label>开仓后最低可用抵押品 R_free（U）<input id="R_free" inputmode="decimal" /></label>
-          </div>
         </div>
         <div id="quick-margin" class="form"></div>
         <button type="button" id="confirm-balances">已核对平台，重新确认表内权益与可用保证金</button>
       </section>
-      <section class="card" id="rules">
-        <h2>账户规则与测算口径</h2>
-        <p>以下为用户规则，可按当前账户修改。所有资金按 USDC 等值（U）核算。</p>
-        <p id="profile-source"></p>
-        <label
-          >已到账外部资金币种<select id="externalCurrency">
-            <option>USDC</option>
-            <option>USD</option>
-            <option>USDT</option>
-            <option value="OTHER">其他（手工估值）</option>
-          </select></label
-        >
-        <p id="external-value"></p>
-        <details id="stress-guide"><summary>配置额外压力假设</summary>
-          <p>四项均为本机用户假设。基差或跳价取对 Hype 不利的一侧，两者取较大变动；延迟按调仓差额计损，资金费按持有期间的支出扣减。空白表示未配置，手工填 0 表示明确采用零压力。</p>
-          <div class="form" id="stress-fields"></div>
-        </details>
-        <div class="form" id="rule-fields"><label hidden>分成收款账户<select id="receiptSource"><option value="external">已到账外部资金</option><option value="hl">Hype 权益</option></select></label></div>
-        <p>
-          现金范围按当前权益计算。条件仓位按双边盘口、差额成交费及数量步长核算，假设到达边界期间标的同步变动；未来基差、滑点变化和资金费待核实。
-        </p>
-      </section>
-      </details>
-      <details class="desk-group" id="vest-spec-details"><summary>Vest 合约规格与手工确认</summary>
-        <p id="vest-spec-source"></p>
-        <p><a href="https://api-gateway.hz.vestmarkets.com/v3/exchangeInfo" target="_blank" rel="noreferrer">Vest 合约接口</a> · <a href="https://docs.vestmarkets.com/platform/perpetual-contract-specifications" target="_blank" rel="noreferrer">Vest 官方永续规格</a></p>
-        <form id="vest-spec-form">
-          <div class="form">
-            <label>Vest 合约代码<input name="symbol" readonly></label>
-            <label>标的资产<input name="baseAsset" required></label>
-            <label>报价币<select name="quoteAsset" required><option value="">请选择</option><option>USDC</option><option>USDT</option><option>USD</option></select></label>
-            <label>结算币<select name="settleAsset" required><option value="">请选择</option><option>USDC</option><option>USDT</option><option>USD</option></select></label>
-            <label>下单数量单位<select name="quantityUnit" required><option value="">请选择</option><option value="base">标的单位</option><option value="contract">张</option></select></label>
-            <label>合约乘数（每单位含多少标的）<input name="contractMultiplier" inputmode="decimal" required></label>
-          </div>
-          <details><summary>接口未提供数量精度或保证金规则时补录</summary><div class="form">
-            <label>数量小数位<input name="sizeDecimals" inputmode="numeric"></label>
-            <label>考核初始保证金率（小数）<input name="capitalInitMarginRatio" inputmode="decimal"></label>
-            <label>出金初始保证金率（小数）<input name="fundedInitMarginRatio" inputmode="decimal"></label>
-            <label>维持保证金率（小数）<input name="maintMarginRatio" inputmode="decimal"></label>
-          </div></details>
-          <button type="submit">已核对 Vest 线性永续规格，保存到本机</button>
-          <button type="button" id="vest-spec-clear">撤销本机确认</button>
-          <span role="status" id="vest-spec-feedback"></span>
-        </form>
-      </details>
-      <details class="desk-group" id="connection-details"><summary>行情、快照与 API 连接</summary>
-      <section class="card" id="connections">
-        <h2>实时行情与快照来源</h2>
-        <p id="quotes"></p><p id="clock-skew"></p>
-        <p id="fx-source"></p>
-        <p id="sync-status"></p>
         <div class="form">
           <label
             >Hype 账户来源<select id="hl-source">
@@ -256,7 +188,6 @@
               placeholder="0x…"
           /></label>
         </div>
-        <div class="buttons"><button id="sync">立即刷新行情与账户</button></div>
         <details>
           <summary>粘贴 VS 页面或导入当前快照</summary>
           <label
@@ -292,25 +223,43 @@
           <div class="form" id="leg-settings"></div>
           <p id="field-sources"></p>
         </details>
-        <details>
-          <summary>临时使用手工真实盘口</summary>
-          <label
-            >行情来源<select id="quote-source">
-              <option value="api">双边公开行情</option>
-              <option value="manual">手工确认的双边盘口</option>
-            </select></label
-          >
-          <label
-            >两边盘口 JSON<textarea
-              id="manual-quote"
-              rows="3"
-              placeholder="每边包含 mark、asOf、levels；levels 按买卖各列 [价格, 数量] 档位"
-            ></textarea></label
-          ><button id="confirm-quote">确认本次盘口</button>
-          <p id="manual-status"></p>
-        </details>
-      </section>
       </details>
+      <details class="desk-group" id="funds-details"><summary>资金规则</summary>
+      <section class="card" id="plan-settings">
+        <h2 id="plan-heading">开考前资金规划</h2>
+        <div class="form plan-form" id="plan-fields"></div>
+        <p id="plan-basis"></p>
+        <label><input type="checkbox" id="plan-cross-flat" /> 本次规划采用双边全仓、空仓且无挂单</label>
+      </section>
+      <section class="card" id="rules">
+        <h2>账户规则与测算口径</h2>
+          <div>
+            <h3>计算条件</h3>
+            <label
+              >按此阶段规则计算<select id="stage">
+                <option value="challenge">考核 · 固定失败线</option>
+                <option value="funded">出金 · 首次分成</option>
+              </select></label
+            ><label>保护本金 B（含已付报名费，U）<input id="B" inputmode="decimal" /></label
+            ><label>成功平仓后 Hype 最低权益 R_success（U）<input id="R_success" inputmode="decimal" /></label><label>开仓后最低可用抵押品 R_free（U）<input id="R_free" inputmode="decimal" /></label>
+          </div>
+
+        <p>以下为用户规则，可按当前账户修改。所有资金按 USDC 等值（U）核算。</p>
+        <p id="profile-source"></p>
+        <label
+          >已到账外部资金币种<select id="externalCurrency">
+            <option>USDC</option>
+            <option>USD</option>
+            <option>USDT</option>
+            <option value="OTHER">其他（手工估值）</option>
+          </select></label
+        >
+        <p id="external-value"></p>
+        <div class="form" id="rule-fields"><label hidden>分成收款账户<select id="receiptSource"><option value="external">已到账外部资金</option><option value="hl">Hype 权益</option></select></label></div>
+        <p>
+          现金范围按当前权益计算。条件仓位按双边盘口、差额成交费及数量步长核算，假设到达边界期间标的同步变动；未来基差、滑点变化和资金费待核实。
+        </p>
+      </section>
       <details class="desk-group" id="cash-details"><summary>风险、杠杆与仓位计算</summary>
       <section class="desk-summary" aria-label="当前仓位调整摘要">
         <article>
@@ -516,6 +465,62 @@
         <details><summary>查看行情、账户与规则原始输入</summary><pre id="trace-inputs"></pre></details>
       </details>
       <footer><a href="/dev/replay">开发测试 · 行情回放</a></footer>
+      </details>
+      </details>
+        <details class="desk-group" id="stress-guide"><summary>压力假设</summary>
+          <p>四项均为本机用户假设。基差或跳价取对 Hype 不利的一侧，两者取较大变动；终点按调仓差额计延迟成本；持仓期间另检验盘口错位，允许延迟幅度与不利基差同时发生。两种路径分别验算，资金费每条路径只扣一次。空白表示未配置，手工填 0 表示明确采用零压力。</p>
+          <div class="form" id="stress-fields"></div>
+        </details>
+      <details class="desk-group" id="connection-details"><summary>合约规格与行情连接</summary>
+      <details id="vest-spec-details"><summary>Vest 合约规格与手工确认</summary>
+        <p id="vest-spec-source"></p>
+        <p><a href="https://api-gateway.hz.vestmarkets.com/v3/exchangeInfo" target="_blank" rel="noreferrer">Vest 合约接口</a> · <a href="https://docs.vestmarkets.com/platform/perpetual-contract-specifications" target="_blank" rel="noreferrer">Vest 官方永续规格</a></p>
+        <form id="vest-spec-form">
+          <div class="form">
+            <label>Vest 合约代码<input name="symbol" readonly></label>
+            <label>标的资产<input name="baseAsset" required></label>
+            <label>报价币<select name="quoteAsset" required><option value="">请选择</option><option>USDC</option><option>USDT</option><option>USD</option></select></label>
+            <label>结算币<select name="settleAsset" required><option value="">请选择</option><option>USDC</option><option>USDT</option><option>USD</option></select></label>
+            <label>下单数量单位<select name="quantityUnit" required><option value="">请选择</option><option value="base">标的单位</option><option value="contract">张</option></select></label>
+            <label>合约乘数（每单位含多少标的）<input name="contractMultiplier" inputmode="decimal" required></label>
+          </div>
+          <details><summary>接口未提供数量精度或保证金规则时补录</summary><div class="form">
+            <label>数量小数位<input name="sizeDecimals" inputmode="numeric"></label>
+            <label>考核初始保证金率（小数）<input name="capitalInitMarginRatio" inputmode="decimal"></label>
+            <label>出金初始保证金率（小数）<input name="fundedInitMarginRatio" inputmode="decimal"></label>
+            <label>维持保证金率（小数）<input name="maintMarginRatio" inputmode="decimal"></label>
+          </div></details>
+          <button type="submit">已核对 Vest 线性永续规格，保存到本机</button>
+          <button type="button" id="vest-spec-clear">撤销本机确认</button>
+          <span role="status" id="vest-spec-feedback"></span>
+        </form>
+      </details>
+
+      <section class="card" id="connections">
+        <h2>实时行情与快照来源</h2>
+        <p id="quotes"></p><p id="clock-skew"></p>
+        <p id="fx-source"></p>
+        <p id="sync-status"></p>
+        <div class="form" id="clock-fields"></div>
+        <div class="buttons"><button id="sync">立即刷新行情与账户</button></div>
+        <details>
+          <summary>临时使用手工真实盘口</summary>
+          <label
+            >行情来源<select id="quote-source">
+              <option value="api">双边公开行情</option>
+              <option value="manual">手工确认的双边盘口</option>
+            </select></label
+          >
+          <label
+            >两边盘口 JSON<textarea
+              id="manual-quote"
+              rows="3"
+              placeholder="每边包含 mark、asOf、levels；levels 按买卖各列 [价格, 数量] 档位"
+            ></textarea></label
+          ><button id="confirm-quote">确认本次盘口</button>
+          <p id="manual-status"></p>
+        </details>
+      </section>
       </details>
       </details>
     </main>

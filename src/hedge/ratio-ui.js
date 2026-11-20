@@ -564,6 +564,13 @@ function initComparison() {
   }
 }
 
+const statusText = value => ({pass:'通过',fail:'未通过',unknown:'未验证'})[value] ?? '未验证';
+function planChecks(plan) {
+  const v = plan.verification ?? {};
+  const short = value => ({pass:'✓',fail:'×'})[value] ?? '待验';
+  return '失败' + short(v.failureFunds) + ' 成功' + short(v.successFunds) +
+    ' 初保' + short(v.initial) + ' 路径' + short(v.liquidation) + ' 压力' + short(v.stress);
+}
 function renderComparison(snapshot) {
   const { ratioScan:scan, targets:winners, stress } = snapshot ?? {targets:objectives.map(() => null)};
   const max = winners[0];
@@ -579,7 +586,7 @@ function renderComparison(snapshot) {
     const header = $('plan-columns').rows[0].cells[col+1];
     const point = plan?.key ?? '';
     if (header.dataset.point !== point) header.dataset.point = point;
-    setText(header.lastElementChild, plan ? scenario : '无合格方案');
+    setText(header.lastElementChild, plan ? planChecks(plan) : '无合格方案');
     for (const [index, [,,format]] of comparisonMetrics.entries()) {
       const td = $('plan-rows').rows[index].cells[col+1];
       setText(td, plan ? format(plan, scan, ratio) : '—');
@@ -669,7 +676,12 @@ function renderPlans(snapshot) {
     if (!r) continue;
     const tr = positionRows.insertRow();
     tr.dataset.point = r.key;
-    tr.insertCell().textContent = name;
+    const heading = tr.insertCell();
+    heading.append(name);
+    const v = r.verification ?? {};
+    for (const [label,value] of [['失败回收',v.failureFunds],['成功留存',v.successFunds],['初始保证金',v.initial],
+        ['全路径清算',v.liquidation],['压力测试',v.stress]])
+      detailLine(heading,label + ' · ' + statusText(value));
     for (const side of ['pf', 'hl']) {
       const leg = scan.ctx.market[side], adj = r.adjustments?.[side];
       const cell = tr.insertCell();
@@ -690,6 +702,18 @@ function renderPlans(snapshot) {
         const direction = dec(line.exitMark).cmp(mark);
         detailLine(cell, (side === 'pf' ? 'PF' : 'Hype') + (direction > 0 ? ' ↑ ' : direction < 0 ? ' ↓ ' : ' → ') +
           fmt(line.exitMark) + ' ' + unit + ' · 平仓 ' + (line.exitPrice == null ? '无仓位' : fmt(line.exitPrice)));
+      }
+      detailLine(cell,'起点 PF ' + fmt(snapshot.prices.pf.mark) + ' ' + report.pfQuote +
+        ' / Hype ' + fmt(snapshot.prices.hl.mark) + ' ' + report.hlQuote);
+      detailLine(cell,'深度滑点 PF ' + settlementAmount(path.pf.slippage) + ' / Hype ' + settlementAmount(path.hl.slippage));
+      if (key === 'pass' && r.successPersonal != null) detailLine(cell,'个人资金（到账前） ' + settlementAmount(r.successPersonal));
+      for (const [kind,test] of Object.entries(r.pathAudit?.[key] ?? {})) {
+        const label = {base:'同步路径',dislocation:'基差与异步错位',delayedFill:'延迟成交后',beforeFill:'延迟成交前'}[kind];
+        const points = test.checkpoints ?? [];
+        const low = points.reduce((a,b) => (!a || dec(b.surplus).lt(a.surplus) ? b : a), null);
+        if (low) detailLine(cell,label + ' · ' + points.length + ' 个核验点 · 最低维持余量 ' + usd(low.surplus) + '（标记 ' + fmt(low.mark) +
+          '，权益 ' + usd(low.equity) + '，维持 ' + usd(low.maintenance) + '，可用抵押余量 ' + usd(low.free) + '）');
+        if (test.firstBreach) detailLine(cell,'途中首次触线 ' + fmt(test.firstBreach.mark) + ' ' + report.hlQuote);
       }
       detailLine(cell, 'Hype 净盈亏 ' + signedCash(path.hypeNet));
       detailLine(cell, '手续费 PF ' + settlementAmount(path.pf.fees) + ' / Hype ' + settlementAmount(path.hl.fees));
@@ -927,7 +951,7 @@ export function renderScan(result, m, r, plan, status, snapshot) {
     validity = '当前数据有效 · 条件估算';
     if (displayed?.ratioScan?.complete === false) validity += '（部分网格）';
   } else if (state === 'updating') {
-    validity = tr ? (result.trigger === '行情更新' ? '行情重算中' : '输入已变更，正在重算') + ' · 历史快照，暂停新建议' : '输入就绪，首次计算中';
+    validity = tr ? (result.trigger === '行情更新' ? '盘口已更新，目标仓位重算中' : '输入已变更，正在重算') + ' · 历史快照，暂停新建议' : '输入就绪，首次计算中';
   } else if (waitingForMarket) {
     validity = '等待双边盘口';
   } else {

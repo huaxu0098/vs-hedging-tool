@@ -931,6 +931,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
   const checks = {
     currentSnapshot: true,
     liveLimits: true,
+    fullStress: result.stress.positive.length === 4,
     adverseBps: out(nonnegative(r.adverseBps || '0')),
     minMaintenanceSurplus: out(nonnegative(r.minMaintenanceSurplus || '0')),
     minPriceBuffer: out(nonnegative(r.minBuffer ?? '0')),

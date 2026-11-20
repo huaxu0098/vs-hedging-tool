@@ -93,8 +93,8 @@ export function createSolutionSnapshot(result) {
 // payloads, the full lot grid, or any executable adjustment advice.
 export function displayHistory(storage) {
   let previousKey, previous;
-  function key(scope) {
-    return 'vs-hype:display-history:' + modelVersion + ':' + scope;
+  function key(scope, version = modelVersion) {
+    return 'vs-hype:display-history:' + version + ':' + scope;
   }
   return {
     read(scope) {
@@ -102,10 +102,10 @@ export function displayHistory(storage) {
       previousKey = scope;
       previous = null;
       try {
-        const saved = JSON.parse(storage.getItem(key(scope)));
+        const saved = JSON.parse(storage.getItem(key(scope)) ?? storage.getItem(key(scope,'AUTO-0.21.1')));
         if (
           saved?.scope === scope &&
-          saved.view?.trace?.model === modelVersion &&
+          [modelVersion,'AUTO-0.21.1'].includes(saved.view?.trace?.model) &&
           saved.view.ratioScan?.complete &&
           Array.isArray(saved.view.ratioScan.buckets) &&
           saved.view.ratioScan.ctx?.market?.pf &&

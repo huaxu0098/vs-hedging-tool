@@ -141,7 +141,7 @@ const planFields = {
 for (const [k, label] of Object.entries(planFields)) input('plan-fields', k, label);
 for (const [k, label] of Object.entries(ruleFields))
   input(
-    k in stressFields ? 'stress-fields' : 'rule-fields',
+    k in stressFields ? 'stress-fields' : ['quoteSecs','quoteSkewMs','depegAlertBps'].includes(k) ? 'clock-fields' : 'rule-fields',
     k,
     label,
     k === 'deadline' ? 'datetime-local' : 'text'
@@ -420,7 +420,7 @@ function freshnessLabel(at, seconds) {
   return fresh(at, Date.now(), Number(seconds) * 1000) ? '有效' : '过期';
 }
 const history = displayHistory(localStorage);
-let worker = null, running = null, completed = null, lastGood = null, failure = null;
+let workerContext = null, worker = null, running = null, completed = null, lastGood = null, failure = null;
 let interruptedScope = null;
 let version = 0, wantedKey = null, lastStart = -Infinity, wakeTimer, workerTimer;
 function scanScope() {
@@ -430,7 +430,7 @@ function cancelAuto() {
   clearTimeout(workerTimer);
   clearTimeout(wakeTimer);
   worker?.terminate();
-  worker = null;
+  worker = workerContext = null;
   running = completed = failure = wantedKey = null;
   version++;
 }
@@ -465,8 +465,7 @@ function currentFrame(a, m, t) {
 
   const trigger = !lastGood ? '首次扫描' : lastGood.context !== context ? '账户或规则已变更' : '行情更新';
   const waiting = (state, reason) => {
-    // A newer quote may arrive before every worker delivery. Publish accepted
-    // frames to both views while keeping rules/account revisions isolated.
+    // Retain the entire last publication until the current request completes.
     if (state === 'updating' && interruptedScope === scope)
       return { ...base, retained, frameState:'recovering', trigger, refreshPending:true };
     return { ...base, retained, frameState:state, trigger, refreshPending:state === 'updating',
@@ -490,9 +489,8 @@ function currentFrame(a, m, t) {
       if (revision !== version || running?.version !== revision) return;
       clearTimeout(workerTimer);
       running = null;
-      // A newer market observation may already be queued. A completed, still
-      // eligible snapshot can be displayed with its own time while it is being
-      // superseded. Scope/rule changes cancel the request before this callback.
+      // A superseded delivery cannot publish a snapshot or a failure for a newer book.
+      if (wantedKey !== key) { render(); return; }
       if (!result?.ratioScan) {
         interruptedScope = scope;
         const message = error ?? result?.issues?.join(' · ') ?? '本帧缺少完整计算结果';
@@ -508,7 +506,13 @@ function currentFrame(a, m, t) {
         const now = Date.now();
         const fresh = calculateCurrent(r, a, m, frameRates, now, {deferAuto:true});
         const live = market();
-        const latest = calculateCurrent(r, {pf:account('pf'), hl:account('hl')}, live, rates, now, {deferAuto:true});
+        const accounts = {pf:account('pf'), hl:account('hl')};
+        const latest = calculateCurrent(r, accounts, live, rates, now, {deferAuto:true});
+        if (latest.needsSearch && scanKeys(r,accounts,live,rates,[scanScope(),$('quote-source').value,
+            live.source,latest.externalValue,Number(r.external)>0 ? latest.externalRate : null]).key !== key) {
+          render();
+          return;
+        }
         if (scope === scanScope() && fresh.needsSearch && latest.needsSearch &&
             !(latest.timing.quoteSkew > latest.timing.quoteLimit)) {
           try {
@@ -530,7 +534,7 @@ function currentFrame(a, m, t) {
     };
     workerTimer = setTimeout(() => {
       if (revision !== version) return;
-      worker.terminate(); worker = null;
+      worker.terminate(); worker = workerContext = null;
       finish(null, '求解超过 10 秒，已超时；保留上次结果');
     }, 10000);
     worker.onmessage = ({data}) => {
@@ -538,10 +542,12 @@ function currentFrame(a, m, t) {
     };
     worker.onerror = () => {
       if (revision !== version) return;
-      worker.terminate(); worker = null;
+      worker.terminate(); worker = workerContext = null;
       finish(null, '后台求解失败，保留上次结果');
     };
-    worker.postMessage({version:revision, reprice:lastGood?.context === context, r, a, m, rates:frameRates, t, priorTarget:
+    const reprice = workerContext === context;
+    workerContext = context;
+    worker.postMessage({version:revision, reprice, r, a, m, rates:frameRates, t, priorTarget:
       lastGood?.context === context ? retained.advice?.pair : null});
   }
   return waiting('updating', trigger + '，后台重算中');
@@ -1158,10 +1164,12 @@ function render() {
   put('quick-entry', plan ? '调整预设参数' : '快速录入当前账户');
   $('quick-entry').onclick = () => {
     if (plan) {
+      $('funds-details').open = true;
       $('planCapital').focus();
       return;
     }
     const el = gaps.map((g) => $(g.id)).find((el) => el && !el.readOnly && !el.disabled) ?? $('pf-equity');
+    for (let n=el; n; n=n.parentElement) if (n.tagName === 'DETAILS') n.open=true;
     el.focus();
     el.scrollIntoView({ block: 'center' });
   };

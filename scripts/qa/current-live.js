@@ -3,6 +3,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { modelVersion } from '../../src/hedge/trace.js';
 import { openTestBrowser } from './chrome.js';
 
 const b = await openTestBrowser({ current: true });
@@ -99,7 +100,7 @@ try {
     assert.ok(filename, '真实浏览器保存核算文件');
     const saved = JSON.parse(await readFile(path.join(downloadDir, filename), 'utf8'));
     assert.equal(filename, 'hedge-' + saved.id + '.json');
-    assert.equal(saved.model, 'AUTO-0.21.1');
+    assert.equal(saved.model, modelVersion);
     assert.equal(saved.inputs.accounts.hl.equity, '409');
     assert.equal(saved.outputs.autoStatus, 'AUTO_PARTIAL');
     assert.ok(saved.outputs.conservative.candidate);

@@ -23,6 +23,7 @@ const install = `(() => {
         const r=data.result, s=r.ratioScan, rep=s.representative?.row;
         const key=r.trace.id;
         test.results[key]={id:key, traceVersions:[r.trace.marketId,r.trace.accountsId,r.trace.rulesId,r.trace.model,r.finishedAt], started:r.startedAt,finished:r.finishedAt,ms:r.solveMs,
+          bookTimes:['pf','hl'].map(k=>{const q=JSON.parse(r.trace.inputs).market[k];return q.bookAt??q.asOf}),
           pfMark:s.ctx.market.pf.mark,hlMark:s.ctx.market.hl.mark, count:s.sets.legal.count,
           revaluation:r.revaluation, sequence:data.version, protect:s.ctx.book.B, reserve:s.ctx.params.R,
           plans:['最大 PF 仓位','失败回收优先','成功留存优先'].map(label=>s.plans.rows.find(row=>row.labels.includes(label))).filter(Boolean),
@@ -81,7 +82,8 @@ const install = `(() => {
           e('cash-calculated-at').dateTime!==panels.version.calculatedAt) test.conflict=true;
         if(!/重算/.test(e('scan-status').textContent) || e('scan-status').textContent.includes('当前数据有效')) test.conflict=true;
       }
-      if(desk.dataset.state==='ready' && !e('scan-status').textContent.includes('当前数据有效 · 条件估算')) test.conflict=true;
+      if(desk.dataset.state==='ready' && (!e('scan-status').textContent.includes('当前数据有效 · 条件估算') ||
+           test.results[panels.version.snapshotId]?.bookTimes.join('|') !== clockPair)) test.conflict=true;
       if(desk.dataset.state==='paused') test.pausedPaints++;
       if(e('scan-focus').hidden || e('scan-results').hidden || !e('scan-fail-cash').textContent ||
         !e('scan-pass-cash').textContent || ['scan-pass-cash','scan-fail-cash'].some(k=>e(k).textContent==='—') || e('plan-comparison').hidden || !e('plan-rows').rows[0]?.cells[1]?.textContent || !e('plan-columns').rows[0].cells[1]?.dataset.point || ['protect','survive','both','profit'].some(k=>!e('scan-'+k).textContent || e('scan-'+k).textContent.includes('等待有效数据'))) test.blanks++;
@@ -143,6 +145,7 @@ try {
     assert.equal(f.rows.length, f.bins.length);
     assert.deepEqual(f.cash, [cash(f.rep.fail), cash(f.rep.success)]);
     assert.equal(f.shown.length, f.plans.length);
+    if(f.status.includes('当前数据有效')) assert.deepEqual(f.bookTimes,f.clocks);
     assert.ok(f.plans.some(r=>r.labels.includes('最大 PF 仓位')));
     const two=(values,fmt)=>values.map(fmt).join(' – ');
     const money=x=>dec(x).toFixed(dec(x).abs().lt(1)&&!dec(x).isZero()?4:2)+' U';
@@ -163,7 +166,14 @@ try {
         assert.ok(shown.includes('手续费 PF '+cash(path.pf.fees)+' / Hype '+cash(path.hl.fees)));
       }
       assert.equal(key,plan.key);
-      assert.equal(scenario,'基础情景');
+      assert.equal(scenario,'失败✓ 成功✓ 初保✓ 路径✓ 压力待验');
+      for (const side of ['pass','fail']) {
+        const test = plan.pathAudit[side].base;
+        assert.equal(test.firstBreach,null);
+        assert.equal(test.status,'pass');
+        assert.ok(test.checkpoints.length >= 3);
+        assert.ok(test.checkpoints.every(p => dec(p.equity).gt(p.maintenance) && p.free != null));
+      }
       assert.ok(dec(cells.h.slice(0,-1)).eq(dec(plan.h).times(100).toDecimalPlaces(cells.h.split('.')[1].length-1)));
       const distance = plan.distance == null ? '无已验证交点' : dec(plan.distance).toFixed(2)+' USDT';
       for(const [field,expected] of Object.entries({
@@ -266,6 +276,22 @@ try {
   evidence.scaleComparison=comparison;
   await b.click('#desk-views button[aria-controls="live-view"]');
   assert.ok(await run("document.getElementById('live-view').open && !document.getElementById('plan-next')"));
+  const groups=await run("[...document.querySelectorAll('#desk-details > details')].map(d=>[d.firstElementChild.textContent.trim(),d.open])");
+  assert.deepEqual(groups,['账户与持仓','资金规则','压力假设','合约规格与行情连接'].map(label=>[label,false]));
+  // Hold a real repricing job until another source book arrives, without
+  // changing any account or rule. Its late callback must leave no visible trace.
+  await run("window.scanTest.hold=true");
+  await wait("window.scanTest.held.length===1");
+  const lastValid=await run("document.getElementById('scan-desk').dataset.resultId");
+  await wait(`(() => {const m=window.scanTest.held[0].job.m;return ['pf','hl'].some(k=>
+    document.getElementById('scan-'+k+'-book-time').dateTime!==(m[k].bookAt??m[k].asOf))})()`,12000);
+  await run("(()=>{const h=window.scanTest.held[0];h.handler({data:{version:h.job.version,error:'STALE_BOOK_TEST'}})})()");
+  assert.equal(await run("document.getElementById('scan-desk').dataset.resultId"),lastValid);
+  assert.ok(await run("!document.getElementById('scan-status').textContent.includes('STALE_BOOK_TEST') && document.getElementById('current').dataset.historical==='true'"));
+  await wait("window.scanTest.held.length>=2");
+  await run("window.scanTest.hold=false;window.scanTest.held.at(-1).send();window.scanTest.held=[]");
+  await wait(ready+" && document.getElementById('scan-desk').dataset.resultId!=="+JSON.stringify(lastValid),45000);
+  evidence.supersededBookDiscarded=true;
   // Hold one legitimate request, supersede it with a new rule, then deliver
   // the old response after dispatch. It must never become visible.
   await run('window.scanTest.hold=true');

@@ -456,8 +456,8 @@ test('LEV02 相同仓位各档保证金、跨档强平根、跳价与调仓延�
   }
   const stress = solve({ stress: { jumpBps: '100', basisBps: '0', delayBps: '50', fundingDebit: '1' } });
   assert.equal(stress.stressedEquity, '73'); // 120 - 4*(111-100) - 2 delay - 1 funding
-  assert.equal(stress.stressedMaintenance, '22.2');
-  assert.equal(stress.stressedSurplus, '50.8');
+  assert.equal(stress.stressedMaintenance, '22.3'); // 4 × 111.5 × 5% during the transient lag
+  assert.equal(stress.stressedSurplus, '50.7');
   assert.equal(stress.stressLiqMark, out(dec('539.5').div('4.4')));
   assert.ok(stress.constraints.some((x) => x.code === 'STRESS_FAILURE' && x.status === 'fail'));
   assert.ok(stress.stress.some((x) => x.name.includes('原仓')));
@@ -743,7 +743,7 @@ test('OPT02 搜索范围记录双边方向、步长和数量上限，预算中�
   const partial = calculateCurrent(inputs, f.a, f.m, {}, t, { searchBudget: 1 });
   assert.equal(partial.search.complete, false);
   assert.ok(!partial.maximum?.complete);
-  assert.equal(full.trace.model, 'AUTO-0.21.1');
+  assert.equal(full.trace.model, 'AUTO-0.21.2');
 });
 test('OPT03 PF 虚拟保证金、目标 Hype 初始、其他占用及调仓后真实可用分别核验', () => {
   const f = fixture();
@@ -2165,4 +2165,78 @@ test('每个目标从当前净仓及同向剩余挂单计算差额，覆盖加�
     assert.deepEqual([p.adjustments.pf.current,p.adjustments.pf.pending,p.adjustments.pf.remaining],[current,pending,remaining]);
     assert.equal(p.adjustments.hl.remaining,'0');
   }
+});
+
+test('完整路径：成功终点现金与维持保证金都充足，途中基差与异步错位先清算', () => {
+  const f = fixture();
+  Object.assign(f.a.hl,{qty:'-4',equity:'75',free:'35',currentMarginCredit:'40',leverage:'10'});
+  f.m.hl.marginTiers.push({lowerBound:'450',maxLeverage:5});
+  const rules = {B:'100',R_success:'10',R_free:'0',minBuffer:'0',adverseBps:'200',
+    jumpBps:'25',delayBps:'300',fundingDebit:'0.1'};
+  const scan = scanFixture(rules,f).ratioScan;
+  const point = {sign:1,i:10,j:4};
+  const row = inspectRatio(scan.ctx,point,{includePathAudit:true});
+  // Settled Hype short at 112, versus a temporary 115 mark just before PF passes.
+  assert.equal(row.success,'26.9');
+  assert.equal(row.verification.failureFunds,'pass');
+  assert.equal(row.verification.successFunds,'pass');
+  assert.equal(row.verification.initial,'pass');
+  assert.equal(row.verification.liquidation,'fail');
+  assert.equal(row.verification.stress,'fail');
+  assert.equal(row.pathAudit.pass.base.status,'pass');
+  assert.equal(row.pathAudit.fail.dislocation.status,'pass');
+  const walk = row.pathAudit.pass.dislocation;
+  assert.equal(walk.status,'fail');
+  const knot = walk.checkpoints.find(p=>p.mark==='112.5');
+  assert.equal(knot.maintenance,'22.5');
+  assert.ok(dec(walk.firstBreach.mark).minus(dec('497.4').div('4.4')).abs().lt('1e-38'));
+  assert.ok(dec(walk.firstBreach.mark).lt('115'));
+  assert.equal(walk.checkpoints.at(-1).mark,'110');
+  assert.ok(dec(walk.checkpoints.at(-1).equity).gt(walk.checkpoints.at(-1).maintenance));
+  for (const p of walk.checkpoints) {
+    assert.ok(dec(p.equity).eq(dec('74.9').minus(dec(p.mark).minus(100).times(4))));
+    assert.ok(dec(p.free).eq(dec(row.free).plus(dec(p.equity).minus(75))
+      .minus(dec(p.mark).minus(100).times(4).div(row.lev))));
+  }
+  assert.equal(planRecord(scan,point).success,null);
+  assert.equal(row.both,false);
+  assert.ok(!ratioSlice(scan,1,10,'both').some(([lo,hi]) => lo <= 4 && hi >= 4));
+  assert.ok(!scan.plans.targetKeys.includes('1/10/4'));
+});
+test('完整路径：三方案保留各自的双向检验；未配置压力只发布基础条件', () => {
+  const scan = scanFixture().ratioScan;
+  for (const key of scan.plans.targetKeys) {
+    const r=scan.plans.rows.find(p=>p.key===key);
+    assert.deepEqual(r.verification,{failureFunds:'pass',successFunds:'pass',initial:'pass',liquidation:'pass',stress:'unknown'});
+    for (const name of ['fail','pass']) {
+      assert.deepEqual(Object.keys(r.pathAudit[name]),['base']);
+      const path=r.pathAudit[name].base;
+      assert.equal(path.firstBreach,null);
+      assert.equal(path.checkpoints[0].mark,scan.ctx.market.hl.mark);
+      assert.equal(path.checkpoints.at(-1).mark,r.paths[name].hl.exitMark);
+      assert.equal(path.checkpoints[0].free,r.free);
+      assert.ok(path.checkpoints.length>=3);
+      const [start,middle,next] = path.checkpoints;
+      for (const field of ['mark','equity','maintenance','free'])
+        assert.ok(dec(middle[field]).minus(dec(start[field]).plus(next[field]).div(2)).abs().lt('1e-39'));
+    }
+  }
+});
+
+test('完整路径：PF 空、Hype 多，跌破长仓清算界后反弹也不得结算成功现金', () => {
+  const f=fixture();
+  Object.assign(f.a.hl,{qty:'4',equity:'75',free:'35',currentMarginCredit:'40',leverage:'10'});
+  const scan=scanFixture({B:'100',R_success:'10',R_free:'0',minBuffer:'0',
+    adverseBps:'200',jumpBps:'25',delayBps:'300',fundingDebit:'0.1'},f).ratioScan;
+  const target={sign:-1,i:10,j:4};
+  const row=inspectRatio(scan.ctx,target,{includePathAudit:true});
+  assert.equal(row.success,'26.9');
+  assert.equal(row.pathAudit.fail.dislocation.status,'pass');
+  assert.equal(row.pathAudit.pass.base.status,'pass');
+  const path=row.pathAudit.pass.dislocation;
+  assert.equal(path.status,'fail');
+  assert.ok(dec(path.firstBreach.mark).minus(dec('325.1').div('3.8')).abs().lt('1e-38'));
+  assert.ok(dec(path.checkpoints.at(-1).surplus).gt(0));
+  assert.equal(planRecord(scan,target).success,null);
+  assert.ok(!ratioSlice(scan,-1,10,'both').some(([lo,hi])=>lo<=4 && hi>=4));
 });

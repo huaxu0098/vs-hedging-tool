@@ -11,7 +11,7 @@ import {
   recoveryCushion
 } from './range-report.js';
 import { evaluateLeverageGrid } from './leverage.js';
-import { profileInputs, validateMargin, projectSettlementEquity } from './solver.js';
+import { profileInputs, validateMargin, projectSettlementEquity, pathDislocation } from './solver.js';
 
 const decimal = (v) => dec(String(v));
 const lotValue = (leg) => unit(leg).times(leg.step);
@@ -238,6 +238,12 @@ function cell(ctx, p, pfSegment, hypeSegment, common) {
     for (const s of shifts) riskAt(shiftPx(s, nonflat ? shock : 0), debit);
     riskAt(shiftPx(shifts[1], nonflat ? shock.plus(buffer) : 0), debit);
   }
+  const excursion = nonflat ? pathDislocation(l,hypeSegment.sign,checks) : decimal(0);
+  const envelope = excursion.isZero() ? [] : [zero,...shifts].map(s => shiftPx(s,excursion));
+  for (const point of envelope) {
+    risk.push(plane([point[0],denominator.times(l.mark).plus(point[1]),0,0],true));
+    riskAt(point,[funding,decimal(0)]);
+  }
   const ref = position(book, 'hl');
   if (
     nonflat &&
@@ -253,6 +259,11 @@ function cell(ctx, p, pfSegment, hypeSegment, common) {
         plane([a, b.minus(denominator.times(checks.minPriceBuffer ?? 0)), 0, 0])
       );
     }
+  }
+  if (envelope.length && hypeSegment.lo === hypeSegment.hi &&
+      hypeSegment.step.times(hypeSegment.lo).times(hypeSegment.sign).eq(ref) && l.currentLiquidation != null) {
+    for (const [a,b] of envelope) risk.push(plane([a.times(hypeSegment.sign),
+      denominator.times(decimal(l.mark).minus(l.currentLiquidation)).plus(b).times(hypeSegment.sign),0,0],true));
   }
   if (costBasis == null) for (const group of [loss, failProfit, passProfit]) group.push([-1n, 0n, 0n, 0n]);
   if (costBasis == null || payout == null) afterCreditProfit.push([-1n, 0n, 0n, 0n]);
@@ -353,6 +364,8 @@ function deadlinePath(ctx, c, p) {
 }
 function stoppedBeforeExit(ctx, c, key) {
   if (c.code === 'FEASIBLE') return null;
+  if (c.constraints.some(x => (x.code === 'hl_INTRAPATH_' + key || x.name === 'Hype 成交延迟（原仓）') && x.status === 'fail'))
+    return 'Hype 途中压力路径触线或价格越界';
   const shift = c.lines[key],
     stress = c.endpointStress;
   const adjusted = decimal(shift).plus(decimal(stress?.priceShock ?? 0).div(ctx.market.hl.factor));
@@ -377,7 +390,42 @@ function stoppedBeforeExit(ctx, c, key) {
   }
   return null;
 }
-export function inspectRatio(ctx, point, { includeLeverageGrid = false, fixedLeverage = null } = {}) {
+// Detailed witnesses are materialized only for displayed lot pairs, at that
+// pair's own leverage. Classification of the full grid uses the same extrema.
+function auditHypePaths(ctx,c) {
+  const {book,checks} = ctx, leg = ctx.market.hl;
+  const market = {...ctx.market,hl:{...leg,leverage:String(c.candidateLeverage ?? leg.leverage)}};
+  const q = c.hlTargetQuantity, factor = decimal(leg.factor);
+  const excursion = pathDislocation(leg,decimal(q).cmp(0),checks).div(factor);
+  const stress = c.endpointStress;
+  const delay = decimal(leg.mark).times(checks.stress?.delayBps ?? 0).div(10000).div(factor);
+  const old = c.hlCurrentQuantity;
+  const delayed = !delay.isZero() && !decimal(old).isZero();
+  function walk(model, target, shifts, debit, free) {
+    if (shifts.some(s => decimal(leg.mark).plus(decimal(s).times(factor)).lte(0)))
+      return {status:'fail',reason:'路径标记价越界',checkpoints:[]};
+    return validateMargin(book,model,'hl',target,shifts,checks.catalog,debit,{openFree:free}).at(-1);
+  }
+  const result = {};
+  for (const key of ['fail','pass']) {
+    const end = c.lines[key];
+    const paths = {base:walk(market,q,['0',end],'0',c.availableAfter)};
+    if (!excursion.isZero())
+      paths.dislocation = walk(market,q,['0',out(excursion),out(decimal(end).plus(excursion)),end],
+        checks.stress?.fundingDebit ?? '0',c.availableAfter);
+    if (stress) {
+      const shifted = out(decimal(end).plus(decimal(stress.priceShock).div(factor)));
+      paths.delayedFill = walk(market,q,['0',shifted],out(decimal(stress.fundingDebit).plus(stress.delayDebit)),c.availableAfter);
+    }
+    if (delayed) {
+      const before = {...market,hl:{...leg,leverage:leg.configuredLeverage ?? leg.leverage}};
+      paths.beforeFill = walk(before,old,['0',out(delay),out(delay.neg())],'0',leg.free);
+    }
+    result[key] = paths;
+  }
+  return result;
+}
+export function inspectRatio(ctx, point, { includeLeverageGrid = false, includePathAudit = false, fixedLeverage = null } = {}) {
   const { market, book, checks, params } = ctx,
     p = profileInputs(book, params, market);
   const pf = out(decimal(market.pf.step).times(point.i).times(point.sign)),
@@ -409,11 +457,22 @@ export function inspectRatio(ctx, point, { includeLeverageGrid = false, fixedLev
           received: params.receivedPayout ?? null
         }
       : null;
+  const entry = c.constraints.filter(x => /_(INITIAL_MARGIN|FREE_RESERVE|AVAILABLE|UTILIZATION|SWITCH_MARGIN|SWITCH_TIER|ORDER_LEVERAGE|TIER_LEVERAGE)$/.test(x.code));
+  const audit = includePathAudit ? auditHypePaths(ctx,c) : null;
+  const statusOf = list => list.some(x => x.status === 'fail') ? 'fail'
+    : !list.length || list.some(x => x.status !== 'pass') ? 'unknown' : 'pass';
   return {
     ...point,
     pf,
     hl,
     h: c.actualRatio,
+    pathAudit:audit,
+    verification:{
+      failureFunds:coversWithBuffer ? 'pass' : 'fail', successFunds:survives ? 'pass' : 'fail',
+      initial:statusOf(entry),
+      liquidation:statusOf(c.constraints.filter(x => /MAINTENANCE|REFERENCE_LIQ|INTRAPATH|PRICE_BUFFER|MARGIN_UNVERIFIED/.test(x.code))),
+      stress:checks.fullStress ? statusOf(c.constraints.filter(x => x.name || /STRESS|INTRAPATH/.test(x.code))) : 'unknown'
+    },
     pfValue: c.vsNotional,
     hypeValue: c.hlNotional,
     failStop: stoppedBeforeExit(ctx, c, 'fail'),
@@ -519,7 +578,7 @@ function scanLotRanges(ctx, maxVisits, legs, cache) {
     .div(10000)
     .div(ctx.market.hl.factor);
   const oldPath = ctx.checks.stress
-    ? validateMargin(ctx.book, ctx.market, 'hl', out(old), ['0', out(delay), out(delay.neg())]).at(-1)
+    ? validateMargin(ctx.book, ctx.market, 'hl', out(old), ['0', out(delay), out(delay.neg())],undefined,'0',{openFree:ctx.market.hl.free}).at(-1)
     : null;
   for (const sign of [1, -1]) {
     const hypeSegment = legs.hl[sign > 0 ? 1 : 0];

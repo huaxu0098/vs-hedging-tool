@@ -219,7 +219,7 @@ export function maintenance(l, nominal) {
   }
   return chosen ? max(0, nominal.times(ratio(chosen.mmr)).minus(nonnegative(chosen.deduction))) : null;
 }
-export function validateMargin(s, m, v, q, shifts, catalog = { [m.id]: m }, funding = '0') {
+export function validateMargin(s, m, v, q, shifts, catalog = { [m.id]: m }, funding = '0', audit = null) {
   const l = m[v],
     unknown = () => [constraint('MARGIN_UNVERIFIED', null, '0', 'U', 'missing')];
   if (!l.leverage || !l.tiers?.length || l.hold == null || l.marginMode !== 'cross' || !l.pool)
@@ -246,34 +246,77 @@ export function validateMargin(s, m, v, q, shifts, catalog = { [m.id]: m }, fund
       'U'
     )
   ];
-  const points = new Set(shifts);
-  if (nominal.gt(0))
-    for (const tier of l.tiers) {
-      const knot = dec(tier.from).div(nominal).minus(l.mark).div(l.factor);
-      if (knot.gt(D.min(...shifts)) && knot.lt(D.max(...shifts))) points.add(out(knot));
+  const startEquity = dec(checks[0].actual);
+  const signed = dec(q).times(value(l));
+  // With fixed cross-pool holdings, marked equity is affine and maintenance
+  // is piecewise affine. Endpoints and every crossed tier boundary certify
+  // the entire ordered segment, including any reversal to the closing mark.
+  const marks = shifts.map(shift => sourcePrice(l, shift));
+  const knots = nominal.isZero() ? [] : l.tiers.slice(1).map(t => dec(t.from).div(nominal));
+  const boundaries = [];
+  for (const mark of marks) {
+    const previous = boundaries.at(-1);
+    if (previous?.eq(mark)) continue;
+    if (previous) {
+      const interior = knots.filter(k => k.gt(min(previous,mark)) && k.lt(max(previous,mark)));
+      boundaries.push(...(previous.lt(mark) ? interior : interior.reverse()));
     }
-  let worst = null,
-    worstEquity = null,
-    worstMaintenance = null;
-  for (const shift of points) {
-    const mark = sourcePrice(l, shift);
+    boundaries.push(mark);
+  }
+  // Report an interior valuation on each affine interval as well as its exact
+  // extrema. No sampling resolution is used to decide whether a path passes.
+  const points = audit ? boundaries.flatMap((mark,index) => index
+    ? [boundaries[index-1].plus(mark).div(2),mark] : [mark]) : boundaries;
+  let worst = null, worstEquity = null, worstMaintenance = null;
+  const checkpoints = [];
+  const reference = v === 'hl' && dec(q).eq(qty(pos(s,m,v))) ? l.currentLiquidation : null;
+  for (const mark of points) {
     if (mark.lte(0)) throw Error('INVALID_PRICE_ENDPOINT');
     const mm = maintenance(l, nominal.times(mark));
     if (mm === null) return unknown();
-    const excess = projectSettlementEquity(s, m, v, q, shift, 'mark_equity')
-      .minus(otherMaint)
-      .minus(mm)
-      .minus(funding);
+    const required = mm.plus(otherMaint);
+    const equity = startEquity.plus(signed.times(mark.minus(l.mark))).minus(funding);
+    const excess = equity.minus(required);
     if (worst === null || excess.lt(worst)) {
       worst = excess;
-      worstMaintenance = mm.plus(otherMaint);
-      worstEquity = excess.plus(worstMaintenance);
+      worstMaintenance = required;
+      worstEquity = equity;
+    }
+    if (audit) {
+      const marginChange = nominal.times(mark.minus(l.mark)).div(l.leverage);
+      const free = audit.openFree == null ? null : dec(audit.openFree).plus(equity.minus(startEquity))
+        .minus(marginChange);
+      checkpoints.push({mark:out(mark), equity:out(equity), maintenance:out(required),
+        free:free === null ? null : out(free), surplus:out(excess)});
     }
   }
   const path = constraint(v + '_MAINTENANCE_PATH', out(worst), '0', 'U');
   path.equity = out(worstEquity);
   path.maintenance = out(worstMaintenance);
   if (!dec(q).isZero() && worst.lte('1e-36')) path.status = 'fail';
+  if (audit) {
+    path.checkpoints = checkpoints;
+    path.firstBreach = null;
+    for (const [index, point] of checkpoints.entries()) {
+      const previous = checkpoints[index - 1];
+      const roots = [];
+      if (!signed.isZero() && dec(point.surplus).lte('1e-36')) {
+        const price = previous && dec(previous.surplus).gt('1e-36') && dec(point.surplus).lt(0)
+          ? dec(previous.mark).plus(dec(point.mark).minus(previous.mark).times(previous.surplus)
+              .div(dec(previous.surplus).minus(point.surplus))) : dec(point.mark);
+        roots.push(price);
+      }
+      if (reference != null && !signed.isZero() && dec(point.mark).minus(reference).times(signed).lte(0))
+        roots.push(dec(previous ? reference : point.mark));
+      if (roots.length) {
+        const from = previous?.mark ?? point.mark;
+        const first = roots.sort((a,b) => a.minus(from).abs().cmp(b.minus(from).abs()))[0];
+        path.firstBreach = {mark:out(first), segment:index};
+        path.status = 'fail';
+        break;
+      }
+    }
+  }
   return [...checks, path];
 }
 // Each segment has constant sensitivity and a linear maintenance requirement.
@@ -312,6 +355,14 @@ export function liquidationMark(s, m, q, catalog = { [m.id]: m }, debit = '0') {
   }
   return roots.length ? out(roots.sort((a, b) => a.minus(mark).abs().cmp(b.minus(mark).abs()))[0]) : null;
 }
+// Temporary dislocation while the two venues catch up. Filling the hedge
+// late is a separate scenario; its delta debit is not charged twice here.
+export function pathDislocation(leg, sign, options) {
+  const stress = options.stress ?? {};
+  const dislocation = max(options.adverseBps ?? '0', stress.basisBps ?? '0', stress.jumpBps ?? '0');
+  return dec(leg.mark).times(dislocation.plus(nonnegative(stress.delayBps ?? '0')))
+    .div(10000).times(-sign);
+}
 export function pathStress(s, m, q, lines, stress, catalog) {
   const mark = positive(m.hl.mark),
     atPass = dec(lines.pass),
@@ -333,7 +384,7 @@ export function pathStress(s, m, q, lines, stress, catalog) {
     delay = mark.times(nonnegative(stress.delayBps)).div(10000).div(m.hl.factor);
   const directions = [out(delay), out(delay.neg())];
   results.push({
-    ...validateMargin(s, m, 'hl', old, ['0', ...directions], catalog).at(-1),
+    ...validateMargin(s, m, 'hl', old, ['0', ...directions], catalog,'0',{openFree:m.hl.free}).at(-1),
     name: 'Hype 成交延迟（原仓）'
   });
   // Completing an adverse delayed fill locks in a worse entry on the delta.
@@ -573,6 +624,23 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
         options.catalog
       )
     : [];
+  // Bound an excursion at any location along either PF path. The adverse
+  // envelope is affine between its ends. Check its full span before permitting
+  // the synchronized closing settlement.
+  const transient = pathDislocation(m.hl,h.cmp(0),options).div(m.hl.factor);
+  if (!transient.isZero()) {
+    for (const [key, shift] of Object.entries(lines)) {
+      const bound = out(dec(shift).plus(transient));
+      const shifts = ['0',out(transient),bound,shift];
+      const valid = shifts.every(x => sourcePrice(m.hl,x).gt(0));
+      const test = valid ? validateMargin(s,m,'hl',hlQty,shifts,options.catalog,
+        options.stress?.fundingDebit ?? '0').at(-1) : constraint('INVALID_PATH_PRICE','-1','0','价格单位');
+      const ref = h.eq(qty(pos(s,m,'hl'))) ? m.hl.currentLiquidation : null;
+      if (ref != null && shifts.some(x => sourcePrice(m.hl,x).minus(ref).times(h.cmp(0)).lte(0)))
+        test.status = 'fail';
+      constraints.push({...test, code:'hl_INTRAPATH_' + key});
+    }
+  }
   constraints.push(...stress);
   const modelLiq = liquidationMark(s, m, hlQty, options.catalog);
   const pressureMark = sourcePrice(m.hl, lines.pass);

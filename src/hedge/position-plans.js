@@ -120,7 +120,7 @@ function costs(path) {
 // One scalar evaluation supplies every displayed field for one exact tuple.
 // Even a legal quantity can reach liquidation before a requested cash endpoint.
 export function planRecord(scan, point) {
-  return recordFromInspection(scan.ctx, inspectRatio(scan.ctx, point));
+  return recordFromInspection(scan.ctx, inspectRatio(scan.ctx, point, {includePathAudit:true}));
 }
 
 export function recordFromInspection(ctx, row) {
@@ -137,8 +137,10 @@ export function recordFromInspection(ctx, row) {
       : row.stress ? null : row.paths?.fail.hl.settled ?? null,
     failDelta: row.failStop ? null : row.failureVsProtection,
     success: row.passStop ? null : row.success,
+    successPersonal: row.passStop ? null : row.successPersonal,
     successDelta: row.passStop ? null : out(dec(row.successPersonal).minus(ctx.book.B)),
     failStop: row.failStop, passStop: row.passStop,
+    pathAudit:row.pathAudit, verification:row.verification,
     paths, failCost:costs(paths.fail), passCost:costs(paths.pass),
     adjustments:{pf:adjustment(row.paths?.fail.pf, ctx.market.pf.pendingQty),
       hl:adjustment(row.paths?.fail.hl, ctx.market.hl.pendingQty)},
@@ -228,7 +230,7 @@ export function buildPlanReport(scan, pending = false) {
   const levelsByPoint = new Map();
   const rows = [...points.values()].map(({labels,...point}) => {
     const compare = labels.includes('同 h 规模对照');
-    const inspected = inspectRatio(scan.ctx, point, {includeLeverageGrid:compare});
+    const inspected = inspectRatio(scan.ctx, point, {includeLeverageGrid:compare, includePathAudit:true});
     const row = recordFromInspection(scan.ctx, inspected);
     if (compare) levelsByPoint.set(row.key, inspected.leverageGrid);
     if (labels.some(l => l.endsWith('优先') || l === '最大 PF 仓位') &&
@@ -257,7 +259,7 @@ function fixedScaleComparison(ctx, rows, pair, levelsByPoint) {
   if (!small) return { reason:'两种规模没有同时通过保证金及清算校验的共同杠杆档位' };
   const fixed = keys.map(key => {
     const { sign, i, j, labels } = rows.find(row => row.key === key);
-    const evaluated = inspectRatio(ctx, {sign, i, j}, {fixedLeverage:small.leverage});
+    const evaluated = inspectRatio(ctx, {sign, i, j}, {fixedLeverage:small.leverage,includePathAudit:true});
     return { ...recordFromInspection(ctx, evaluated), labels };
   });
   return { leverage:String(small.leverage), rows:fixed, comparison:scaleComparison(fixed) };

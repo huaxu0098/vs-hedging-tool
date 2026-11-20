@@ -1,7 +1,7 @@
 import { requiredSpotAssets } from './quote-currencies.js';
 
-// Timestamps determine validity before scheduling. Re-observing identical market
-// values must not enqueue another full search or renew the old result's trace.
+// Each new source book or mark is a different observation, even at equal prices.
+// Economic stage caches remain reusable independently of publication identity.
 export function scanKeys(rules, accounts, market, rates, scope) {
   const { obtainedAt, ...spec } = market.spec;
   const { collateralEvidence, ...hlContract } = market.hl.contract;
@@ -37,6 +37,7 @@ export function scanKeys(rules, accounts, market, rates, scope) {
   ]);
   const converted = requiredSpotAssets(spec.contract, hlContract, rules);
   const values = JSON.stringify([
+    ...[market.pf,market.hl].map(q => [q.bookAt ?? q.asOf, q.markAt ?? q.asOf]),
     market.pf.mark,
     market.hl.mark,
     market.pf.levels,

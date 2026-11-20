@@ -261,13 +261,14 @@ test('PRODUCT02/03 按已确认的永续范围拒绝现货或规格冲突', () =
   m.hl.contract = hypeContract({ name: 'BTC', quoteAsset: 'USDC' }, '', 0);
   assert.match(run(m).dataState, /CONTRACT_METADATA_UNVERIFIED/);
 });
-test('UI12 同内容不同源时间仅更新观测；盘口数量或规则变化触发有界节流', () => {
+test('UI12 同价格不同盘口源时间废弃旧结果；盘口数量或规则变化触发有界节流', () => {
   const m = market('USDC');
   const key = (n, fx = quotes, r = {}) => scanKeys(r, {}, n, fx, 'plan');
   const next = structuredClone(m);
   next.pf.asOf = next.hl.asOf = '2026-11-19T12:00:02Z';
   const fx = { USDT: { ...quotes.USDT, asOf: next.hl.asOf }, USDC: quotes.USDC };
-  assert.deepEqual(key(m), key(next, fx));
+  assert.notEqual(key(m).key, key(next, fx).key);
+  assert.equal(key(m).context, key(next, fx).context);
   next.hl.levels[1][0][1] = '49';
   assert.notEqual(key(next, fx).key, key(m).key);
   assert.equal(key(next, fx).context, key(m).context);
