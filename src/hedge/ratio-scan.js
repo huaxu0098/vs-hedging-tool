@@ -434,6 +434,10 @@ export function inspectRatio(ctx, point) {
     reserveHeadroom: out(success.minus(p.R)),
     consumption: ratio(max(0, decimal(p.C_hl).minus(success)), p.C_hl),
     initial: c.requiredInitialMargin,
+    maintenance: c.maintenanceMargin ?? null,
+    otherInitial: c.otherInitialMargin ?? null,
+    baseSurplus: c.baseSurplus ?? null,
+    stressSurplus: c.stressedSurplus ?? null,
     imRate: ratio(c.requiredInitialMargin, p.C_hl),
     surplus: excess,
     surplusRate: excess == null || equity == null ? null : out(decimal(excess).div(max(equity, '1e-12'))),
@@ -665,8 +669,15 @@ function reportBuckets(ctx, p, sets, cells, cache) {
     if (totals[key].count !== sets[key].count) throw Error('分段与总计不一致 · ' + key);
     sets[key].range = finishReport(totals[key], ctx, p);
   }
-  if (joint.count && result.find(bin => bin.edgeKey === 'joint').both !== joint.count)
-    throw Error('双路径交集成员落在闭区间之外');
+  if (joint.count) {
+    const qualified = result.find(bin => bin.edgeKey === 'joint').ranges.both;
+    if (qualified?.count !== joint.count) throw Error('双路径交集成员落在闭区间之外');
+    if (decimal(qualified.failure[0]).lt(decimal(p.B).plus(ctx.params.recoveryBuffer ?? 0)) ||
+        decimal(qualified.successHype[0]).lt(p.R)) throw Error('双路径交集现金低于当前门槛');
+    // All qualifying members occupy one closed ratio band. Publish its audited
+    // record to both views, including fees, position ranges and risk witnesses.
+    joint.range = qualified;
+  }
   const pageIndex = blockMaps.map((map, n) => {
     const blocks = Array.from(map, ([id, counts]) => ({
       sign:Math.sign(id), first:1 + (Math.abs(id)-1)*scalesPerBlock, ...counts

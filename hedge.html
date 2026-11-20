@@ -50,7 +50,7 @@
           </dl>
         </section>
         <section id="scan-results" aria-labelledby="bands-heading">
-          <div class="bands-heading"><h2 id="bands-heading">自动目标方案</h2><small><span id="plan-stress"></span><span id="plan-caption"></span></small></div>
+          <div class="bands-heading"><h2 id="bands-heading">条件目标仓位</h2><small><span id="plan-stress"></span><span id="plan-caption"></span></small></div>
           <div class="table-wrap" tabindex="0" role="region" aria-label="三个自动目标仓位方案"><table class="bands-table exact-plans">
             <thead id="plan-columns"><tr><th scope="col">目标比例 / 优先条件</th><th scope="col">PF 目标方向与仓位</th><th scope="col">Hype 目标方向与仓位</th><th scope="col">失败回收 / 本金差额</th><th scope="col">成功剩余 / 本金差额</th><th scope="col">保护结果 / Hype 风险</th></tr></thead>
             <tbody id="plan-rows"></tbody></table></div>
@@ -467,8 +467,8 @@
       </section>
       </details>
       <details class="desk-group" id="audit-details"><summary>区间统计、现金流水与原始输入</summary>
-        <h3>当前表内仓位的保证金与清算风险</h3>
-        <div class="table-wrap"><table><thead><tr><th>实际比例 / PF 数量</th><th>Hype 数量</th><th>Hype 初始保证金</th><th>路径最低维持余量</th><th>Hype 清算标记价</th><th>成功线至清算距离</th><th>失败 / 成功手续费</th><th>失败 / 成功深度滑点</th></tr></thead><tbody id="plan-risk-rows"></tbody></table></div>
+        <h3>条件目标仓位的保证金与清算风险</h3>
+        <div class="table-wrap"><table><thead><tr><th>目标比例 / PF 数量</th><th>Hype 目标数量</th><th>建议杠杆</th><th>目标初始保证金 / 占权益</th><th>目标维持保证金</th><th>其他保证金占用</th><th>开仓后可用抵押品</th><th>基础路径最低维持余量</th><th>压力路径最低维持余量</th><th>Hype 清算标记价</th><th>成功线至清算距离</th><th>失败 / 成功手续费</th><th>失败 / 成功深度滑点</th></tr></thead><tbody id="plan-risk-rows"></tbody></table></div>
         <section id="ratio-analysis" hidden aria-label="分段对账与相邻仓位">
           <p id="ratio-counts"></p><p id="ratio-boundary"></p>
           <h2>代表方案与相邻仓位</h2>
@@ -486,6 +486,7 @@
       <p><strong id="scan-deadline"></strong> <span id="scan-deadline-note"></span></p><p id="scan-funded"></p>
       <p id="scan-runtime"></p>
       <details><summary>四类区间的完整统计与费用</summary>
+        <h3>各比例段按资金条件分别统计</h3><p>集合可重叠。全部合法候选含提前触线的目标，其现金仅为条件终点估值。</p>
         <div class="table-wrap"><table><thead id="bin-columns"></thead><tbody id="scan-buckets"></tbody></table></div>
         <div class="table-wrap"><table><thead id="range-columns"></thead><tbody id="scan-rows"></tbody></table></div>
         <details id="subset-detail"><summary>逐段核对七类候选的数量、现金、手续费与风险</summary><p>各类数量可重叠。全部合法仓位包含提前强平的组合，该类现金列为假设能到达终点的估值。其余六类均通过路径保证金检查。</p><div class="table-wrap"><table><thead id="subset-columns"></thead><tbody id="scan-subsets"></tbody></table></div></details>

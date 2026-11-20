@@ -113,6 +113,10 @@ export function recordFromInspection(ctx, row) {
     failStop: row.failStop, passStop: row.passStop,
     failCost: row.failStop ? null : costs(row.paths?.fail, row, 'fail', ctx.market.hl),
     passCost: row.passStop ? null : costs(row.paths?.pass, row, 'pass', ctx.market.hl),
+    leverage: row.lev == null ? null : String(row.lev),
+    maintenance: row.maintenance ?? null, free: row.free ?? null, otherInitial: row.otherInitial ?? null,
+    baseSurplus: row.baseSurplus ?? null, stressSurplus: row.stressSurplus ?? null,
+    successHeadroom: row.passStop ? null : row.reserveHeadroom,
     initial: row.initial, marginRate: row.imRate, liquidation: row.liquidation, distance: row.buffer, distanceRate: row.bufferRate,
     surplus: row.surplus, physical: row.physical, covers: row.covers, coversWithBuffer: row.coversWithBuffer, survives: row.survives,
     both: row.both, profitable: ctx.params.externalPriced !== false && row.profitable,
@@ -167,7 +171,7 @@ export function buildPlanReport(scan, pending = false) {
   if (!pending) {
     add(primary, '最大 PF 仓位');
     add(eligible.range?.witnesses.failure[1], '失败回收优先');
-    add(eligible.range?.witnesses.success[1], '成功留存优先');
+    add(eligible.range?.witnesses.successHype[1], '成功留存优先');
   }
   const index = scaleIndex(scan);
   const featured = [...points.values()];
@@ -187,7 +191,8 @@ export function buildPlanReport(scan, pending = false) {
   const rows = [...points.values()].map(({labels,...point}) => {
     const row = planRecord(scan, point);
     if (labels.some(l => l.endsWith('优先') || l === '最大 PF 仓位') &&
-        (!row.both || row.failStop || row.passStop ||
+        (!ratioSlice(scan,row.sign,row.i,'eligible').some(([lo,hi]) => lo <= row.j && row.j <= hi) ||
+          !row.both || row.failStop || row.passStop ||
           dec(row.failDelta).lt(scan.ctx.params.recoveryBuffer ?? '0')))
       throw Error('优先方案与失败保护、成功留存或清算校验不一致');
     return { ...row, labels };
@@ -210,7 +215,7 @@ export function scaleComparison(rows) {
   if (!small.fraction || small.fraction !== large.fraction || small.sign !== large.sign || small.i === large.i)
     return null;
   const delta = {};
-  for (const key of ['pf','pfValue','hl','hypeValue','initial','marginRate','failDelta','success','distance']) {
+  for (const key of ['pf','pfValue','hl','hypeValue','initial','marginRate','failDelta','success','distance','leverage','maintenance','free','otherInitial','liquidation','baseSurplus','stressSurplus']) {
     if (small[key] == null || large[key] == null) { delta[key] = null; continue; }
     const value = row => key === 'pf' || key === 'hl' ? dec(row[key]).abs() : dec(row[key]);
     delta[key] = out(value(large).minus(value(small)));

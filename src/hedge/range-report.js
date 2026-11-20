@@ -1,8 +1,9 @@
 import { D, dec, out, max } from './math.js';
 import { unit, position } from './ratio-domain.js';
 
+export const capitalGroups = ['legal', 'protect', 'survive', 'both'];
 export const reportGroups = ['protect', 'survive', 'both', 'profit'];
-export const subsetGroups = ['legal', 'protect', 'survive', 'both', 'failProfit', 'passProfit', 'profit'];
+export const subsetGroups = [...capitalGroups, 'failProfit', 'passProfit', 'profit'];
 const metrics = ['failure', 'success', 'failureFee', 'successFee'];
 
 // Store a path metric as (a*i + b*i² + c*j + d*i*j) / (den*i).
@@ -34,6 +35,10 @@ function liquidationPieces(ctx, hl, common, debit, shock) {
   const [x, y] = common.shifts[1],
     d = common.denominator,
     pieces = [];
+  // A platform liquidation reference applies only to the unchanged quantity.
+  // At that singleton the point solver takes the closer of the two adverse roots.
+  const reference = hl.lo === hl.hi && leg.currentLiquidation != null &&
+    hl.step.times(hl.lo).times(sign).eq(position(ctx.book,'hl')) ? dec(leg.currentLiquidation) : null;
   function add(range, a, b, den) {
     if (!range) return;
     const coeff = integerCoefficients([
@@ -57,14 +62,11 @@ function liquidationPieces(ctx, hl, common, debit, shock) {
     range = clipLinear(range, a.times(u).minus(den.times(tier.from)), b.times(u));
     if (leg.tiers[n + 1])
       range = clipLinear(range, den.times(leg.tiers[n + 1].from).minus(a.times(u)), b.times(u).neg(), true);
+    if (reference && range &&
+        reference.times(den).times(hl.lo).minus(a.plus(b.times(hl.lo))).times(sign).gte(0)) continue;
     add(range, a, b, den);
   }
-  if (
-    hl.lo === hl.hi &&
-    leg.currentLiquidation != null &&
-    hl.step.times(hl.lo).times(sign).eq(position(ctx.book, 'hl'))
-  )
-    add([hl.lo, hl.hi], dec('0'), dec(leg.currentLiquidation), dec('1'));
+  if (reference && !pieces.length) add([hl.lo,hl.hi], dec('0'), reference, dec('1'));
   return pieces;
 }
 export function pathMetrics(ctx, pf, hl, { shifts, denominator }, feesLine, debit, shock) {
@@ -118,8 +120,8 @@ export function newReport() {
     pfMax: 0,
     hlMin: Infinity,
     hlMax: 0,
-    buffer: { min: null },
-    margin: { max: null },
+    buffer: { min: null, max: null },
+    margin: { min: null, max: null },
     extrema: metrics.map(() => ({ min: null, max: null }))
   };
 }
@@ -159,16 +161,19 @@ export function includeBand(report, row, i, lo, hi, sign) {
   const low = BigInt(lo),
     high = BigInt(hi);
   for (const band of row.margin) {
-    const j = Math.min(hi, band.to);
-    if (j >= Math.max(lo, band.from)) update(report.margin, 'max', BigInt(j), BigInt(band.lev), i, j, sign);
+    const first = Math.max(lo, band.from), last = Math.min(hi, band.to);
+    if (first > last) continue;
+    update(report.margin, 'min', BigInt(first), BigInt(band.lev), i, first, sign);
+    update(report.margin, 'max', BigInt(last), BigInt(band.lev), i, last, sign);
   }
   for (const piece of row.liquidation) {
     const from = Math.max(lo, piece.range[0]),
       to = Math.min(hi, piece.range[1]);
     if (from > to) continue;
-    const j = piece.lower ? from : to,
-      n = BigInt(j);
-    update(report.buffer, 'min', piece.m * n + piece.b, piece.d * n, i, j, sign);
+    for (const [end,j] of [['min',piece.lower ? from : to],['max',piece.lower ? to : from]]) {
+      const n = BigInt(j);
+      update(report.buffer, end, piece.m * n + piece.b, piece.d * n, i, j, sign);
+    }
   }
   row.money.forEach(([offset, slope, den], k) => {
     const left = offset + slope * low,
@@ -191,8 +196,10 @@ export function mergeReport(total, part) {
     const x = source[key];
     if (x) update(target, key, x.n, x.d, x.point.i, x.point.j, x.point.sign);
   }
-  merge(total.buffer, part.buffer, 'min');
-  merge(total.margin, part.margin, 'max');
+  for (const end of ['min','max']) {
+    merge(total.buffer, part.buffer, end);
+    merge(total.margin, part.margin, end);
+  }
   part.extrema.forEach((pair, i) => {
     merge(total.extrema[i], pair, 'min');
     merge(total.extrema[i], pair, 'max');
@@ -216,15 +223,19 @@ export function finishReport(raw, ctx, p) {
     fields[key + 'Value'] = q.map((v) => out(v.times(unit(leg)).times(leg.mark)));
   }
   const value = (ex) => (ex ? new D(ex.n.toString()).div(ex.d.toString()) : null);
-  const m = value(raw.margin.max);
-  fields.maxMargin =
-    m == null ? null : out(m.times(ctx.market.hl.step).times(unit(ctx.market.hl)).times(ctx.market.hl.mark));
-  fields.maxMarginRate =
-    fields.maxMargin != null && dec(p.C_hl).gt(0) ? out(dec(fields.maxMargin).div(p.C_hl)) : null;
-  fields.minBuffer = raw.buffer.min ? out(value(raw.buffer.min)) : null;
-  fields.minBufferRate = fields.minBuffer == null ? null : out(dec(fields.minBuffer).div(ctx.market.hl.mark));
-  witnesses.maxMargin = raw.margin.max?.point ?? null;
-  witnesses.minBuffer = raw.buffer.min?.point ?? null;
+  const markPerLot = unit(ctx.market.hl).times(ctx.market.hl.mark).times(ctx.market.hl.step);
+  for (const end of ['min','max']) {
+    const margin = raw.margin[end], buffer = raw.buffer[end];
+    const im = margin ? value(margin).times(markPerLot) : null;
+    const distance = value(buffer);
+    fields[end+'Margin'] = im == null ? null : out(im);
+    fields[end+'MarginRate'] = im != null && dec(p.C_hl).gt(0) ? out(im.div(p.C_hl)) : null;
+    fields[end+'Buffer'] = distance == null ? null : out(distance);
+    fields[end+'BufferRate'] = distance == null ? null : out(distance.div(ctx.market.hl.mark));
+    witnesses[end+'Margin'] = margin?.point ?? null;
+    witnesses[end+'Buffer'] = buffer?.point ?? null;
+  }
+  witnesses.successHype = witnesses.success;
   fields.successHype = fields.success.map((v) => out(dec(v).minus(ctx.book.external)));
   const ratio = (amount, base) => (dec(base).gt(0) ? out(max(0, amount).div(base)) : null);
   fields.gapRate = fields.failure

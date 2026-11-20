@@ -1193,7 +1193,7 @@ test('RANGE02 买卖盘、深度及标记价重算相同数量的现金、费用
   assert.ok(dec(b.paths.fail.hl.exitSlippage).gt(0));
 });
 test('RANGE03 / AUTOSEL08 小网格逐点穷举对照整段扫描，方向、现仓、费用、压力、Funded 和多档维持保证金', () => {
-  for (const variant of ['flat', 'fees', 'stress', 'held', 'tier', 'funded', 'combined']) {
+  for (const variant of ['flat', 'fees', 'stress', 'held', 'tier', 'funded', 'combined','reference']) {
     const f = fixture(),
       r = {};
     if (['fees', 'stress', 'tier', 'combined'].includes(variant)) {
@@ -1218,7 +1218,7 @@ test('RANGE03 / AUTOSEL08 小网格逐点穷举对照整段扫描，方向、现
         minBuffer: '0.2',
         minMaintenanceSurplus: '5'
       });
-    if (['held', 'combined'].includes(variant)) {
+    if (['held', 'combined','reference'].includes(variant)) {
       f.a.pf.qty = '-2';
       f.a.hl.qty = '1';
       f.a.hl.currentMarginCredit = '20';
@@ -1226,6 +1226,7 @@ test('RANGE03 / AUTOSEL08 小网格逐点穷举对照整段扫描，方向、现
     }
     if (['tier', 'combined'].includes(variant))
       f.m.hl.marginTiers.push({ lowerBound: '350', maxLeverage: 5 });
+    if (variant === 'reference') f.a.hl.liquidation = '80';
     if (variant === 'combined') {
       f.m.spec.contract.contractMultiplier = '1.5';
       f.m.hl.contract = { ...unitContract('BTC', 'USDT', 'USD'), settlement: 'quanto-1:1' };
@@ -1336,8 +1337,8 @@ test('RANGE03 / AUTOSEL08 小网格逐点穷举对照整段扫描，方向、现
           successFee: (r) => fees(r, 'pass'),
           gapRate: (r) => r.gapRate,
           consumption: (r) => r.consumption,
-          maxMargin: (r) => r.initial,
-          minBuffer: (r) => r.buffer
+          minMargin: (r) => r.initial, maxMargin: (r) => r.initial,
+          minBuffer: (r) => r.buffer, maxBuffer: (r) => r.buffer
         };
         for (const [metric, get] of Object.entries(values)) {
           for (const [end, witness] of Object.entries(
@@ -1359,15 +1360,9 @@ test('RANGE03 / AUTOSEL08 小网格逐点穷举对照整段扫描，方向、现
             .filter((v) => v != null)
             .map(dec)
             .sort((a, b) => a.cmp(b));
-          const checks =
-            metric === 'maxMargin'
-              ? [[range.maxMargin, vals.at(-1)]]
-              : metric === 'minBuffer'
-                ? [[range.minBuffer, vals[0]]]
-                : [
-                    [range[metric][0], vals[0]],
-                    [range[metric][1], vals.at(-1)]
-                  ];
+          const checks = Array.isArray(range[metric]) ? [
+            [range[metric][0],vals[0]], [range[metric][1],vals.at(-1)]
+          ] : [[range[metric],metric.startsWith('min') ? vals[0] : vals.at(-1)]];
           for (const [got, want] of checks)
             if (want == null) assert.equal(got, null);
             else
@@ -1970,4 +1965,49 @@ test('同精确比例的规模边际变化逐项来自独立大小仓核算，�
   pair[0].distance=null;
   assert.equal(scaleComparison(pair).delta.distance,null);
   assert.equal(scaleComparison([pair[0],{...pair[1],sign:-pair[1].sign}]),null);
+});
+
+test('交集汇总等于同段交集，处于相同比例范围的未达标仓位单独计数', () => {
+  const scan=scanFixture({pfFee:'0.0001',hlFee:'0.0005'}).ratioScan;
+  const bin=scan.buckets.find(b=>b.edgeKey==='joint');
+  assert.ok(bin.legal>bin.both && bin.both>0);
+  assert.deepEqual(bin.ranges.both,scan.sets.both.range);
+  for (const k of ['legal','protect','survive','both'])
+    assert.equal(scan.buckets.reduce((n,b)=>n+b[k],0),scan.sets[k].range.count);
+  for (const [kind,check] of [['protect','failure'],['survive','successHype'],['both','failure'],['both','successHype']])
+    assert.ok(dec(bin.ranges[kind][check][0]).gte(check==='failure'?scan.ctx.book.B:scan.ctx.params.R));
+});
+
+test('真实数量回归：0.01685 与 0.03370 BTC 的全仓保证金分别复算', () => {
+  const ctx=structuredClone(scanFixture().ratioScan.ctx);
+  const mark='62056.4', price=dec(mark);
+  ctx.book.hl='409';
+  for (const [venue,step] of [['hl','0.00001'],['pf','0.0001']]) {
+    Object.assign(ctx.market[venue],{mark,bids:[[mark,'5']],asks:[[mark,'5']],step,minQty:step,
+      capacity:null, rate:'0'});
+  }
+  Object.assign(ctx.market.hl,{free:'389',hold:'20',otherMaintenance:'3',reserve:'0',utilization:'1',
+    tiers:[{from:'0',mmr:'0.0125',deduction:'0',maxLeverage:'40'}],exchangeMaxLeverage:'40'});
+  const small={i:1100,j:1685,sign:1}, large={i:2200,j:3370,sign:1};
+  const get=p=>planRecord({ctx},p);
+  const pair=[get(small),get(large)];
+  assert.deepEqual(pair.map(r=>r.leverage),['3','6']);
+  assert.equal(pair[0].fraction,pair[1].fraction);
+  for (const row of pair) {
+    const qty=dec(row.hl).abs(), nominal=qty.times(price), initial=nominal.div(row.leverage);
+    assert.ok(dec(row.initial).eq(initial));
+    assert.equal(initial.toFixed(2),'348.55');
+    assert.ok(dec(row.maintenance).eq(nominal.times('0.0125')));
+    assert.ok(dec(row.free).eq(dec('389').minus(initial)));
+    assert.ok(dec(row.otherInitial).minus(20).abs().lt('1e-40'));
+    const root=dec('409').minus(3).plus(nominal).div(qty.times('1.0125'));
+    assert.ok(dec(row.liquidation).minus(root).abs().lt('1e-35'));
+    assert.equal(row.stressSurplus,null);
+  }
+  assert.ok(dec(pair[1].maintenance).eq(dec(pair[0].maintenance).times(2)));
+  assert.ok(dec(pair[1].distance).lt(pair[0].distance));
+  ctx.book.hl='3000'; ctx.market.hl.free='2980';
+  const a=get(small), b=get(large);
+  assert.equal(a.leverage,b.leverage);
+  assert.ok(dec(b.initial).eq(dec(a.initial).times(2)));
 });

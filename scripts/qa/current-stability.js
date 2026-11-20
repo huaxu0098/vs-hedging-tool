@@ -31,12 +31,11 @@ const install = `(() => {
             counts:s.buckets.map(bin=>[bin.edgeKey,bin.both])}, rep:rep && {pf:rep.pfValue, hl:rep.hypeValue, fail:rep.fail, success:rep.success},
           bins:s.buckets.flatMap((b,index)=>{
             if(!b.legal)return [];
-            const groups=[b.risk?'risk':'legal'];
-            if(b.both && b.both<b.risk)groups.push('both');
-            return groups.map(group=>{
+            return ['legal','protect','survive','both'].map(group=>{
               const v=b.ranges[group];
-              return {group,index,both:b.both,risk:b.risk,count:v.count,pf:v.pfValue,hl:v.hlValue,qa:v.pfQty,qb:v.hlQty,
-                fail:v.failure,pass:v.successHype,protect:b.protect,survive:b.survive,profit:b.profit,above:b.above,through:b.through};
+              return {group,index,count:b[group], pf:v?.pfValue,hl:v?.hlValue,qa:v?.pfQty,qb:v?.hlQty,
+                fail:v?.failure,pass:v?.successHype,fee:v?.failureFee,exitFee:v?.successFee,
+                margin:[v?.minMargin,v?.maxMargin],distance:[v?.minBuffer,v?.maxBuffer]};
             });
           })};
       }});
@@ -84,7 +83,12 @@ const install = `(() => {
   }
   requestAnimationFrame(frame);
 })()`;
-const cash = (v) => dec(v).toFixed(4) + ' U';
+function cash(v) {
+  const amount = dec(v);
+  return (!amount.isZero() && amount.abs().lt('0.0001')
+    ? amount.toSignificantDigits(4).toString()
+    : amount.toFixed(4)) + ' U';
+}
 try {
   await send('Page.addScriptToEvaluateOnNewDocument', { source: install });
   await send('Emulation.setDeviceMetricsOverride', {
@@ -119,26 +123,25 @@ try {
       if(plan.both) assert.ok(dec(plan.fail).gte(f.protect) && dec(plan.success).gte(f.reserve));
     }
     assert.ok(f.prices.every((px) => Number(px) > 0));
-    const range = (values, digits) => {
-      const parts = values.map(x => digits == null ? x : dec(x).toFixed(digits));
-      return dec(values[0]).eq(values[1]) ? parts[0] : parts.join(' – ');
-    };
+    const two=(values,fmt)=>values.map(fmt).join(' – ');
+    const money=x=>dec(x).toFixed(dec(x).abs().lt(1)&&!dec(x).isZero()?4:2)+' U';
     for (const bin of f.bins) {
-      const matches = f.rows.filter(row => row.index === bin.index && row.group === bin.group);
-      assert.equal(matches.length,1);
-      const cells = matches[0].cells;
-      assert.equal(cells.length,6);
-      for (const [j, values, qty] of [[1,bin.pf,bin.qa],[2,bin.hl,bin.qb]])
-        assert.equal(cells[j],range(values,2)+'\n'+range(qty)+' BTC');
-      assert.equal(cells[3],bin.group==='legal'?'未验证':range(bin.fail,4));
-      assert.equal(cells[4],bin.group==='legal'?'未验证':range(bin.pass,4));
-      if(bin.group==='both' || (bin.group==='risk' && bin.risk===bin.both)) {
-        assert.ok(bin.fail.every(v=>dec(v).gte(f.protect)) && bin.pass.every(v=>dec(v).gte(f.reserve)));
-        assert.ok(cells[5].includes('失败回本 · 成功留存'));
-      } else if(bin.group==='legal') assert.ok(cells[5].includes('未通过'));
-      else {
-        if(bin.protect<bin.risk) assert.match(cells[5],/未回本|无法回本/);
-        if(bin.survive<bin.risk) assert.match(cells[5],/留存不足/);
+      const found=f.rows.filter(row=>row.index===bin.index && row.group===bin.group);
+      assert.equal(found.length,1);
+      const cells=found[0].cells;
+      assert.match(cells[0],{legal:/全部合法候选/,protect:/失败端本金回收/,survive:/成功端最低留存/,both:/双路径交集合格/}[bin.group]);
+      if (!bin.count) {assert.equal(cells[1],'0 组');continue;}
+      assert.ok(cells[0].includes(bin.count.toLocaleString()+' 组'));
+      assert.equal(cells.length,7);
+      for(const [i,q,value] of [[1,bin.qa,bin.pf],[2,bin.qb,bin.hl]])
+        assert.equal(cells[i],two(q,String)+'\n'+two(value,money));
+      assert.equal(cells[3],two(bin.fail,cash)+'\n'+two(bin.pass,cash));
+      assert.equal(cells[4],two(bin.fee,cash)+'\n'+two(bin.exitFee,cash));
+      assert.ok(cells[6].includes(two(bin.margin,money)));
+      if(bin.distance.every(v=>v!=null)) assert.ok(cells[6].includes(two(bin.distance,v=>dec(v).toFixed(4))));
+      if(bin.group==='both') {
+        assert.equal(bin.count,f.joint.count);
+        assert.ok(dec(bin.fail[0]).gte(f.protect) && dec(bin.pass[0]).gte(f.reserve));
       }
     }
     assert.ok(f.height<=720,'主要计算区域超出桌面首屏 '+f.height);
@@ -178,15 +181,16 @@ try {
       headline:read('plan-rows')[0][5],source:e('scan-source').textContent};
   })()`);
   const {result,plans,cells}=comparison;
-  assert.equal(cells.length,9);
+  assert.equal(cells.length,16);
   const small=plans.find(p=>p.key===result.small), large=plans.find(p=>p.key===result.large);
-  for (const [index,key] of ['pf','pfValue','hl','hypeValue','initial','marginRate','failDelta','success','distance'].entries()) {
+  for (const [index,key] of ['pf','pfValue','hl','hypeValue','initial','marginRate','failDelta','success','distance','leverage','maintenance','free','otherInitial','liquidation','baseSurplus','stressSurplus'].entries()) {
     const val=row=>['pf','hl'].includes(key)?dec(row[key]).abs():dec(row[key]);
     if (small[key]==null || large[key]==null) { assert.equal(cells[index][3],'未验证'); continue; }
+    for(const p of [small,large]) assert.ok(dec(p.initial).eq(dec(p.hypeValue).div(p.leverage)));
     const delta=val(large).minus(val(small));
     assert.ok(delta.eq(result.delta[key]));
     const displayed=cells[index][3].replace('−','-').split(' ')[0];
-    const digits=['pf','hl'].includes(key) ? delta.decimalPlaces() : ['failDelta','success'].includes(key) ? 4 : 2;
+    const digits=['pf','hl','leverage'].includes(key) ? delta.decimalPlaces() : ['failDelta','success'].includes(key) || (['initial','pfValue','hypeValue','maintenance','free','otherInitial','baseSurplus','stressSurplus'].includes(key)&&delta.abs().lt(1)&&!delta.isZero()) ? 4 : 2;
     const expected=key==='marginRate'?delta.times(100):delta;
     assert.ok(dec(displayed).eq(expected.toDecimalPlaces(digits)),key+' '+displayed+' / '+expected);
   }
