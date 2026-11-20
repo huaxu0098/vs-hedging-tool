@@ -569,7 +569,7 @@ function planChecks(plan) {
   const v = plan.verification ?? {};
   const short = value => ({pass:'✓',fail:'×'})[value] ?? '待验';
   return '失败' + short(v.failureFunds) + ' 成功' + short(v.successFunds) +
-    ' 初保' + short(v.initial) + ' 路径' + short(v.liquidation) + ' 压力' + short(v.stress);
+    ' 初保' + short(v.initial) + ' 路径' + short(v.liquidation==='fail' || plan.coverage==='verified' ? v.liquidation : 'unknown') + ' 压力' + short(v.stress);
 }
 function renderComparison(snapshot) {
   const { ratioScan:scan, targets:winners, stress } = snapshot ?? {targets:objectives.map(() => null)};
@@ -600,11 +600,9 @@ function renderComparison(snapshot) {
     baseOnly ? '最大基础情景可行仓位，压力安全性未验证' :
     !stress || partial ? '最大条件目标仓位，压力安全性未验证' : '最大条件目标仓位，按已配置压力估算';
   write('max-risk-title', scope + warning);
-  const highestUse = max.marginRate != null && winners.slice(1).every(p =>
-    p?.marginRate != null && dec(max.marginRate).gt(p.marginRate));
-  write('max-risk-values', 'Hype 保证金占权益 ' + pct(max.marginRate,2) +
-    (highestUse ? '（三方案最高）' : '') + '，可用抵押品 ' +
-    usd(max.free) + '，失败回本缓冲 ' + settlementAmount(max.failDelta) + '，成功线至强平距离 ' + distanceText(max, scan) + '。');
+  write('max-risk-values','占用 '+pct(max.marginRate,2)+' · 开仓可用 '+usd(max.free)+
+    ' · 回本缓冲 '+settlementAmount(max.failDelta)+' · 强平距 '+distanceText(max,scan)+
+    (Number(max.minimumHeadroom)<0 ? ' · 途中可用 0 U（缺 '+usd(dec(max.minimumHeadroom).neg())+'）':''));
   $('scale-link').hidden = !scan.plans.comparison;
 }
 
@@ -680,8 +678,13 @@ function renderPlans(snapshot) {
     heading.append(name);
     const v = r.verification ?? {};
     for (const [label,value] of [['失败回收',v.failureFunds],['成功留存',v.successFunds],['初始保证金',v.initial],
-        ['全路径清算',v.liquidation],['压力测试',v.stress]])
+        ['设定路径维持保证金',v.liquidation],['压力测试',v.stress]])
       detailLine(heading,label + ' · ' + statusText(value));
+    if (r.fail!=null) detailLine(heading,'失败端要求 '+usd(scan.recoveryFloor??scan.ctx.book.B)+
+      '，高于门槛 '+settlementAmount(dec(r.fail).minus(scan.recoveryFloor??scan.ctx.book.B))+
+      (recoveryCushion(r.fail,scan.ctx.book.B).thin?' · 极薄缓冲':''));
+    detailLine(heading,r.coverage==='verified' ? '已核对设定情景与全仓数据' : '路径风险未充分验证');
+    if (Number(r.minimumHeadroom)<0) detailLine(heading,'途中可用于新增仓位的抵押品为 0 U');
     for (const side of ['pf', 'hl']) {
       const leg = scan.ctx.market[side], adj = r.adjustments?.[side];
       const cell = tr.insertCell();
@@ -705,16 +708,44 @@ function renderPlans(snapshot) {
       }
       detailLine(cell,'起点 PF ' + fmt(snapshot.prices.pf.mark) + ' ' + report.pfQuote +
         ' / Hype ' + fmt(snapshot.prices.hl.mark) + ' ' + report.hlQuote);
+      for (const side of ['pf','hl']) for (const phase of ['entry','exit']) {
+        const fill=r.depth?.[key]?.[side]?.[phase], unit=scan.ctx.market[side].unit;
+        const label=(side==='hl'?'Hype':'PF')+(phase==='entry'?' 调仓':' 条件平仓');
+        if (fill?.status==='noTrade') { detailLine(cell,label+' · 无成交'); continue; }
+        if (fill?.status!=='covered') { detailLine(cell,label+' · 深度未验证'+
+          (fill?.uncovered!=null?'，未覆盖 '+fill.uncovered+' '+unit:'')); continue; }
+        detailLine(cell,label+' · '+(fill.side==='ask'?'吃卖盘':'吃买盘')+' · 目标 '+fill.target+' '+unit+
+          '，覆盖 '+fill.covered+' / 可见 '+fill.visible+'，未覆盖 '+fill.uncovered+'；用 '+fill.levels+
+          ' 档，首档 '+fill.topSize+' @ '+fmt(fill.best)+'，均价 '+fmt(fill.vwap)+
+          '，半点差成本 '+settlementAmount(fill.spreadCost)+'，深度滑点 '+settlementAmount(fill.slippage));
+      }
       detailLine(cell,'深度滑点 PF ' + settlementAmount(path.pf.slippage) + ' / Hype ' + settlementAmount(path.hl.slippage));
       if (key === 'pass' && r.successPersonal != null) detailLine(cell,'个人资金（到账前） ' + settlementAmount(r.successPersonal));
       for (const [kind,test] of Object.entries(r.pathAudit?.[key] ?? {})) {
-        const label = {base:'同步路径',dislocation:'基差与异步错位',delayedFill:'延迟成交后',beforeFill:'延迟成交前'}[kind];
-        const points = test.checkpoints ?? [];
-        const low = points.reduce((a,b) => (!a || dec(b.surplus).lt(a.surplus) ? b : a), null);
-        if (low) detailLine(cell,label + ' · ' + points.length + ' 个核验点 · 最低维持余量 ' + usd(low.surplus) + '（标记 ' + fmt(low.mark) +
-          '，权益 ' + usd(low.equity) + '，维持 ' + usd(low.maintenance) + '，可用抵押余量 ' + usd(low.free) + '）');
+        const label = {base:'基础同步',basisWiden:'基差扩大',basisNarrow:'基差收敛',
+          dislocation:'基差与异步错位',delayedFill:'延迟成交后',beforeFill:'延迟成交前（原仓）'}[kind];
+        const low=test.worst;
+        if (low) {
+          detailLine(cell,label+' · '+(test.proof?.continuous?'解析检验 '+test.proof.intervals+' 段':'路径风险未充分验证')+
+            '，最小维持余量位于'+(low.legIndex===0?'起点':'第 '+low.legIndex+' 段 '+pct(low.progress,1))+
+            '，Hype 标记 '+fmt(low.mark)+' '+report.hlQuote);
+          detailLine(cell,'账户权益 '+usd(low.equity)+' · 目标初始保证金 '+usd(low.initial)+
+            ' · 总保证金占用 '+usd(low.marginUsed)+'（其他已知占用 '+usd(low.otherUsed)+'）');
+          detailLine(cell,'维持保证金 '+usd(low.maintenance)+' · 清算余量 '+usd(low.surplus)+
+            ' · 可用抵押品 '+usd(low.freeCollateral)+' · 初始保证金净余量 '+usd(low.initialHeadroom));
+          if (Number(test.lowestFree?.free)<0) detailLine(cell,'途中新增仓位可用 0 U，最大抵押缺口 '+
+            usd(dec(test.lowestFree.free).neg())+'，出现在 '+fmt(test.lowestFree.mark)+' '+report.hlQuote);
+        }
+        if (test.offset!=null) detailLine(cell,'同步终点基差 '+fmt(test.gapBefore)+' → '+fmt(test.gapAfter)+
+          ' '+report.hlQuote+'，'+(Number(test.offset)===0?'无额外位移':test.adverse?'对 Hype 不利':'对 Hype 有利'));
+        const v=test.settlement;
+        if (v) detailLine(cell,'双边平仓价 PF '+fmt(v.pfFill)+' / Hype '+fmt(v.hlFill)+
+          '，PF 净盈亏 '+signedCash(v.pfNet)+'，Hype 净盈亏 '+signedCash(v.hlNet)+
+          '，Hype 剩余 '+settlementAmount(v.hype)+'，个人回收（分成到账前） '+settlementAmount(v.personal));
+        else if (kind!=='beforeFill') detailLine(cell,'该路径结算未验证');
         if (test.firstBreach) detailLine(cell,'途中首次触线 ' + fmt(test.firstBreach.mark) + ' ' + report.hlQuote);
       }
+      if (!r.pathAudit?.[key]?.basisWiden) detailLine(cell,'基差扩大 / 收敛 · 未验证（须有基差幅度和有效同币种参考）');
       detailLine(cell, 'Hype 净盈亏 ' + signedCash(path.hypeNet));
       detailLine(cell, '手续费 PF ' + settlementAmount(path.pf.fees) + ' / Hype ' + settlementAmount(path.hl.fees));
       detailLine(cell, '盘口成交成本 PF ' + settlementAmount(path.pf.executionCost) + ' / Hype ' + settlementAmount(path.hl.executionCost));

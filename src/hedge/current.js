@@ -931,7 +931,9 @@ function computeCurrent(r, a, data, fxData, now, options) {
   const checks = {
     currentSnapshot: true,
     liveLimits: true,
-    fullStress: result.stress.positive.length === 4,
+    basisBps: specified(r.adverseBps) ? out(nonnegative(r.adverseBps)) : null,
+    basisRate: specified(r.adverseBps) ? currencies.hypeToVest?.mid ?? null : null,
+    fullStress: result.stress.positive.length === 4 && currencies.hypeToVest?.mid != null,
     adverseBps: out(nonnegative(r.adverseBps || '0')),
     minMaintenanceSurplus: out(nonnegative(r.minMaintenanceSurplus || '0')),
     minPriceBuffer: out(nonnegative(r.minBuffer ?? '0')),
@@ -970,8 +972,9 @@ function computeCurrent(r, a, data, fxData, now, options) {
         l.marginMode === 'cross' &&
         l.free != null
       ) {
-        const locked = dec(result.cash[key]).minus(l.free);
-        if (l.hold == null || locked.gt(l.hold)) l.hold = out(locked.gt(0) ? locked : dec('0'));
+        // The confirmed empty pool has no position/order IM. An independently
+        // lower trading allowance remains a capacity limit, not margin used.
+        if (l.hold == null && a[key].source !== 'Hype 主网 API') l.hold = '0';
       }
       if (l.marginMode !== 'cross') missing.push(label + ' 全仓模式（逐仓及未知模式的清算未验证）');
       if (key === 'hl') {
@@ -1014,6 +1017,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
       !!market.hl.capacity &&
       a.hl.fee != null &&
       !a.pf.otherPositions;
+    if (checks.accountVerified) checks.crossAccount = a.hl;
     if (options.deferAuto && canScan) {
       result.needsSearch = true;
       return result;
@@ -1142,6 +1146,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
       }
       if (result.leverageStatus !== 'ACCOUNT_MODEL') missing.push('实际杠杆设置或调档后可用额度待核实');
       if (result.stress.missing.length || result.stress.zero.length) missing.push(result.stress.label);
+      if (specified(r.adverseBps) && checks.basisRate == null) missing.push('基差路径所需的同刻参考汇率');
       if (!market.hl.capacity || a.hl.fee == null) missing.push('Hype 账户实际可开额度或费率待核实');
       if (a.pf.otherPositions || a.hl.otherPositions) missing.push('其他持仓的组合风险待核实');
       if (!funded && !result.deadline) missing.push('考核截止时间待确认');

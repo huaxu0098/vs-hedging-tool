@@ -1,3 +1,4 @@
+import { auditCross } from './cross-check.js';
 import { dec, out, max, profitSplit, normalizeExposure } from './math.js';
 import { legalSegments, position, unit } from './ratio-domain.js';
 import {
@@ -11,7 +12,7 @@ import {
   recoveryCushion
 } from './range-report.js';
 import { evaluateLeverageGrid } from './leverage.js';
-import { profileInputs, validateMargin, projectSettlementEquity, pathDislocation } from './solver.js';
+import { profileInputs, validateMargin, projectSettlementEquity, pathDislocation, continuousTiers } from './solver.js';
 
 const decimal = (v) => dec(String(v));
 const lotValue = (leg) => unit(leg).times(leg.step);
@@ -410,6 +411,23 @@ function auditHypePaths(ctx,c) {
   for (const key of ['fail','pass']) {
     const end = c.lines[key];
     const paths = {base:walk(market,q,['0',end],'0',c.availableAfter)};
+    // Quotes are compared in Hype quote units only to identify the side of
+    // the basis. The resulting native move goes into the usual quanto ledger.
+    const basis = checks.basisBps, fx = checks.basisRate;
+    if (basis != null && fx != null) {
+      const pfEnd=decimal(market.pf.mark).plus(decimal(end).times(market.pf.factor));
+      const hlEnd=decimal(leg.mark).plus(decimal(end).times(factor));
+      const gap=hlEnd.minus(pfEnd.div(fx));
+      const width=decimal(leg.mark).times(basis).div(10000);
+      const dir=gap.cmp(0) || -decimal(q).cmp(0) || 1;
+      const closing=gap.abs().lt(width) ? gap.abs() : width;
+      for (const [name,offset] of [['basisWiden',width.times(dir)],['basisNarrow',closing.times(-dir)]]) {
+        const shift=out(decimal(end).plus(offset.div(factor)));
+        paths[name] = {...walk(market,q,['0',shift],'0',c.availableAfter),
+          shift,offset:out(offset),gapBefore:out(gap),gapAfter:out(gap.plus(offset)),
+          adverse:offset.times(q).lt(0),referenceRate:fx};
+      }
+    }
     if (!excursion.isZero())
       paths.dislocation = walk(market,q,['0',out(excursion),out(decimal(end).plus(excursion)),end],
         checks.stress?.fundingDebit ?? '0',c.availableAfter);
@@ -421,6 +439,18 @@ function auditHypePaths(ctx,c) {
       const before = {...market,hl:{...leg,leverage:leg.configuredLeverage ?? leg.leverage}};
       paths.beforeFill = walk(before,old,['0',out(delay),out(delay.neg())],'0',leg.free);
     }
+    // Preserve the independent closing shift/debit for settlement at this PF boundary.
+    paths.base.shift=end;
+    if (paths.dislocation) {
+      paths.dislocation.shift=end;
+      paths.dislocation.debit=checks.stress?.fundingDebit ?? '0';
+    }
+    if (paths.delayedFill) {
+      paths.delayedFill.shift=out(decimal(end).plus(decimal(stress.priceShock).div(factor)));
+      paths.delayedFill.debit=out(decimal(stress.fundingDebit).plus(stress.delayDebit));
+    }
+    if (c.code!=='FEASIBLE')
+      paths.base.pfStatus=validateMargin(book,market,'pf',c.vsTargetQuantity,['0',end],checks.catalog).at(-1).status;
     result[key] = paths;
   }
   return result;
@@ -467,11 +497,15 @@ export function inspectRatio(ctx, point, { includeLeverageGrid = false, includeP
     hl,
     h: c.actualRatio,
     pathAudit:audit,
+    crossChecked:!!(audit && checks.crossAccount && auditCross(market.hl,checks.crossAccount,c,false).gaps.length===0),
     verification:{
       failureFunds:coversWithBuffer ? 'pass' : 'fail', successFunds:survives ? 'pass' : 'fail',
       initial:statusOf(entry),
       liquidation:statusOf(c.constraints.filter(x => /MAINTENANCE|REFERENCE_LIQ|INTRAPATH|PRICE_BUFFER|MARGIN_UNVERIFIED/.test(x.code))),
-      stress:checks.fullStress ? statusOf(c.constraints.filter(x => x.name || /STRESS|INTRAPATH/.test(x.code))) : 'unknown'
+      stress:checks.fullStress ? statusOf([
+        ...c.constraints.filter(x => x.name || /STRESS|INTRAPATH/.test(x.code)),
+        ...Object.values(audit??{}).flatMap(group=>Object.values(group))
+      ]) : 'unknown'
     },
     pfValue: c.vsNotional,
     hypeValue: c.hlNotional,
@@ -562,6 +596,8 @@ export function buildRatioScan(ctx, { maxVisits = 3500000, cache } = {}) {
   return { ...previous, ctx };
 }
 function scanLotRanges(ctx, maxVisits, legs, cache) {
+  if (!['pf','hl'].every(v=>continuousTiers(ctx.market[v].tiers)))
+    throw Error('路径风险未充分验证：保证金档位不连续或斜率无法核实');
   const p = profileInputs(ctx.book, ctx.params, ctx.market);
   const constant = decimal(normalizeExposure(ctx.market.hl.step, ctx.market.hl)).div(
     normalizeExposure(ctx.market.pf.step, ctx.market.pf)

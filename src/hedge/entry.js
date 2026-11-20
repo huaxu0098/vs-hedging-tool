@@ -446,7 +446,7 @@ function currentFrame(a, m, t) {
     return paused();
   }
   const {context, key} = scanKeys(r, a, m, rates, [scope, $('quote-source').value, m.source,
-    base.externalValue, Number(r.external) > 0 ? base.externalRate : null]);
+    r.adverseBps !== '' ? base.currencies?.hypeToVest?.mid : null, base.externalValue, Number(r.external) > 0 ? base.externalRate : null]);
   if (running && running.context !== context) cancelAuto();
   wantedKey = key;
   // A later observation of identical prices may reuse the previous solve only
@@ -509,7 +509,7 @@ function currentFrame(a, m, t) {
         const accounts = {pf:account('pf'), hl:account('hl')};
         const latest = calculateCurrent(r, accounts, live, rates, now, {deferAuto:true});
         if (latest.needsSearch && scanKeys(r,accounts,live,rates,[scanScope(),$('quote-source').value,
-            live.source,latest.externalValue,Number(r.external)>0 ? latest.externalRate : null]).key !== key) {
+            live.source,r.adverseBps !== '' ? latest.currencies?.hypeToVest?.mid : null,latest.externalValue,Number(r.external)>0 ? latest.externalRate : null]).key !== key) {
           render();
           return;
         }

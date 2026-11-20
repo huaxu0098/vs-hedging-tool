@@ -21,9 +21,11 @@ const install = `(() => {
       this.observed=true;
       this.addEventListener('message',({data})=>{if(data.result?.ratioScan) {
         const r=data.result, s=r.ratioScan, rep=s.representative?.row;
-        const key=r.trace.id;
+        const key=r.trace.id, market=JSON.parse(r.trace.inputs).market;
         test.results[key]={id:key, traceVersions:[r.trace.marketId,r.trace.accountsId,r.trace.rulesId,r.trace.model,r.finishedAt], started:r.startedAt,finished:r.finishedAt,ms:r.solveMs,
-          bookTimes:['pf','hl'].map(k=>{const q=JSON.parse(r.trace.inputs).market[k];return q.bookAt??q.asOf}),
+          bookTimes:['pf','hl'].map(k=>market[k].bookAt??market[k].asOf),
+          books:Object.fromEntries(['pf','hl'].map(k=>[k,{levels:market[k].levels,
+            multiplier:s.ctx.market[k].multiplier,fx:s.ctx.market[k].fx}])),
           pfMark:s.ctx.market.pf.mark,hlMark:s.ctx.market.hl.mark, count:s.sets.legal.count,
           revaluation:r.revaluation, sequence:data.version, protect:s.ctx.book.B, reserve:s.ctx.params.R,
           plans:['最大 PF 仓位','失败回收优先','成功留存优先'].map(label=>s.plans.rows.find(row=>row.labels.includes(label))).filter(Boolean),
@@ -166,12 +168,34 @@ try {
         assert.ok(shown.includes('手续费 PF '+cash(path.pf.fees)+' / Hype '+cash(path.hl.fees)));
       }
       assert.equal(key,plan.key);
-      assert.equal(scenario,'失败✓ 成功✓ 初保✓ 路径✓ 压力待验');
-      for (const side of ['pass','fail']) {
-        const test = plan.pathAudit[side].base;
+      assert.equal(scenario,'失败✓ 成功✓ 初保✓ 路径待验 压力待验');
+      for (const pathName of ['pass','fail']) {
+        const test = plan.pathAudit[pathName].base;
         assert.equal(test.firstBreach,null);
         assert.equal(test.status,'pass');
-        assert.ok(test.checkpoints.length >= 3);
+        assert.ok(test.proof.continuous && test.proof.intervals===test.proof.segments.length && test.proof.intervals>0);
+        assert.ok(test.checkpoints.every(p=>dec(p.marginUsed).eq(dec(p.initial).plus(p.otherUsed)) &&
+          dec(p.freeCollateral).gte(0) && dec(p.surplus).eq(dec(p.equity).minus(p.maintenance))));
+        for (const side of ['pf','hl']) for (const fill of Object.values(plan.depth[pathName][side])) {
+          assert.equal(fill.status,'covered');
+          assert.ok(dec(fill.covered).eq(fill.target) && dec(fill.uncovered).isZero());
+          const book=f.books[side], levels=book.levels[fill.side==='ask'?1:0];
+          const best=dec(String(levels[0][0])), unit=dec(book.multiplier).times(book.fx);
+          let remaining=dec(fill.target), visible=dec('0'), impact=dec('0'), used=0;
+          for (const [px,size] of levels) {
+            visible=visible.plus(size);
+            if(remaining.isZero()) continue;
+            const take=remaining.lt(size)?remaining:dec(String(size));
+            impact=impact.plus(dec(String(px)).minus(best).abs().times(take).times(unit));
+            remaining=remaining.minus(take);
+            used++;
+          }
+          assert.equal(fill.levels,used);
+          assert.ok(remaining.isZero() && visible.eq(fill.visible) && impact.eq(fill.slippage));
+          const signedImpact=impact.times(fill.side==='ask'?1:-1);
+          assert.ok(dec(fill.best).plus(signedImpact.div(unit).div(fill.target)).minus(fill.vwap).abs().lt('1e-36'));
+          if (impact.isZero()) assert.ok(dec(fill.vwap).eq(fill.best));
+        }
         assert.ok(test.checkpoints.every(p => dec(p.equity).gt(p.maintenance) && p.free != null));
       }
       assert.ok(dec(cells.h.slice(0,-1)).eq(dec(plan.h).times(100).toDecimalPlaces(cells.h.split('.')[1].length-1)));

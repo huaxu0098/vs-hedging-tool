@@ -38,7 +38,9 @@ cd /Volumes/T9/CodexData/projects/ChatGPT/gpt/projects/vs-hedging-tool && npm st
 NODE_USE_ENV_PROXY=1 HTTPS_PROXY=http://127.0.0.1:7897 NO_PROXY=localhost,127.0.0.1,.vestmarkets.com,.hyperliquid.xyz npm start -- --open
 ```
 
-每个条件目标沿自己的 PF 失败和通过路径核算。Hype 用标记权益检查全仓清算，用盘口成交价计算平仓现金。引擎逐段检查起点、盘中错位、跨越的保证金档位和终点；这些点之间权益与档位内的维持保证金均为线性。路径假设为 PF 向指定边界移动，其他全仓头寸按所录的快照估值。已配置压力时，盘中不利价格幅度取基差与跳价的较大值，再加报价延迟期间的移动。延迟成交的差额成本另走一条路径，资金费每条路径扣一次。仓位明细可查看每条路径维持余量最低处的标记价、权益、维持保证金和带符号的可用抵押余量。资金、初始保证金、全路径清算和压力各自标记；压力缺项或含零时保留未验证。计算时使用合约风险档位的连续维持保证金公式。[Hyperliquid 全仓清算](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/liquidations) · [维持保证金档位](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/margin-tiers)
+仓位明细按各方案的 PF 多空方向分别列出失败和成功路径。同步路径按合约敏感度映射。配置基差幅度且有有效报价币参考汇率后，另列扩大和收敛两个终点，分别计算 PF 与 Hype 的平仓净盈亏、Hype 剩余及个人现金。扩大沿同步终点溢价或折价的方向移动，收敛最多移至平价。每条路径标注对当前 Hype 方向有利或不利。参考汇率仅用于识别基差，Hype 的 USDC 盈亏仍按合约原生价格变动计算。终点盘口沿用快照的可见数量，当前 Bid/Ask 半点差成本、吃多档滑点和成交费分别列出。
+
+全仓清算沿假设路径在每个转折点和档位边界分段。每段的权益和维持保证金均为仿射函数，用二者差额的斜率确定该段最小值，记录最差价格及其路径进度。进度对应价格位置，实际时间未知。已配置的盘中错位、跳价、延迟和资金费按各自情景验算。目标初始保证金随标记价重算，总占用包含已知其他仓位和预留。初始保证金净余量可以为负，此时新增风险仓位的估算可用抵押品为零；清算余量独立按全仓权益减维持保证金计算，到达清算边界按保守条件淘汰。平台可提款额来自独立字段。未建模的其他仓位、无法核实的挂单、压力参数及真实全仓状态按缺项处理。三个条件方案的失败现金均须达到本金加已配置的额外缓冲。[Hyperliquid 保证金规则](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/margining) · [全仓清算](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/liquidations) · [风险档位](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/margin-tiers)
 
 ## 使用当前账户快照计算
 

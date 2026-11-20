@@ -46,6 +46,15 @@ export async function accountSnapshot(user, asset, query, clock = Date.now) {
   const qty = pos?.qty ?? '0';
   const anchor =
     pos && !dec(qty).isZero() && pos.entry ? out(dec(pos.entry).plus(dec(pos.pnl).div(qty))) : null;
+  const cross=result(0).crossMarginSummary;
+  const positionsElsewhere=account.positions.some(p=>p.symbol!==asset && !dec(p.qty).isZero());
+  const targetMargin=marginMode==='cross' && pos ? dec(pos.margin) : dec('0');
+  const reportedUsed=cross?.totalMarginUsed == null ? null : nonnegative(String(cross.totalMarginUsed));
+  // A wallet-wide summary can contain isolated collateral. Never use it as
+  // the cross pool. Orders of any symbol can reserve this pool as well.
+  const knownHolds=!unsupported && !positionsElsewhere && Array.isArray(orders) && !orders.length;
+  const otherHold=knownHolds ? (reportedUsed==null ? '0' :
+    reportedUsed.gte(targetMargin) ? out(reportedUsed.minus(targetMargin)) : null) : null;
   return {
     source: 'Hype 主网 API',
     at: account.occurredAt,
@@ -56,25 +65,17 @@ export async function accountSnapshot(user, asset, query, clock = Date.now) {
     leverageAt: validCap ? requested.activeAssetData : account.occurredAt,
     marginModeAt: validCap ? requested.activeAssetData : account.occurredAt,
     receivedAt,
-    equity: unsupported ? null : account.equity,
+    equity: unsupported || cross?.accountValue==null ? null : out(dec(String(cross.accountValue))),
     rawEquity: account.equity,
     qty,
     anchor,
     orders: mapped,
     mode,
-    crossPoolVerified:
-      result(0).crossMarginSummary?.accountValue != null &&
-      dec(String(result(0).crossMarginSummary.accountValue)).eq(account.equity),
+    crossPoolVerified: !unsupported && cross?.accountValue!=null,
     unsupported,
     marginMode,
-    otherPositions: account.positions.some((p) => p.symbol !== asset && !dec(p.qty).isZero()),
-    otherHold:
-      !unsupported &&
-      account.positions.every((p) => p.symbol === asset || dec(p.qty).isZero()) &&
-      Array.isArray(orders) &&
-      !orders.length
-        ? '0'
-        : null,
+    otherPositions:positionsElsewhere,
+    otherHold,
     liquidation: pos?.liquidation ?? null,
     directionalFree:
       validCap && Array.isArray(cap.availableToTrade) && cap.availableToTrade.length === 2
@@ -89,7 +90,7 @@ export async function accountSnapshot(user, asset, query, clock = Date.now) {
       result(0).crossMaintenanceMarginUsed == null
         ? null
         : out(nonnegative(String(result(0).crossMaintenanceMarginUsed))),
-    used: account.used,
+    used: reportedUsed==null ? null : out(reportedUsed),
     withdrawable: account.withdrawable
   };
 }

@@ -1,7 +1,7 @@
 import { adjustmentAfterOrders } from './order-adjustment.js';
 import { sumPostings, settlementBridge, settlementTolerance } from './settlement-ledger.js';
 import { executionDetail } from './solver.js';
-import { dec, out } from './math.js';
+import { dec, out, fillEvidence, min } from './math.js';
 import { exactRatio, adjacentScale, inspectRatio, ratioSlice, scalesPerBlock, lastLotAtRatio } from './ratio-scan.js';
 
 export const pointKey = ({sign, i, j}) => [sign, i, j].join('/');
@@ -84,6 +84,13 @@ function adjustment(ledger, pending) {
   return { current, pending:pending ?? null, ...adjustmentAfterOrders(ledger.adjustment, pending) };
 }
 
+function settleHypeAt(leg, entry, shift, extraDebit) {
+  const exit=executionDetail(leg,out(dec(entry.target).neg()),shift);
+  return settlementBridge(entry.start,leg,entry.target,entry.adjustment,shift,
+    {price:entry.entryPrice,fee:entry.entryFee,impact:entry.entrySlippage},exit,
+    sumPostings([entry.friction,extraDebit]));
+}
+
 // Use the candidate's two signed settlement ledgers. Only the Hype exit is
 // repriced under a Hype shock; PF still closes at its own rule boundary.
 function endpoint(ctx, row, key) {
@@ -94,10 +101,7 @@ function endpoint(ctx, row, key) {
   if (row.stress) {
     if (!leg.factor || !row.lines) return null; // A legacy saved report may lack the native book.
     const shift = out(dec(row.lines[key]).plus(dec(row.stress.priceShock).div(leg.factor)));
-    const exit = executionDetail(leg, out(dec(hl.target).neg()), shift);
-    const friction = sumPostings([hl.friction, row.stress.delayDebit, row.stress.fundingDebit]);
-    hl = settlementBridge(hl.start, leg, hl.target, hl.adjustment, shift,
-      {price:hl.entryPrice, fee:hl.entryFee, impact:hl.entrySlippage}, exit, friction);
+    hl = settleHypeAt(leg,hl,shift,sumPostings([row.stress.delayDebit,row.stress.fundingDebit]));
   }
   const compact = ledger => ({
     exitMark:ledger.exitMark, exitPrice:ledger.exitPrice,
@@ -113,6 +117,36 @@ function endpoint(ctx, row, key) {
   return { pf:compact(pf), hl:compact(hl), hypeNet:out(dec(hl.settled).minus(hl.start)) };
 }
 
+// Value each mapped exit independently using the same signed entry and the
+// snapshot's translated close book. A prefix before a delayed fill has no exit.
+function pathEvidence(ctx,row,key) {
+  const cases=row.pathAudit?.[key], ledgers=row.paths?.[key];
+  if (!cases || !ledgers) return cases;
+  const leg=ctx.market.hl, pf=ledgers.pf, hl=ledgers.hl;
+  return Object.fromEntries(Object.entries(cases).map(([name,test])=>{
+    if (test.shift == null || test.status!=='pass' || test.proof?.continuous!==true ||
+        (cases.base.pfStatus && cases.base.pfStatus!=='pass') || row.verification.initial!=='pass' ||
+        cases.beforeFill?.status==='fail' && name==='delayedFill') return [name,test];
+    const nativeMove=out(dec(test.shift).times(leg.factor));
+    const fill=fillEvidence(out(dec(hl.target).neg()),leg,nativeMove);
+    if (!['covered','noTrade'].includes(fill.status)) return [name,{...test,settlementIssue:'平仓深度未验证'}];
+    const ledger=settleHypeAt(leg,hl,test.shift,test.debit??'0');
+    return [name,{...test, settlement:{pfMark:pf.exitMark,hlMark:ledger.exitMark,pfFill:pf.exitPrice,hlFill:ledger.exitPrice,
+      pfNet:out(dec(pf.settled).minus(pf.start)),hlNet:out(dec(ledger.settled).minus(ledger.start)),
+      hype:ledger.settled,personal:sumPostings([ledger.settled,ctx.book.external]),exitDepth:fill}}];
+  }));
+}
+function orderEvidence(ctx,row,key) {
+  const ledgers=row.paths?.[key];
+  if (!ledgers || !ctx.market.pf.bids || !row.lines) return null;
+  const fills={};
+  for (const side of ['pf','hl']) {
+    const leg=ctx.market[side], ledger=ledgers[side];
+    const native=dec(row.lines[key]).times(leg.factor).plus(side==='hl' ? row.stress?.priceShock??'0' : '0');
+    fills[side]={entry:fillEvidence(ledger.adjustment,leg),exit:fillEvidence(out(dec(ledger.target).neg()),leg,out(native))};
+  }
+  return fills;
+}
 function costs(path) {
   return path && {fees:sumPostings([path.pf.fees, path.hl.fees]),
     slippage:sumPostings([path.pf.slippage, path.hl.slippage])};
@@ -125,6 +159,7 @@ export function planRecord(scan, point) {
 
 export function recordFromInspection(ctx, row) {
   const { sign, i, j } = row;
+  const pathAudit={fail:pathEvidence(ctx,row,'fail'),pass:pathEvidence(ctx,row,'pass')};
   const paths = {fail:endpoint(ctx,row,'fail'), pass:endpoint(ctx,row,'pass')};
   return {
     sign, i, j, key: pointKey(row), h: row.h,
@@ -140,7 +175,15 @@ export function recordFromInspection(ctx, row) {
     successPersonal: row.passStop ? null : row.successPersonal,
     successDelta: row.passStop ? null : out(dec(row.successPersonal).minus(ctx.book.B)),
     failStop: row.failStop, passStop: row.passStop,
-    pathAudit:row.pathAudit, verification:row.verification,
+    pathAudit, verification:row.verification,
+    depth:{fail:orderEvidence(ctx,row,'fail'),pass:orderEvidence(ctx,row,'pass')},
+    coverage: ctx.checks?.fullStress && row.crossChecked &&
+      Object.values(pathAudit).every(group=>group?.basisWiden && group?.basisNarrow &&
+        Object.values(group).every(test=>test.status==='pass' && test.proof?.continuous &&
+          (test.shift==null || test.settlement!=null))) ? 'verified' : 'conditional',
+    minimumHeadroom: Object.values(pathAudit).flatMap(group=>Object.values(group??{}))
+      .map(test=>test.lowestFree?.free).filter(v=>v!=null)
+      .reduce((low,v)=>low==null?v:out(min(low,v)),null),
     paths, failCost:costs(paths.fail), passCost:costs(paths.pass),
     adjustments:{pf:adjustment(row.paths?.fail.pf, ctx.market.pf.pendingQty),
       hl:adjustment(row.paths?.fail.hl, ctx.market.hl.pendingQty)},

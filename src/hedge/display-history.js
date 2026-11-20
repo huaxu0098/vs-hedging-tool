@@ -102,10 +102,10 @@ export function displayHistory(storage) {
       previousKey = scope;
       previous = null;
       try {
-        const saved = JSON.parse(storage.getItem(key(scope)) ?? storage.getItem(key(scope,'AUTO-0.21.1')));
+        const saved = JSON.parse(storage.getItem(key(scope)) ?? storage.getItem(key(scope,'AUTO-0.21.2')) ?? storage.getItem(key(scope,'AUTO-0.21.1')));
         if (
           saved?.scope === scope &&
-          [modelVersion,'AUTO-0.21.1'].includes(saved.view?.trace?.model) &&
+          [modelVersion,'AUTO-0.21.2','AUTO-0.21.1'].includes(saved.view?.trace?.model) &&
           saved.view.ratioScan?.complete &&
           Array.isArray(saved.view.ratioScan.buckets) &&
           saved.view.ratioScan.ctx?.market?.pf &&

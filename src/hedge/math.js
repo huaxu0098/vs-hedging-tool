@@ -221,23 +221,54 @@ export function normalizeExposure(q, spec) {
   if (spec.type !== 'linear' || spec.mappingVerified !== true) throw Error('UNSUPPORTED_INSTRUMENT');
   return out(dec(q).times(positive(spec.multiplier)).times(positive(spec.fx)).times(positive(spec.factor)));
 }
+function walkDepth(qty, quotes, detailed) {
+  const levels = qty.gt(0) ? quotes.asks : quotes.bids;
+  let left = qty.abs(), notional = new D(0), visible = new D(0), used = 0, previous = null;
+  for (const [price,size] of levels ?? []) {
+    const px = positive(price), available = positive(size);
+    if (previous && (qty.gt(0) ? px.lt(previous) : px.gt(previous))) throw Error('盘口档位无序');
+    previous = px;
+    if (detailed) visible = visible.plus(available);
+    if (left.isZero()) continue;
+    const take = min(left,available);
+    notional = notional.plus(take.times(px));
+    left = left.minus(take);
+    used++;
+    if (left.isZero() && !detailed) break;
+  }
+  return {left,notional,used,visible};
+}
 export function estimateFill(q, quotes, multiplier = '1') {
   const qty = dec(q);
   if (qty.isZero()) return null;
-  let left = qty.abs(),
-    value = new D(0),
-    previous = null;
-  const levels = qty.gt(0) ? quotes.asks : quotes.bids;
-  for (const [price, size] of levels ?? []) {
-    const px = positive(price),
-      available = positive(size);
-    if (previous && (qty.gt(0) ? px.lt(previous) : px.gt(previous))) throw Error('盘口档位无序');
-    previous = px;
-    const take = min(left, available);
-    value = value.plus(take.times(px));
-    left = left.minus(take);
-    if (left.isZero()) break;
-  }
+  const {left,notional} = walkDepth(qty,quotes,false);
   if (!left.isZero()) throw Error('INSUFFICIENT_DEPTH');
-  return { price: out(value.div(qty.abs())), notional: out(value.times(positive(multiplier))) };
+  return {price:out(notional.div(qty.abs())),notional:out(notional.times(positive(multiplier)))};
+}
+
+// Same book walk as execution. A partial book cannot price the full order.
+export function fillEvidence(q, leg, displacement = '0') {
+  const qty = dec(q), target = qty.abs(), buy = qty.gt(0);
+  const result = {status:'unknown',target:out(target),side:buy?'ask':'bid',visible:null,covered:null,
+    uncovered:null,levels:null,topSize:null,best:null,vwap:null,slippage:null,spreadCost:null};
+  if (qty.isZero()) return {...result,status:'noTrade',covered:'0',uncovered:'0',levels:0};
+  const side = buy ? leg.asks : leg.bids;
+  if (!Array.isArray(side)) return result;
+  if (!side.length) return {...result,status:'insufficient',visible:'0',covered:'0',uncovered:out(target),levels:0};
+  let book;
+  try { book=walkDepth(qty,leg,true); } catch { return result; }
+  const {left,notional,used,visible}=book;
+  const shift = dec(displacement), best = dec(side[0][0]);
+  Object.assign(result,{visible:out(visible),covered:out(target.minus(left)),uncovered:out(left),
+    levels:used,topSize:side[0][1],best:out(best.plus(shift))});
+  if (left.gt(0)) return {...result,status:'insufficient'};
+  const bid=leg.bids?.[0]?.[0], ask=leg.asks?.[0]?.[0];
+  if (bid==null || ask==null) return result;
+  try {
+    if (positive(bid).gt(positive(ask)) || dec(bid).plus(shift).lte(0)) return result;
+  } catch { return result; }
+  const unit=positive(leg.multiplier).times(positive(leg.fx));
+  return {...result,status:'covered',vwap:out(notional.div(target).plus(shift)),
+    slippage:out(notional.minus(target.times(best)).abs().times(unit)),
+    spreadCost:out(dec(ask).minus(bid).div(2).times(target).times(unit))};
 }

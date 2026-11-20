@@ -16,9 +16,9 @@ import { MarketRevaluation } from '../src/hedge/scan-refresh.js';
 import { sumPostings, presentLedger, reconcilePostings } from '../src/hedge/settlement-ledger.js';
 import { calculateCurrent, rules, splitReserves } from '../src/hedge/current.js';
 import { solveAuto, compareAuto, compareConservative } from '../src/hedge/auto.js';
-import { demoMarket, evaluateCandidate, profileInputs } from '../src/hedge/solver.js';
+import { demoMarket, evaluateCandidate, profileInputs, validateMargin } from '../src/hedge/solver.js';
 import { createBook } from '../src/hedge/book.js';
-import { dec, out, min } from '../src/hedge/math.js';
+import { dec, out, min, fillEvidence } from '../src/hedge/math.js';
 const at = '2026-11-19T12:00:00Z',
   t = Date.parse(at);
 const inputs = {
@@ -743,7 +743,7 @@ test('OPT02 搜索范围记录双边方向、步长和数量上限，预算中�
   const partial = calculateCurrent(inputs, f.a, f.m, {}, t, { searchBudget: 1 });
   assert.equal(partial.search.complete, false);
   assert.ok(!partial.maximum?.complete);
-  assert.equal(full.trace.model, 'AUTO-0.21.2');
+  assert.equal(full.trace.model, 'AUTO-0.21.3');
 });
 test('OPT03 PF 虚拟保证金、目标 Hype 初始、其他占用及调仓后真实可用分别核验', () => {
   const f = fixture();
@@ -2215,10 +2215,12 @@ test('完整路径：三方案保留各自的双向检验；未配置压力只�
       assert.equal(path.checkpoints[0].mark,scan.ctx.market.hl.mark);
       assert.equal(path.checkpoints.at(-1).mark,r.paths[name].hl.exitMark);
       assert.equal(path.checkpoints[0].free,r.free);
-      assert.ok(path.checkpoints.length>=3);
-      const [start,middle,next] = path.checkpoints;
-      for (const field of ['mark','equity','maintenance','free'])
-        assert.ok(dec(middle[field]).minus(dec(start[field]).plus(next[field]).div(2)).abs().lt('1e-39'));
+      assert.equal(path.proof.continuous,true);
+      for (const seg of path.proof.segments) {
+        const start=path.checkpoints.find(x=>x.mark===seg.from), end=path.checkpoints.find(x=>x.mark===seg.to);
+        assert.ok(dec(end.surplus).minus(start.surplus).minus(dec(seg.slope).times(dec(seg.to).minus(seg.from))).abs().lt('1e-39'));
+        assert.ok(dec(seg.minimum).eq(min(start.surplus,end.surplus)));
+      }
     }
   }
 });
@@ -2239,4 +2241,111 @@ test('完整路径：PF 空、Hype 多，跌破长仓清算界后反弹也不得
   assert.ok(dec(path.checkpoints.at(-1).surplus).gt(0));
   assert.equal(planRecord(scan,target).success,null);
   assert.ok(!ratioSlice(scan,-1,10,'both').some(([lo,hi])=>lo<=4 && hi>=4));
+});
+
+test('全仓六项指标：终点按新名义额重算，抵押缺口与清算线独立', () => {
+  const m=demoMarket('unit'), book=createBook({id:'margin',mode:'demo',time:at});
+  Object.assign(m.hl,{mark:'100',asks:[['100','20']],bids:[['100','20']],rate:'0',leverage:'3',
+    tiers:[{from:'0',mmr:'0.0125',deduction:'0'}],hold:'0',otherMaintenance:'0'});
+  book.hl='470.47';
+  const run=(openFree)=>validateMargin(book,m,'hl','-10',['0','36.998'],undefined,'0',{openFree}).at(-1);
+  const test=run(out(dec(book.hl).minus(dec('1000').div(3))));
+  const w=test.worst;
+  assert.equal(w.mark,'136.998');
+  assert.equal(w.equity,'100.49');
+  assert.equal(w.initial,'456.66');
+  assert.equal(w.marginUsed,'456.66');
+  assert.equal(w.freeCollateral,'0');
+  assert.equal(w.initialHeadroom,'-356.17');
+  assert.equal(dec(w.maintenance).toFixed(2),'17.12');
+  assert.equal(dec(w.surplus).toFixed(2),'83.37');
+  assert.equal(test.firstBreach,null);
+  // A separate known reservation consumes IM; a directional limit can bind even earlier.
+  Object.assign(m.hl,{hold:'12',otherMaintenance:'2'});
+  const reserved=run('100').worst;
+  assert.equal(reserved.marginUsed,'468.66');
+  assert.equal(reserved.maintenance, out(dec(w.maintenance).plus(2)));
+  assert.equal(reserved.initialHeadroom,'-368.17');
+  assert.ok(dec(reserved.free).lt(reserved.initialHeadroom));
+});
+test('盘口证据：双向 VWAP、首档零滑点、部分覆盖和缺盘口各自可核对', () => {
+  const l={multiplier:'2',fx:'1',bids:[['99','2'],['98','3']],asks:[['101','1'],['103','2']]};
+  const top=fillEvidence('-2',l);
+  assert.equal(top.vwap,'99'); assert.equal(top.visible,'5'); assert.equal(top.slippage,'0');
+  const buy=fillEvidence('3',l,'10');
+  assert.equal(buy.covered,'3'); assert.equal(buy.uncovered,'0'); assert.equal(buy.levels,2);
+  assert.equal(buy.vwap,out(dec('307').div(3).plus(10)));
+  assert.equal(buy.spreadCost,'6'); assert.equal(buy.slippage,'8');
+  const sell=fillEvidence('-5',l);
+  assert.equal(sell.vwap,'98.4'); assert.equal(sell.slippage,'6');
+  const partial=fillEvidence('4',l);
+  assert.equal(partial.status,'insufficient'); assert.equal(partial.covered,'3');
+  assert.equal(partial.uncovered,'1'); assert.equal(partial.vwap,null); assert.equal(partial.slippage,null);
+  assert.equal(fillEvidence('1',{...l,asks:undefined}).status,'unknown');
+  assert.equal(fillEvidence('1',{...l,asks:[]}).uncovered,'1');
+  assert.equal(fillEvidence('1',{...l,asks:[['NaN','3']]}).slippage,null);
+});
+test('基差扩大与收敛：双向 PF 路径按各自原生终点重算现金与费用', () => {
+  for (const mark of ['98','102']) {
+    const f=fixture();
+    Object.assign(f.m.hl,{mark,levels:[[[mark,'30']],[[mark,'30']]]});
+    const scan=scanFixture({adverseBps:'50',pfFee:'0.0001',hlFee:'0.0005'},f).ratioScan;
+    for (const sign of [1,-1]) {
+      const row=planRecord(scan,{sign,i:10,j:2});
+      for (const end of ['fail','pass']) {
+        const {base,basisWiden:w,basisNarrow:n}=row.pathAudit[end];
+        assert.ok(dec(w.gapAfter).abs().gt(dec(w.gapBefore).abs()));
+        assert.ok(dec(n.gapAfter).abs().lt(dec(n.gapBefore).abs()));
+        assert.notEqual(w.adverse,n.adverse);
+        for (const p of [w,n]) {
+          const z=p.settlement,b=base.settlement;
+          assert.equal(z.pfNet,b.pfNet);
+          assert.equal(dec(z.pfMark).cmp('100'),end==='pass'?sign:-sign);
+          const move=dec(z.hlMark).minus(b.hlMark);
+          assert.ok(move.eq(p.offset));
+          const change=move.times(row.hl).minus(move.times(dec(row.hl).abs()).times('0.0005'));
+          assert.ok(dec(z.hype).minus(b.hype).minus(change).abs().lt('1e-39'));
+          assert.equal(z.personal,z.hype);
+        }
+      }
+    }
+  }
+});
+test('解析区间：跨档往返的最差点、抵押品和不可证明的断档',()=>{
+  const m=demoMarket('unit'), book=createBook({id:'tiers',mode:'demo',time:at});
+  Object.assign(m.hl,{mark:'100',rate:'0',asks:[['100','25']],bids:[['100','25']],leverage:'4',
+    tiers:[{from:'0',mmr:'0.05',deduction:'0'},{from:'450',mmr:'0.1',deduction:'22.5'}]});
+  book.hl='120';
+  const run=()=>validateMargin(book,m,'hl','-4',['0','18','9'],undefined,'0',{openFree:'20'}).at(-1);
+  const audit=run();
+  assert.equal(audit.proof.intervals,4);
+  assert.equal(audit.worst.mark,'118'); assert.equal(audit.worst.legIndex,1);
+  for (const seg of audit.proof.segments) {
+    for(let i=0;i<=100;i++) {
+      const mark=dec(seg.from).plus(dec(seg.to).minus(seg.from).times(i).div(100)),n=mark.times(4);
+      const mm=n.lt(450)?n.times('0.05'):n.times('0.1').minus('22.5');
+      assert.ok(dec('120').minus(mark.minus(100).times(4)).minus(mm).gte(seg.minimum));
+    }
+  }
+  m.hl.tiers[1].deduction='10';
+  assert.equal(run().status,'unknown');
+});
+
+test('全仓账户只使用独立抵押池；其他挂单未知时不假设零占用',async()=>{
+  const {accountSnapshot}=await import('../src/hedge/current-account.js');
+  const user='0x'+'1'.repeat(40);
+  const raw={time:t,marginSummary:{accountValue:'900',totalMarginUsed:'67'},
+    crossMarginSummary:{accountValue:'120',totalMarginUsed:'17'},withdrawable:'37',assetPositions:[]};
+  const input={clearinghouseState:raw,userAbstraction:'standard',frontendOpenOrders:[],
+    activeAssetData:{coin:'BTC',user,leverage:{type:'cross',value:10},availableToTrade:['103','102']}};
+  const read=()=>accountSnapshot(user,'BTC',async({type})=>input[type],()=>t);
+  const account=await read();
+  assert.equal(account.equity,'120');
+  assert.equal(account.used,'17');
+  assert.equal(account.otherHold,'17');
+  assert.equal(account.withdrawable,'37');
+  input.frontendOpenOrders=[{coin:'ETH',side:'B',oid:'4',sz:'1'}];
+  assert.equal((await read()).otherHold,null);
+  delete raw.crossMarginSummary;
+  assert.equal((await read()).equity,null);
 });

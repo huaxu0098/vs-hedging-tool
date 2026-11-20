@@ -219,11 +219,23 @@ export function maintenance(l, nominal) {
   }
   return chosen ? max(0, nominal.times(ratio(chosen.mmr)).minus(nonnegative(chosen.deduction))) : null;
 }
+// Tier deductions make adjacent affine maintenance lines continuous. The
+// scanner can use their upper envelope only for a convex continuous schedule.
+export function continuousTiers(tiers) {
+  return Array.isArray(tiers) && tiers.length>0 && tiers.every((tier,i,all)=>
+    dec(tier.mmr).gte(0) && dec(tier.mmr).lt(1) && (i===0
+      ? dec(tier.from).isZero() && dec(tier.deduction).isZero()
+      : dec(tier.from).gt(all[i-1].from) && dec(tier.mmr).gte(all[i-1].mmr) &&
+        dec(tier.deduction).minus(all[i-1].deduction)
+          .minus(dec(tier.from).times(dec(tier.mmr).minus(all[i-1].mmr))).abs().lte('1e-30')));
+}
 export function validateMargin(s, m, v, q, shifts, catalog = { [m.id]: m }, funding = '0', audit = null) {
   const l = m[v],
     unknown = () => [constraint('MARGIN_UNVERIFIED', null, '0', 'U', 'missing')];
   if (!l.leverage || !l.tiers?.length || l.hold == null || l.marginMode !== 'cross' || !l.pool)
     return unknown();
+  const continuous=continuousTiers(l.tiers);
+  if (!continuous && !audit) return unknown();
   let otherInitial = nonnegative(l.hold),
     otherMaint = nonnegative(l.otherMaintenance ?? l.hold);
   for (const p of Object.values(s.positions)) {
@@ -253,24 +265,21 @@ export function validateMargin(s, m, v, q, shifts, catalog = { [m.id]: m }, fund
   // the entire ordered segment, including any reversal to the closing mark.
   const marks = shifts.map(shift => sourcePrice(l, shift));
   const knots = nominal.isZero() ? [] : l.tiers.slice(1).map(t => dec(t.from).div(nominal));
-  const boundaries = [];
-  for (const mark of marks) {
-    const previous = boundaries.at(-1);
-    if (previous?.eq(mark)) continue;
-    if (previous) {
-      const interior = knots.filter(k => k.gt(min(previous,mark)) && k.lt(max(previous,mark)));
-      boundaries.push(...(previous.lt(mark) ? interior : interior.reverse()));
-    }
-    boundaries.push(mark);
+  // Ordered affine intervals: a turning point or risk-tier crossing ends
+  // the interval. There is no sampling grid or assumption about elapsed time.
+  const boundaries = [{mark:marks[0],legIndex:0,progress:'0'}];
+  for (let i=1;i<marks.length;i++) {
+    const start=marks[i-1],end=marks[i];
+    if (start.eq(end)) continue;
+    const interior=knots.filter(k=>k.gt(min(start,end)) && k.lt(max(start,end)));
+    const stops=start.lt(end) ? interior : interior.reverse();
+    for (const mark of [...stops,end]) boundaries.push({mark,legIndex:i,progress:out(mark.minus(start).div(end.minus(start)))});
   }
-  // Report an interior valuation on each affine interval as well as its exact
-  // extrema. No sampling resolution is used to decide whether a path passes.
-  const points = audit ? boundaries.flatMap((mark,index) => index
-    ? [boundaries[index-1].plus(mark).div(2),mark] : [mark]) : boundaries;
+  const points = boundaries;
   let worst = null, worstEquity = null, worstMaintenance = null;
   const checkpoints = [];
   const reference = v === 'hl' && dec(q).eq(qty(pos(s,m,v))) ? l.currentLiquidation : null;
-  for (const mark of points) {
+  for (const {mark,legIndex,progress} of points) {
     if (mark.lte(0)) throw Error('INVALID_PRICE_ENDPOINT');
     const mm = maintenance(l, nominal.times(mark));
     if (mm === null) return unknown();
@@ -283,11 +292,18 @@ export function validateMargin(s, m, v, q, shifts, catalog = { [m.id]: m }, fund
       worstEquity = equity;
     }
     if (audit) {
-      const marginChange = nominal.times(mark.minus(l.mark)).div(l.leverage);
-      const free = audit.openFree == null ? null : dec(audit.openFree).plus(equity.minus(startEquity))
-        .minus(marginChange);
-      checkpoints.push({mark:out(mark), equity:out(equity), maintenance:out(required),
-        free:free === null ? null : out(free), surplus:out(excess)});
+      const targetIM=nominal.times(mark).div(l.leverage);
+      const used=targetIM.plus(otherInitial);
+      const headroom=equity.minus(used);
+      // The observed directional capacity can be tighter than the model pool.
+      // It is a separate limit, never an additional debit to marked equity.
+      const limit=audit.openFree == null ? null : dec(audit.openFree).plus(equity.minus(startEquity))
+        .minus(nominal.times(mark.minus(l.mark)).div(l.leverage));
+      const free=limit == null ? null : min(limit,headroom);
+      checkpoints.push({mark:out(mark),legIndex,progress,equity:out(equity),initial:out(targetIM),
+        otherUsed:out(otherInitial),marginUsed:out(used),maintenance:out(required),surplus:out(excess),
+        initialHeadroom:out(headroom),free:free===null?null:out(free),
+        freeCollateral:free===null?null:out(max(0,free))});
     }
   }
   const path = constraint(v + '_MAINTENANCE_PATH', out(worst), '0', 'U');
@@ -296,6 +312,23 @@ export function validateMargin(s, m, v, q, shifts, catalog = { [m.id]: m }, fund
   if (!dec(q).isZero() && worst.lte('1e-36')) path.status = 'fail';
   if (audit) {
     path.checkpoints = checkpoints;
+    path.worst = checkpoints.reduce((a,b)=>dec(b.surplus).lt(a.surplus)?b:a);
+    path.lowestFree = checkpoints.filter(p=>p.free!=null)
+      .reduce((a,b)=>!a || dec(b.free).lt(a.free)?b:a,null);
+    // The tier deductions of continuous schedules exactly match the marginal
+    // rates at each knot. Reject unsupported schedules instead of certifying
+    // them from endpoint values.
+    // Within each interval d(buffer)/d(mark) = signed sensitivity −
+    // absolute sensitivity × MMR. The sign of this slope picks the minimum.
+    const intervals=checkpoints.slice(1).map((end,i)=>{
+      const start=checkpoints[i], midpoint=dec(start.mark).plus(end.mark).div(2);
+      const tier=l.tiers.findLast(t=>nominal.times(midpoint).gte(t.from));
+      const slope=signed.minus(nominal.times(tier.mmr));
+      const minimum=slope.times(dec(end.mark).minus(start.mark)).lt(0) ? end : start;
+      return {from:start.mark,to:end.mark,tierFrom:tier.from,slope:out(slope),minimumMark:minimum.mark,minimum:minimum.surplus};
+    });
+    path.proof={method:'piecewise-affine',intervals:intervals.length,segments:intervals,continuous};
+    if (!continuous && path.status==='pass') path.status='unknown';
     path.firstBreach = null;
     for (const [index, point] of checkpoints.entries()) {
       const previous = checkpoints[index - 1];
