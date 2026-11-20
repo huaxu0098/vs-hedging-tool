@@ -145,7 +145,7 @@ try {
   for (const f of frames) {
     assert.ok(f.status.includes('最近成功计算'));
     assert.equal(f.rows.length, f.bins.length);
-    assert.deepEqual(f.cash, [cash(f.rep.fail), cash(f.rep.success)]);
+    assert.deepEqual(f.cash, [cash(f.plans[0].fail), cash(f.plans[0].success)]);
     assert.equal(f.shown.length, f.plans.length);
     if(f.status.includes('当前数据有效')) assert.deepEqual(f.bookTimes,f.clocks);
     assert.ok(f.plans.some(r=>r.labels.includes('最大 PF 仓位')));
@@ -164,6 +164,17 @@ try {
         assert.equal(dec(path.hl.exitMark).cmp(f.hlMark),expectedSign);
         for(const [venue,symbol] of [['pf','PF'],['hl','Hype']])
           assert.ok(shown.includes(symbol+(expectedSign>0?' ↑ ':' ↓ ')+dec(path[venue].exitMark).toFixed(2)));
+        for (const [venue,label] of [['pf','PF'],['hl','Hype']]) {
+          const l=path[venue], spec=f.books[venue], start=venue==='pf'?f.pfMark:f.hlMark;
+          assert.equal(l.mark,start);
+          assert.equal(l.target,plan[venue]);
+          const move=dec(plan[venue]).times(spec.multiplier).times(spec.fx).times(dec(l.exitMark).minus(start));
+          assert.ok(move.minus(l.markPnl).abs().lt('1e-36'));
+          const final=dec(l.startEquity).plus(move).plus(l.fillPnl).minus(l.entryFee).minus(l.closeFee).minus(l.friction);
+          assert.ok(final.minus(l.finalEquity).abs().lt('1e-36'));
+          assert.ok(shown.includes(label+' '+quantity(plan[venue])+' × 乘数 '+l.multiplier+
+            ' · 标记价格盈亏 '+delta(l.markPnl)));
+        }
         assert.ok(shown.includes('Hype 净盈亏 '+delta(path.hypeNet)));
         assert.ok(shown.includes('手续费 PF '+cash(path.pf.fees)+' / Hype '+cash(path.hl.fees)));
       }
@@ -264,6 +275,21 @@ try {
     assert.ok(f.joint.counts.every(([key,n]) => key==='joint' || n===0));
     assert.ok(f.joint.minCount>0 && f.joint.maxCount>0);
   }
+  await b.click('[aria-controls="desk-details"]');
+  await run(`(() => {
+    document.getElementById('audit-details').open=true;
+    document.getElementById('scan-detail').open=true;
+  })()`);
+  await wait(`(() => {
+    const desk=document.getElementById('scan-desk'), frame=window.scanTest.results[desk.dataset.resultId];
+    if (!frame?.plans[0]) return false;
+    const text=document.getElementById('scan-audit').textContent;
+    const p=frame.plans[0];
+    return text.includes('PF 有符号目标 '+p.pf+' / Hype '+p.hl+' · 源快照 '+frame.id)
+      && ['fail','pass'].every(end=>text.includes(Number(p.paths[end].pf.exitMark).toFixed(5)));
+  })()`,15000);
+  evidence.advancedFocusVerified=true;
+  await b.click('[aria-controls="live-view"]');
   await b.click('#scale-link');
   assert.ok(await run("document.getElementById('positions-view').open && !document.getElementById('desk-details').open && !document.getElementById('live-view').open"));
   const comparison = await run(`(() => {

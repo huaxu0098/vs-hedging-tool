@@ -14,7 +14,7 @@ import {
   profitSplit
 } from './math.js';
 import { verifyFundingPair } from './funding-formula.js';
-import { settlementBridge, sumPostings } from './settlement-ledger.js';
+import { settlementBridge, sumPostings, checkPFBoundary } from './settlement-ledger.js';
 import { balances, markEquity } from './book.js';
 
 const leg = (name, unit, mark, multiplier, step, fee, underlying) => ({
@@ -344,7 +344,10 @@ export function validateMargin(s, m, v, q, shifts, catalog = { [m.id]: m }, fund
       if (roots.length) {
         const from = previous?.mark ?? point.mark;
         const first = roots.sort((a,b) => a.minus(from).abs().cmp(b.minus(from).abs()))[0];
-        path.firstBreach = {mark:out(first), segment:index};
+        const triggerEquity=startEquity.plus(signed.times(first.minus(l.mark))).minus(funding);
+        const required=maintenance(l,nominal.times(first)).plus(otherMaint);
+        path.firstBreach = {mark:out(first), segment:index, equity:out(triggerEquity),
+          maintenance:out(required), settlement:null};
         path.status = 'fail';
         break;
       }
@@ -509,6 +512,14 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
           hlDeltaQuantity: out(h.minus(qty(pos(s, m, 'hl'))))
         })
       : null;
+  if (paths) {
+    checkPFBoundary(paths.fail.pf,pfQty,'fail',p.floor,options.failureTrigger);
+    checkPFBoundary(paths.pass.pf,pfQty,'pass',p.target,options.passTrigger);
+    for (const {hl} of Object.values(paths)) {
+      const move = h.times(value(m.hl)).times(dec(hl.exitMark).minus(m.hl.mark));
+      if (!h.eq(hl.target) || !move.eq(hl.move)) throw Error('Hype 方向与标记盈亏不一致');
+    }
+  }
   const personal = balances(s, { [m.id]: m.hl.mark });
   const payout =
     p.stage === 'funded'

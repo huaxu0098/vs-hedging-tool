@@ -91,7 +91,7 @@ function auditText() {
   const { row, scan } = audit;
   const lines = [
     ...executionComparison(scan, row),
-    '源快照 ' + audit.snapshotId + ' · 分成到账前计入 Hype 权益 0 U',
+    'PF 有符号目标 ' + row.pf + ' / Hype ' + row.hl + ' · 源快照 ' + audit.snapshotId + ' · 分成到账前计入 Hype 权益 0 U',
     '建议档位 ' + (row.lev ?? '空仓') + ' · 初始占用 ' + usd(row.initial) + ' · 开仓后可用 ' + usd(row.free),
     'Hype 压力后维持余量 ' + (row.stress ? usd(row.surplus) : '未配置，基础情景 ' + usd(row.surplus)),
     '若实际到账则个人分成 ' +
@@ -104,9 +104,9 @@ function auditText() {
     ['pass', '成功']
   ]) {
     const stop = key === 'fail' ? row.failStop : row.passStop;
-    if (stop) lines.push(title + '路径 · ' + stop + '，以下目标价流水仅用于核对公式，实际清算现金未知');
+    if (stop) { lines.push(title + '路径 · ' + stop); continue; }
     for (const venue of ['pf', 'hl']) {
-      const l = row.paths?.[key]?.[venue];
+      const l = (row.settlementPaths ?? row.paths)?.[key]?.[venue];
       if (!l) continue;
       const view = presentLedger(l);
       lines.push(
@@ -140,11 +140,10 @@ function auditText() {
 }
 function showRepresentative(snapshot, auditScan) {
   const { ratioScan:scan, targets:[maximum], stress } = snapshot;
-  const { row, objective, group, buffer, complete } = scan.representative;
+  const { objective, group, buffer, complete } = scan.representative;
+  const row = scan.plans?.focus ?? scan.representative.row;
   const { book, params } = scan.ctx;
-  // The overview always describes one of the three displayed targets (the
-  // maximum when available). Advanced diagnostics can retain a different
-  // preference-selected witness and its own cash ledger.
+  // Prices, cash and advanced postings follow the same signed target.
   const target = maximum ?? row;
   const diagnostic = !maximum && objective === 'diagnostic';
   write('scan-representative', maximum ? '最大 PF 目标仓位 · ' + pct(target.h) :
@@ -155,20 +154,20 @@ function showRepresentative(snapshot, auditScan) {
     '） · Hype ' + (target.j === 0 ? '空仓 ' : target.sign > 0 ? '空 ' : '多 ') + usd(target.hypeValue) +
     '（' + dec(target.hl).abs() + ' ' + unit('hl') + '）' +
     (diagnostic ? ' · ' + (names[group] ?? '通过保证金检查') : '') + (!complete && !diagnostic ? ' · 限已扫描规模' : ''));
-  const excess = dec(row.failureVsProtection),
+  const excess = dec(maximum?.failDelta ?? row.failureVsProtection),
     B = dec(book.B);
-  const bufferRate = row.cushion.rate == null ? '无保护基准' : pct(row.cushion.rate, 6);
-  const thin = row.cushion.thin;
+  const cushion = maximum ? recoveryCushion(maximum.fail,book.B) : row.cushion;
+  const bufferRate = cushion.rate == null ? '无保护基准' : pct(cushion.rate, 6);
+  const thin = cushion.thin;
   const stressIncomplete = stress?.missing.length || stress?.zero.length;
   $('scan-fail-net').classList.toggle('thin-buffer', thin);
-  const focusExcess = maximum?.failDelta != null ? dec(maximum.failDelta) : excess;
-  const focusThin = target.fail != null && recoveryCushion(target.fail,book.B).thin;
+  const focusThin = target.fail != null && thin;
   $('scan-fail-summary').classList.toggle('thin-buffer', focusThin && !target.failStop);
   write('scan-fail-cash', target.failStop ?? settlementAmount(target.fail));
   write(
     'scan-fail-net',
-    row.failStop
-      ? '提前触线，实际清算金额未知。'
+    target.failStop
+      ? target.failStop
       : (excess.lt(0) ? '距离 ' : thin ? '仅比 ' : '比 ') +
           usd(book.B) +
           (excess.lt(0) ? ' 还差 ' : ' 多 ') +
@@ -189,30 +188,37 @@ function showRepresentative(snapshot, auditScan) {
     row.funded ? '提款线 · Hype 到账前剩余' : '通过后 · Hype 剩余'
   );
   write('scan-pass-cash', target.passStop ?? settlementAmount(target.success));
-  const diff = dec(row.successPersonal).minus(B);
+  const diff = dec(target.successPersonal).minus(B);
   write(
     'scan-pass-net',
-    row.passStop
-      ? '提前触线，实际清算金额未知。'
+    target.passStop
+      ? target.passStop
       : '假设 PF 自身净结算达到 ' +
           usd(params.target) +
           '。Hype 平仓权益 ' +
-          settlementAmount(row.success) +
-          (row.survives ? '，满足 ' : '，低于 ') +
+          settlementAmount(target.success) +
+          (target.survives ? '，满足 ' : '，低于 ') +
           usd(params.R) +
           ' 最低留存。个人资金' +
           (diff.lt(0) ? '距保护本金尚差 ' : '较保护本金多 ') +
           settlementAmount(diff.abs()) +
           ' · 相对累计投入 ' +
-          settlementAmount(row.successNet)
+          settlementAmount(params.profitBasis==null ? null : dec(target.successPersonal).minus(params.profitBasis))
   );
-  write('scan-fail-summary', target.failStop ? '提前触线 · 清算结余未知' :
-    (focusExcess.lt(0) ? '距本金差 ' : '高于本金 ') + settlementAmount(focusExcess.abs()) +
+  write('scan-fail-summary', target.failStop ? '该路径未结算' :
+    (excess.lt(0) ? '距本金差 ' : '高于本金 ') + settlementAmount(excess.abs()) +
     (focusThin ? ' · 极薄缓冲' : ''));
-  const focusDiff = maximum?.successDelta != null ? dec(maximum.successDelta) : diff;
-  write('scan-pass-summary', target.passStop ? '提前触线 · 清算结余未知' :
-    (focusDiff.lt(0) ? '个人距本金差 ' : '个人较本金多 ') + settlementAmount(focusDiff.abs()) +
+  write('scan-pass-summary', target.passStop ? '该路径未结算' :
+    (diff.lt(0) ? '个人距本金差 ' : '个人较本金多 ') + settlementAmount(diff.abs()) +
     ' · ' + (target.survives ? '满足 ' : '低于 ') + usd(params.R) + ' 留存');
+  if (maximum && (maximum.sign!==row.sign || maximum.i!==row.i || maximum.j!==row.j)) {
+    // Older snapshots can contain a preference ledger for a different position.
+    for (const id of ['scan-deadline','scan-deadline-note','scan-risk','scan-funded'])
+      write(id,'此历史快照未保存最大仓位的对应明细');
+    audit=null;
+    auditText();
+    return;
+  }
   const cutoff = row.deadline;
   write(
     'scan-deadline',
@@ -678,13 +684,14 @@ function renderPlans(snapshot) {
     heading.append(name);
     const v = r.verification ?? {};
     for (const [label,value] of [['失败回收',v.failureFunds],['成功留存',v.successFunds],['初始保证金',v.initial],
-        ['设定路径维持保证金',v.liquidation],['压力测试',v.stress]])
+        ['维持保证金约束',v.maintenance],['设定价格路径',v.path],['压力测试',v.stress]])
       detailLine(heading,label + ' · ' + statusText(value));
     if (r.fail!=null) detailLine(heading,'失败端要求 '+usd(scan.recoveryFloor??scan.ctx.book.B)+
       '，高于门槛 '+settlementAmount(dec(r.fail).minus(scan.recoveryFloor??scan.ctx.book.B))+
       (recoveryCushion(r.fail,scan.ctx.book.B).thin?' · 极薄缓冲':''));
     detailLine(heading,r.coverage==='verified' ? '已核对设定情景与全仓数据' : '路径风险未充分验证');
-    if (Number(r.minimumHeadroom)<0) detailLine(heading,'途中可用于新增仓位的抵押品为 0 U');
+    if (Number(r.minimumHeadroom)<0) detailLine(heading,'途中可新增 0 U。抵押品缺口 '+usd(dec(r.minimumHeadroom).neg()));
+    if (Number(r.minimumInitialHeadroom)<0) detailLine(heading,'持仓途中初保缺口 '+usd(dec(r.minimumInitialHeadroom).neg())+'。清算按维持保证金核验');
     for (const side of ['pf', 'hl']) {
       const leg = scan.ctx.market[side], adj = r.adjustments?.[side];
       const cell = tr.insertCell();
@@ -701,10 +708,19 @@ function renderPlans(snapshot) {
       if (!path) { detailLine(cell, r[key === 'fail' ? 'failStop' : 'passStop'] || '该快照未记录路径价格'); continue; }
       for (const side of ['pf','hl']) {
         const unit = side === 'pf' ? report.pfQuote : report.hlQuote;
-        const line = path[side], mark = snapshot.prices[side].mark;
+        const line = path[side], mark = line.mark ?? snapshot.prices[side].mark;
         const direction = dec(line.exitMark).cmp(mark);
         detailLine(cell, (side === 'pf' ? 'PF' : 'Hype') + (direction > 0 ? ' ↑ ' : direction < 0 ? ' ↓ ' : ' → ') +
           fmt(line.exitMark) + ' ' + unit + ' · 平仓 ' + (line.exitPrice == null ? '无仓位' : fmt(line.exitPrice)));
+      }
+      for (const [side,label] of [['pf','PF'],['hl','Hype']]) {
+        const l=path[side];
+        if (l.markPnl == null) continue;
+        detailLine(cell,label+' '+targetQty(l.target,scan.ctx.market[side])+' × 乘数 '+l.multiplier+
+          ' · 标记价格盈亏 '+signedCash(l.markPnl)+' · 成交价调整 '+signedCash(l.fillPnl));
+        detailLine(cell,'起始权益 '+settlementAmount(l.startEquity)+' · 调仓均价 '+(l.entryPrice==null?'无调仓':fmt(l.entryPrice))+
+          ' · 调仓费 '+settlementAmount(l.entryFee)+' · 平仓费 '+settlementAmount(l.closeFee)+
+          ' · 平仓权益 '+settlementAmount(l.finalEquity));
       }
       detailLine(cell,'起点 PF ' + fmt(snapshot.prices.pf.mark) + ' ' + report.pfQuote +
         ' / Hype ' + fmt(snapshot.prices.hl.mark) + ' ' + report.hlQuote);

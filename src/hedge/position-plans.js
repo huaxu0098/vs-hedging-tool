@@ -1,6 +1,6 @@
 import { adjustmentAfterOrders } from './order-adjustment.js';
-import { sumPostings, settlementBridge, settlementTolerance } from './settlement-ledger.js';
-import { executionDetail } from './solver.js';
+import { sumPostings, settlementBridge, settlementTolerance, checkSignedPath, checkPFBoundary } from './settlement-ledger.js';
+import { executionDetail, profileInputs } from './solver.js';
 import { dec, out, fillEvidence, min } from './math.js';
 import { exactRatio, adjacentScale, inspectRatio, ratioSlice, scalesPerBlock, lastLotAtRatio } from './ratio-scan.js';
 
@@ -93,7 +93,7 @@ function settleHypeAt(leg, entry, shift, extraDebit) {
 
 // Use the candidate's two signed settlement ledgers. Only the Hype exit is
 // repriced under a Hype shock; PF still closes at its own rule boundary.
-function endpoint(ctx, row, key) {
+function reachableLedgers(ctx, row, key) {
   const path = row.paths?.[key];
   if (!path?.pf || !path.hl || (key === 'fail' ? row.failStop : row.passStop)) return null;
   const pf = path.pf, leg = ctx.market.hl;
@@ -103,18 +103,46 @@ function endpoint(ctx, row, key) {
     const shift = out(dec(row.lines[key]).plus(dec(row.stress.priceShock).div(leg.factor)));
     hl = settleHypeAt(leg,hl,shift,sumPostings([row.stress.delayDebit,row.stress.fundingDebit]));
   }
-  const compact = ledger => ({
-    exitMark:ledger.exitMark, exitPrice:ledger.exitPrice,
-    fees:sumPostings([ledger.entryFee, ledger.exitFee]),
-    slippage:sumPostings([ledger.entrySlippage, ledger.exitSlippage]),
-    // Signed mark-to-fill cost can include improvement. Fees are separate.
-    executionCost:out(dec(ledger.entryFill).plus(ledger.exitFill).neg())
-  });
+  return {pf, hl};
+}
+
+function endpoint(ctx, row, key, pair, profile) {
+  if (!pair) return null;
+  const {pf, hl} = pair;
+  // Legacy on-disk reports have no market/depth inputs and are historical only.
+  const compact = (ledger,side) => {
+    let evidence;
+    if (profile) {
+      const spec=ctx.market[side], sign=side==='pf' ? row.sign : -row.sign;
+      const lots=side==='pf' ? row.i : row.j;
+      const target=out(dec(spec.step).times(lots).times(sign));
+      const current=Object.values(ctx.book.positions).find(p=>p.asset===ctx.market.id &&
+        p.venue===side && p.pool===spec.pool)?.qty ?? '0';
+      const delta=out(dec(target).minus(current));
+      const shift=out(dec(row.lines[key]).plus(side==='hl' && row.stress
+        ? dec(row.stress.priceShock).div(spec.factor) : '0'));
+      if (!dec(row[side]).eq(target)) throw Error('仓位方向与数量网格不一致');
+      evidence=checkSignedPath(ledger,spec,target,delta,side==='pf' ? profile.E : profile.C_hl,shift);
+      const fill=executionDetail(spec,out(dec(target).neg()),shift);
+      const entry=executionDetail(spec,delta);
+      if (fill.price!==ledger.exitPrice || entry.price!==ledger.entryPrice)
+        throw Error('候选成交方向与盘口均价不一致');
+      if (side==='pf') {
+        const success=key==='pass', trigger=success?ctx.checks.passTrigger:ctx.checks.failureTrigger;
+        const threshold=success ? profile.target : profile.floor;
+        checkPFBoundary(ledger,target,key,threshold,trigger);
+      }
+    }
+    return { ...evidence, exitMark:ledger.exitMark, exitPrice:ledger.exitPrice,
+      fees:sumPostings([ledger.entryFee, ledger.exitFee]),
+      slippage:sumPostings([ledger.entrySlippage, ledger.exitSlippage]),
+      executionCost:out(dec(ledger.entryFill).plus(ledger.exitFill).neg()) };
+  };
   const expected = key === 'fail'
     ? (ctx.book.external == null ? null : sumPostings([hl.settled, ctx.book.external])) : hl.settled;
   if (expected != null && dec(expected).minus(key === 'fail' ? row.fail : row.success).abs().gt(settlementTolerance))
     throw Error('候选触线路径与现金账本不一致');
-  return { pf:compact(pf), hl:compact(hl), hypeNet:out(dec(hl.settled).minus(hl.start)) };
+  return { pf:compact(pf,'pf'), hl:compact(hl,'hl'), hypeNet:out(dec(hl.settled).minus(hl.start)) };
 }
 
 // Value each mapped exit independently using the same signed entry and the
@@ -157,10 +185,11 @@ export function planRecord(scan, point) {
   return recordFromInspection(scan.ctx, inspectRatio(scan.ctx, point, {includePathAudit:true}));
 }
 
-export function recordFromInspection(ctx, row) {
+export function recordFromInspection(ctx, row, pairs = {fail:reachableLedgers(ctx,row,'fail'),pass:reachableLedgers(ctx,row,'pass')}) {
   const { sign, i, j } = row;
   const pathAudit={fail:pathEvidence(ctx,row,'fail'),pass:pathEvidence(ctx,row,'pass')};
-  const paths = {fail:endpoint(ctx,row,'fail'), pass:endpoint(ctx,row,'pass')};
+  const profile = ctx.book.positions ? profileInputs(ctx.book,ctx.params,ctx.market) : null;
+  const paths = {fail:endpoint(ctx,row,'fail',pairs.fail,profile),pass:endpoint(ctx,row,'pass',pairs.pass,profile)};
   return {
     sign, i, j, key: pointKey(row), h: row.h,
     fraction: ctx.market.pf.factor ? exactRatio(ctx.market, row.pf, row.hl) : null,
@@ -181,6 +210,8 @@ export function recordFromInspection(ctx, row) {
       Object.values(pathAudit).every(group=>group?.basisWiden && group?.basisNarrow &&
         Object.values(group).every(test=>test.status==='pass' && test.proof?.continuous &&
           (test.shift==null || test.settlement!=null))) ? 'verified' : 'conditional',
+    minimumInitialHeadroom: Object.values(pathAudit).flatMap(group=>Object.values(group??{}))
+      .flatMap(test=>test.checkpoints??[]).reduce((low,p)=>low==null?p.initialHeadroom:out(min(low,p.initialHeadroom)),null),
     minimumHeadroom: Object.values(pathAudit).flatMap(group=>Object.values(group??{}))
       .map(test=>test.lowestFree?.free).filter(v=>v!=null)
       .reduce((low,v)=>low==null?v:out(min(low,v)),null),
@@ -271,10 +302,16 @@ export function buildPlanReport(scan, pending = false) {
   if (!points.size)
     for (const point of pagePoints(scan, index, null, 3).rows) add(point, '合法规模');
   const levelsByPoint = new Map();
+  let focus = null;
   const rows = [...points.values()].map(({labels,...point}) => {
     const compare = labels.includes('同 h 规模对照');
     const inspected = inspectRatio(scan.ctx, point, {includeLeverageGrid:compare, includePathAudit:true});
-    const row = recordFromInspection(scan.ctx, inspected);
+    const pairs = {fail:reachableLedgers(scan.ctx,inspected,'fail'),pass:reachableLedgers(scan.ctx,inspected,'pass')};
+    const row = recordFromInspection(scan.ctx, inspected, pairs);
+    if (row.key === targetKeys[0]) {
+      const {pathAudit,leverageGrid,...ledgerRow} = inspected;
+      focus = inspected.stress ? {...ledgerRow,settlementPaths:pairs} : ledgerRow;
+    }
     if (compare) levelsByPoint.set(row.key, inspected.leverageGrid);
     if (labels.some(l => l.endsWith('优先') || l === '最大 PF 仓位') &&
         (!ratioSlice(scan,row.sign,row.i,'eligible').some(([lo,hi]) => lo <= row.j && row.j <= hi) ||
@@ -291,7 +328,7 @@ export function buildPlanReport(scan, pending = false) {
   }
   const comparison = scaleComparison(rows);
   const fixed = comparison ? fixedScaleComparison(scan.ctx, rows, comparison, levelsByPoint) : null;
-  return { index, targetKeys, rows: [...fractions.values()].flat(), comparison, fixed, pending, eligible: pending ? 0 : eligible.count };
+  return { index, targetKeys, focus, rows: [...fractions.values()].flat(), comparison, fixed, pending, eligible: pending ? 0 : eligible.count };
 }
 
 // Select a mutually admissible setting, then price both complete positions at that setting.

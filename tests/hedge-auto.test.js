@@ -9,7 +9,7 @@ import {
   adjacentScale
 } from '../src/hedge/ratio-scan.js';
 import { createSolutionSnapshot, displayHistory } from '../src/hedge/display-history.js';
-import { pagePoints, planRecord, pointKey, scaleComparison, segmentPage } from '../src/hedge/position-plans.js';
+import { pagePoints, planRecord, recordFromInspection, pointKey, scaleComparison, segmentPage } from '../src/hedge/position-plans.js';
 import { ratioChanges } from '../src/hedge/ratio-analysis.js';
 import { exactRatio, ratioBin } from '../src/hedge/ratio-scan.js';
 import { MarketRevaluation } from '../src/hedge/scan-refresh.js';
@@ -743,7 +743,7 @@ test('OPT02 搜索范围记录双边方向、步长和数量上限，预算中�
   const partial = calculateCurrent(inputs, f.a, f.m, {}, t, { searchBudget: 1 });
   assert.equal(partial.search.complete, false);
   assert.ok(!partial.maximum?.complete);
-  assert.equal(full.trace.model, 'AUTO-0.21.3');
+  assert.equal(full.trace.model, 'AUTO-0.21.4');
 });
 test('OPT03 PF 虚拟保证金、目标 Hype 初始、其他占用及调仓后真实可用分别核验', () => {
   const f = fixture();
@@ -1340,9 +1340,9 @@ test('RANGE03 / AUTOSEL08 小网格逐点穷举对照整段扫描，方向、现
             );
         };
         const values = {
-          failure: (r) => r.fail,
-          success: (r) => r.successPersonal,
-          successHype: (r) => r.success,
+          failure: (r) => r.fail ?? r.conditionalEndpoints.failure,
+          success: (r) => r.successPersonal ?? r.conditionalEndpoints.successPersonal,
+          successHype: (r) => r.success ?? r.conditionalEndpoints.successHype,
           pfQty: (r) => dec(r.pf).abs(),
           hlQty: (r) => dec(r.hl).abs(),
           pfValue: (r) => r.pfValue,
@@ -2177,7 +2177,8 @@ test('完整路径：成功终点现金与维持保证金都充足，途中基�
   const point = {sign:1,i:10,j:4};
   const row = inspectRatio(scan.ctx,point,{includePathAudit:true});
   // Settled Hype short at 112, versus a temporary 115 mark just before PF passes.
-  assert.equal(row.success,'26.9');
+  assert.equal(row.conditionalEndpoints.successHype,'26.9');
+  assert.equal(row.success,null);
   assert.equal(row.verification.failureFunds,'pass');
   assert.equal(row.verification.successFunds,'pass');
   assert.equal(row.verification.initial,'pass');
@@ -2191,6 +2192,8 @@ test('完整路径：成功终点现金与维持保证金都充足，途中基�
   assert.equal(knot.maintenance,'22.5');
   assert.ok(dec(walk.firstBreach.mark).minus(dec('497.4').div('4.4')).abs().lt('1e-38'));
   assert.ok(dec(walk.firstBreach.mark).lt('115'));
+  assert.ok(dec(walk.firstBreach.equity).minus(walk.firstBreach.maintenance).abs().lt('1e-36'));
+  assert.equal(walk.firstBreach.settlement,null);
   assert.equal(walk.checkpoints.at(-1).mark,'110');
   assert.ok(dec(walk.checkpoints.at(-1).equity).gt(walk.checkpoints.at(-1).maintenance));
   for (const p of walk.checkpoints) {
@@ -2207,7 +2210,7 @@ test('完整路径：三方案保留各自的双向检验；未配置压力只�
   const scan = scanFixture().ratioScan;
   for (const key of scan.plans.targetKeys) {
     const r=scan.plans.rows.find(p=>p.key===key);
-    assert.deepEqual(r.verification,{failureFunds:'pass',successFunds:'pass',initial:'pass',liquidation:'pass',stress:'unknown'});
+    assert.deepEqual(r.verification,{failureFunds:'pass',successFunds:'pass',initial:'pass',maintenance:'pass',path:'pass',liquidation:'pass',stress:'unknown'});
     for (const name of ['fail','pass']) {
       assert.deepEqual(Object.keys(r.pathAudit[name]),['base']);
       const path=r.pathAudit[name].base;
@@ -2232,7 +2235,8 @@ test('完整路径：PF 空、Hype 多，跌破长仓清算界后反弹也不得
     adverseBps:'200',jumpBps:'25',delayBps:'300',fundingDebit:'0.1'},f).ratioScan;
   const target={sign:-1,i:10,j:4};
   const row=inspectRatio(scan.ctx,target,{includePathAudit:true});
-  assert.equal(row.success,'26.9');
+  assert.equal(row.conditionalEndpoints.successHype,'26.9');
+  assert.equal(row.success,null);
   assert.equal(row.pathAudit.fail.dislocation.status,'pass');
   assert.equal(row.pathAudit.pass.base.status,'pass');
   const path=row.pathAudit.pass.dislocation;
@@ -2348,4 +2352,98 @@ test('全仓账户只使用独立抵押池；其他挂单未知时不假设零�
   assert.equal((await read()).otherHold,null);
   delete raw.crossMarginSummary;
   assert.equal((await read()).equity,null);
+});
+
+
+test('方向验收：复现 61591.20 的目标，多空各自推导两端，交换账本后拒绝发布', () => {
+  const {ctx}=scanFixture().ratioScan;
+  Object.assign(ctx.book,{pf:'10000',hl:'409',B:'500',challengeFloor:'9400',challengeTarget:'12000'});
+  Object.assign(ctx.params,{R:'100',target:'12000'});
+  for (const [side,mark,rate] of [['pf','61591.20','0.0001'],['hl','61580.00','0.0005']]) {
+    const l=ctx.market[side];
+    Object.assign(l,{mark,rate,step:'0.00001',minQty:'0.00001',minNotional:'0',free:ctx.book[side],
+      bids:[[out(dec(mark).minus(1)),'2']],asks:[[out(dec(mark).plus(1)),'2']]});
+  }
+  const options={includePathAudit:true};
+  const rows=[1,-1].map(sign=>inspectRatio(ctx,{sign,i:11220,j:1727},options));
+  for (const row of rows) {
+    const plan=recordFromInspection(ctx,row);
+    for (const [end,threshold] of [['fail','9400'],['pass','12000']]) {
+      const {pf,hl}=plan.paths[end];
+      assert.equal(dec(pf.exitMark).cmp(pf.mark),row.sign*(end==='pass'?1:-1));
+      assert.ok(dec(pf.finalEquity).minus(threshold).abs().lt('1e-36'));
+      for (const [side,l] of [['pf',pf],['hl',hl]]) {
+        assert.equal(l.target,row[side]);
+        assert.ok(dec(l.target).times(l.multiplier).times(l.settlementPerQuote)
+          .times(dec(l.exitMark).minus(l.mark)).minus(l.markPnl).abs().lt('1e-36'));
+        assert.ok(dec(l.finalEquity).minus(l.startEquity).minus(l.grossPnl)
+          .plus(l.entryFee).plus(l.closeFee).plus(l.friction).abs().lt('1e-36'));
+      }
+    }
+  }
+  assert.equal(out(dec('0.1122').times(dec('66925.74').minus('61591.20'))),'598.535388');
+  const corrupt = structuredClone(rows[0]);
+  corrupt.paths.fail.pf.exitMark='66925.74';
+  assert.throws(()=>recordFromInspection(ctx,corrupt),/不一致/);
+  assert.throws(()=>recordFromInspection(ctx,{...rows[0],paths:rows[1].paths}),/不一致/);
+  const fee=structuredClone(rows[0]);
+  fee.paths.pass.pf.exitFee='0';
+  assert.throws(()=>recordFromInspection(ctx,fee),/不一致/);
+});
+
+test('发布验收：三个方向逐个对齐，跨候选价格或起始行情串帧时整帧拒收',()=>{
+  const f=fixture(), result=scanFixture({riskPreference:'75',pfFee:'0.0001',hlFee:'0.0005'},f);
+  result.calculationMarket=f.m;
+  const view=createSolutionSnapshot(result);
+  assert.equal(view.targets.filter(Boolean).length,3);
+  const focus=view.ratioScan.plans.focus;
+  assert.equal(view.ratioScan.representative.row.pf,'-9'); // Preference and maximum are opposite here.
+  assert.equal(focus.pf,'10');
+  assert.equal(pointKey(focus),view.targets[0].key);
+  for (const end of ['fail','pass'])
+    assert.equal(focus.paths[end].pf.exitMark,view.targets[0].paths[end].pf.exitMark);
+  for (const p of view.targets) for (const end of ['fail','pass']) {
+    const path=p.paths[end], ledger=p.pathAudit[end].base.settlement;
+    assert.equal(path.pf.exitMark,ledger.pfMark);
+    assert.equal(path.hl.finalEquity,ledger.hype);
+    assert.ok(dec(path.pf.target).eq(p.pf) && dec(path.hl.target).eq(p.hl));
+    assert.equal(dec(path.pf.markPnl).cmp(0),end==='pass'?1:-1);
+  }
+  const bad=structuredClone(result);
+  bad.ratioScan.plans.rows.find(p=>p.key===view.targets[1].key).paths.fail.pf.exitMark='100';
+  assert.throws(()=>createSolutionSnapshot(bad),/不一致/);
+  const stale=structuredClone(result);
+  stale.calculationMarket.pf.mark='101';
+  assert.throws(()=>createSolutionSnapshot(stale),/不一致/);
+});
+
+test('初保不足时两端没有可回收金额，途中初保缺口独立于维持清算',()=>{
+  const {ctx}=scanFixture().ratioScan;
+  ctx.market.hl.free='1';
+  const row=inspectRatio(ctx,{sign:1,i:10,j:4},{includePathAudit:true});
+  assert.equal(row.verification.initial,'fail');
+  assert.equal(row.pathAudit.pass.base.firstBreach,null);
+  assert.match(row.passStop,/开仓/);
+  const plan=recordFromInspection(ctx,row);
+  assert.deepEqual([plan.fail,plan.success,plan.paths.fail,plan.paths.pass],[null,null,null,null]);
+  assert.equal(plan.pathAudit.fail.base.settlement,undefined);
+});
+
+test('途中初保缺口 151.62 U 时保留独立清算证据，断档路径不得出具连续证明',()=>{
+  const m=demoMarket('unit'), b=createBook({id:'headroom',mode:'demo',time:at});
+  Object.assign(m.hl,{mark:'100',rate:'0',bids:[['100','20']],asks:[['100','20']],leverage:'3',
+    tiers:[{from:'0',mmr:'0.0125',deduction:'0'}]});
+  b.hl='448.38';
+  const run=()=>validateMargin(b,m,'hl','-10',['0','20'],undefined,'0',{openFree:'115'});
+  const [initial,path]=run();
+  assert.equal(initial.status,'pass');
+  assert.equal(path.worst.initialHeadroom,'-151.62');
+  assert.equal(path.worst.freeCollateral,'0');
+  assert.equal(path.worst.surplus,'233.38');
+  assert.equal(path.firstBreach,null);
+  assert.equal(path.proof.continuous,true);
+  m.hl.tiers.push({from:'1100',mmr:'0.025',deduction:'0'});
+  const unproven=run().at(-1);
+  assert.equal(unproven.status,'unknown');
+  assert.equal(unproven.proof.continuous,false);
 });

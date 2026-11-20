@@ -652,7 +652,7 @@ function renderFunding(result, a, m, plan) {
   put(
     'formula-pair',
     v
-      ? '本候选按两边实际数量核算，每单位共同价格变化 PF ' +
+      ? '风险偏好目标 PF ' + c.vsTargetQuantity + ' / Hype ' + c.hlTargetQuantity + '（多正空负）。每单位共同价格变化 PF ' +
           fmt(v.Kpf, 7) +
           ' U、Hype ' +
           fmt(v.Kh, 7) +
@@ -712,11 +712,13 @@ function renderFunding(result, a, m, plan) {
       rows.push(cellRow([label, ...cols.map((x) => x?.[field] ?? '—')]));
   }
   const table = $('path-rows');
+  table.dataset.snapshotId = paths ? (result.trace?.id ?? '') : '';
   if (table.textContent !== rows.map((row) => row.textContent).join('')) table.replaceChildren(...rows);
   put(
     'settlement-note',
     paths
-      ? '正数增加权益，负数减少权益。初始保证金单列为占用。独立复算容差 0.000000000001 U。终点按当前可见盘口平移至 VS 触线时的预计成交均价。表内价差、深度滑点和手续费各计一次。PF 模拟利润留在 PF 账本。外部已到账 ' +
+      ? '本表目标 · PF ' + (paths.fail?.pf?.target ?? '未知') + ' / Hype ' + (paths.fail?.hl?.target ?? '未知') +
+          '（多正空负）。基础路径账本 · 快照 ' + (result.trace?.id ?? '未知') + '。正数增加权益，负数减少权益。初始保证金单列为占用。独立复算容差 0.000000000001 U。终点按当前可见盘口平移至 VS 触线时的预计成交均价。表内价差、深度滑点和手续费各计一次。PF 模拟利润留在 PF 账本。外部已到账 ' +
           money(result.externalValue) +
           '。成功时预计可分 ' +
           money((c ?? result.heldCash)?.expectedUserPayout) +

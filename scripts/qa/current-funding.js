@@ -14,7 +14,10 @@ async function readFrame(label, condition = 'true', feasible = true) {
   while (Date.now() < until) {
     const packet = await run(`(() => {
       const el = id => document.getElementById(id), txt = id => el(id).textContent;
-      if (!txt('trace-id').startsWith('AUTO-0.21') || !(${condition}) ||
+      const snapshotId=el('scan-desk').dataset.resultId;
+      if (!snapshotId || !txt('trace-id').endsWith(snapshotId) ||
+          (${feasible} && el('path-rows').dataset.snapshotId !== snapshotId) ||
+          !txt('trace-id').startsWith('AUTO-0.21') || !(${condition}) ||
           !txt('auto-search').includes('${feasible ? 'AUTO_PARTIAL' : 'AUTO_INFEASIBLE'}')) return null;
       const detail=el('trace-inputs').parentElement; detail.open=true; detail.ontoggle();
       return { rows:[...el('path-rows').querySelectorAll('tr')].filter(row=>row.dataset.posting||row.dataset.total).map(row=>[row.dataset.posting??'total',...[...row.cells].slice(1).map(c=>c.textContent)]), input:JSON.parse(txt('trace-inputs')), time:txt('trace-sources').match(/计算于 (\\S+)/)[1], id:txt('trace-id'),
@@ -103,16 +106,23 @@ async function readFrame(label, condition = 'true', feasible = true) {
   throw Error(
     label +
       ' 等待新版本超时 ' +
-      (await browser.text('#calc-status')) +
+      (await browser.text('#scan-status')) + ' ' + (await browser.text('#calc-status')) +
       ' ' +
       (await browser.text('#auto-search'))
   );
 }
 async function edit(id, value) {
-  const pending =
-    await run(`(()=>{const field=document.getElementById(${JSON.stringify(id)});field.value=${JSON.stringify(value)};field.dispatchEvent(new Event('input',{bubbles:true}));
-    return document.querySelector('#pf-summary').textContent;})()`);
-  assert.equal(pending, '—', '修改规则后的同一事件必须使旧仓位失效');
+  const pending = await run(`(() => {
+    const field=document.getElementById(${JSON.stringify(id)}), desk=document.getElementById('scan-desk');
+    const before=desk.dataset.resultId;
+    field.value=${JSON.stringify(value)};
+    field.dispatchEvent(new Event('input',{bubbles:true}));
+    return {before,after:desk.dataset.resultId,state:desk.dataset.state,
+      historical:document.getElementById('current').dataset.historical};
+  })()`);
+  assert.equal(pending.after,pending.before,'后台计算保留同一份旧结果');
+  assert.equal(pending.historical,'true','修改规则的同一事件立即撤回旧建议');
+  assert.notEqual(pending.state,'ready');
 }
 try {
   await send('Page.navigate', { url: (process.env.CURRENT_URL ?? browser.url) + '/' });
@@ -146,6 +156,9 @@ try {
   await set('#funding-view', 'account');
   assert.equal(await run("document.querySelector('#hl-equity').value"), '');
   assert.match(await browser.text('#auto-search'), /AUTO_DATA_BLOCKED/);
+  // Isolate the cash-rule regression from the time needed to search much larger
+  // account grids between live ticks. The exchange books and fees remain live.
+  await set('#pfUtil','3','input');
   await click('#confirm-flat');
   for (const [id, v] of [
     ['pf-equity', '10000'],

@@ -363,7 +363,16 @@ function deadlinePath(ctx, c, p) {
     cash: out(hl.plus(ctx.book.external))
   };
 }
-function stoppedBeforeExit(ctx, c, key) {
+function stoppedBeforeExit(ctx, c, key, audit, initial) {
+  if (initial !== 'pass') return initial === 'fail' ? '开仓约束未满足，目标仓位无法建立' : '开仓保证金未验证';
+  const cases = audit[key], beforeFill = cases.beforeFill?.firstBreach;
+  if (beforeFill) return 'Hype 原仓在延迟成交前先触线 ' + beforeFill.mark + '，实际清算成交及结余未知';
+  for (const test of Object.values(cases)) {
+    if (test.firstBreach) return 'Hype 途中首次触线 ' + test.firstBreach.mark + '，实际清算成交及结余未知';
+    if (test.status === 'fail' || test.pfStatus === 'fail') return '路径提前终止，终点不可用于结算';
+    if (test.status !== 'pass' || !test.proof?.continuous ||
+        (test.pfStatus && test.pfStatus !== 'pass')) return '路径风险未充分验证';
+  }
   if (c.code === 'FEASIBLE') return null;
   if (c.constraints.some(x => (x.code === 'hl_INTRAPATH_' + key || x.name === 'Hype 成交延迟（原仓）') && x.status === 'fail'))
     return 'Hype 途中压力路径触线或价格越界';
@@ -472,7 +481,7 @@ export function inspectRatio(ctx, point, { includeLeverageGrid = false, includeP
   const excess = c.stressedSurplus ?? c.baseSurplus,
     equity = c.stressedEquity ?? c.baseEquity;
   const buffer = c.stressPriceBuffer ?? c.priceBuffer;
-  const physical = c.code === 'FEASIBLE';
+
   const covers = fail.gte(p.B),
     survives = success.gte(p.R);
   const coversWithBuffer = fail.gte(decimal(p.B).plus(params.recoveryBuffer ?? 0));
@@ -488,19 +497,29 @@ export function inspectRatio(ctx, point, { includeLeverageGrid = false, includeP
         }
       : null;
   const entry = c.constraints.filter(x => /_(INITIAL_MARGIN|FREE_RESERVE|AVAILABLE|UTILIZATION|SWITCH_MARGIN|SWITCH_TIER|ORDER_LEVERAGE|TIER_LEVERAGE)$/.test(x.code));
-  const audit = includePathAudit ? auditHypePaths(ctx,c) : null;
+  const audit = auditHypePaths(ctx,c);
   const statusOf = list => list.some(x => x.status === 'fail') ? 'fail'
     : !list.length || list.some(x => x.status !== 'pass') ? 'unknown' : 'pass';
+  const initial = statusOf(entry);
+  const failStop = stoppedBeforeExit(ctx,c,'fail',audit,initial);
+  const passStop = stoppedBeforeExit(ctx,c,'pass',audit,initial);
+  const physical = c.code === 'FEASIBLE' && !failStop && !passStop;
+  const pathTests = Object.values(audit).flatMap(group => Object.values(group));
+  const pathStatus = statusOf(pathTests.map(test => ({
+    status:test.firstBreach || test.pfStatus==='fail' || test.status==='fail' ? 'fail'
+      : test.proof?.continuous && (!test.pfStatus || test.pfStatus==='pass') ? test.status : 'unknown'
+  })));
+  const maintenance = statusOf(c.constraints.filter(x => /MAINTENANCE_PATH$/.test(x.code)));
   return {
     ...point,
     pf,
     hl,
     h: c.actualRatio,
-    pathAudit:audit,
+    pathAudit:includePathAudit ? audit : null,
     crossChecked:!!(audit && checks.crossAccount && auditCross(market.hl,checks.crossAccount,c,false).gaps.length===0),
     verification:{
       failureFunds:coversWithBuffer ? 'pass' : 'fail', successFunds:survives ? 'pass' : 'fail',
-      initial:statusOf(entry),
+      initial, maintenance, path:pathStatus,
       liquidation:statusOf(c.constraints.filter(x => /MAINTENANCE|REFERENCE_LIQ|INTRAPATH|PRICE_BUFFER|MARGIN_UNVERIFIED/.test(x.code))),
       stress:checks.fullStress ? statusOf([
         ...c.constraints.filter(x => x.name || /STRESS|INTRAPATH/.test(x.code)),
@@ -509,13 +528,17 @@ export function inspectRatio(ctx, point, { includeLeverageGrid = false, includeP
     },
     pfValue: c.vsNotional,
     hypeValue: c.hlNotional,
-    failStop: stoppedBeforeExit(ctx, c, 'fail'),
-    passStop: stoppedBeforeExit(ctx, c, 'pass'),
-    fail: out(fail),
-    success: out(success),
-    failNet: failNet == null ? null : out(failNet),
-    successNet: successNet == null ? null : out(successNet),
-    successPersonal: out(successPersonal),
+    failStop, passStop,
+    // The legal-grid report also describes inadmissible sizes. Keep its counterfactual
+    // valuations out of the reachable cash fields supplied to any plan.
+    ...(failStop || passStop ? {conditionalEndpoints:{
+      failure:out(fail), successHype:out(success), successPersonal:out(successPersonal)
+    }} : {}),
+    fail: failStop ? null : out(fail),
+    success: passStop ? null : out(success),
+    failNet: failStop || failNet == null ? null : out(failNet),
+    successNet: passStop || successNet == null ? null : out(successNet),
+    successPersonal: passStop ? null : out(successPersonal),
     failureVsProtection: out(fail.minus(p.B)),
     cushion: recoveryCushion(out(fail), p.B),
     successCoversPrincipal: successPersonal.gte(p.B),

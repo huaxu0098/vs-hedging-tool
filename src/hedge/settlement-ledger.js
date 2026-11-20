@@ -113,3 +113,43 @@ export function settlementBridge(cash, l, target, adjustment, shift, entry, exit
     exitMark: out(exitMark)
   };
 }
+
+// Verify a candidate against independent inputs before publishing its cash. Existing
+// unrealized PnL is already included in the snapshot's starting marked equity.
+export function checkSignedPath(ledger, leg, target, delta, startEquity, shift) {
+  const q = dec(target), d = dec(delta), mark = dec(leg.mark);
+  const unit = dec(leg.multiplier).times(leg.fx);
+  const exitMark = mark.plus(dec(shift).times(leg.factor));
+  const closeEnough = (x,y) => x != null && dec(x).minus(y).abs().lte(settlementTolerance);
+  if (!ledger || unit.lte(0) || !dec(leg.factor).gt(0) ||
+      !q.eq(ledger.target) || !d.eq(ledger.adjustment) || !mark.eq(ledger.mark) ||
+      !dec(leg.multiplier).eq(ledger.multiplier) || !dec(leg.fx).eq(ledger.fx) ||
+      !closeEnough(ledger.start,startEquity) || !closeEnough(ledger.exitMark,exitMark))
+    throw Error('候选方向、规格或账本起点与行情快照不一致');
+  const move = q.times(unit).times(exitMark.minus(mark));
+  const entry = d.isZero() ? dec('0') : d.times(unit).times(mark.minus(ledger.entryPrice));
+  const exit = q.isZero() ? dec('0') : q.times(unit).times(dec(ledger.exitPrice).minus(exitMark));
+  const fee = (quantity, price) => quantity.isZero() ? dec('0') :
+    quantity.abs().times(unit).times(price).times(leg.rate);
+  const openFee = fee(d,ledger.entryPrice), closeFee = fee(q,ledger.exitPrice);
+  const marked = dec(startEquity).plus(entry).minus(openFee).plus(move);
+  const settled = marked.plus(exit).minus(closeFee).minus(ledger.friction);
+  if (!closeEnough(ledger.move,move) || !closeEnough(ledger.entryFill,entry) ||
+      !closeEnough(ledger.exitFill,exit) || !closeEnough(ledger.entryFee,openFee) ||
+      !closeEnough(ledger.exitFee,closeFee) || !closeEnough(ledger.settled,settled))
+    throw Error('候选价格盈亏、成交费用与结算权益不一致');
+  return {target, adjustment:delta, mark:leg.mark, entryPrice:ledger.entryPrice,
+    multiplier:leg.multiplier, settlementPerQuote:leg.fx, startEquity, markPnl:out(move),
+    fillPnl:out(entry.plus(exit)), grossPnl:out(move.plus(entry).plus(exit)),
+    entryFee:ledger.entryFee, closeFee:ledger.exitFee, friction:ledger.friction,
+    markedEquity:out(marked), finalEquity:ledger.settled};
+}
+
+export function checkPFBoundary(ledger, target, side, threshold, trigger) {
+  const sign = dec(target).cmp(0), up = side === 'pass' ? 1 : -1;
+  const marked = dec(ledger.start).plus(ledger.entryFill).minus(ledger.entryFee).plus(ledger.move);
+  const equity = trigger === 'mark_equity' ? marked : dec(ledger.settled);
+  if (!dec(ledger.target).eq(target) || dec(ledger.exitMark).cmp(ledger.mark) !== sign*up ||
+      dec(ledger.move).cmp(0) !== up || equity.minus(threshold).abs().gt(settlementTolerance))
+    throw Error('PF 方向、触线价格与规则权益不一致');
+}

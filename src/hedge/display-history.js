@@ -21,6 +21,36 @@ function finalizeSnapshot(view) {
   if (targets.length !== planObjectives.length || targets.includes(undefined) ||
       (plans?.eligible > 0 && !plans.pending && !plans.legacy && targets.some(row => !row)))
     throw Error('目标索引与候选快照不一致');
+  for (const row of targets.filter(Boolean)) {
+    if (dec(row.pf).cmp(0) !== row.sign || (dec(row.hl).cmp(0) && dec(row.hl).cmp(0) !== -row.sign))
+      throw Error('双边有符号目标与计算方向不一致');
+    for (const end of ['fail','pass']) {
+      const path = row.paths?.[end];
+      if (!path?.pf || !path.hl) throw Error('目标缺少可达的双边价格路径');
+      const isSuccess = end === 'pass';
+      for (const side of ['pf','hl']) {
+        const leg = path[side], mark = view.prices[side].mark;
+        if (side === 'pf' && dec(leg.exitMark).cmp(mark) !== (isSuccess?row.sign:-row.sign))
+          throw Error('目标仓位方向与快照价格路径不一致');
+        if (trace.model === modelVersion && leg.target == null)
+          throw Error('目标价格路径缺少有符号数量');
+        if (leg.target != null && (!dec(leg.target).eq(row[side]) || !dec(leg.mark).eq(mark) ||
+            dec(leg.markPnl).cmp(0) !== dec(row[side]).cmp(0)*dec(leg.exitMark).cmp(mark)))
+          throw Error('目标仓位、起点与快照盈亏不一致');
+      }
+    }
+  }
+  if (plans?.focus) {
+    const focus = plans.focus, maximum = targets[0];
+    if (!maximum || focus.sign !== maximum.sign || focus.i !== maximum.i || focus.j !== maximum.j)
+      throw Error('资金流水与最大目标仓位不一致');
+    const ledgers = focus.settlementPaths ?? focus.paths;
+    for (const end of ['fail','pass']) for (const side of ['pf','hl']) {
+      const leg = ledgers[end][side], published = maximum.paths[end][side];
+      if (leg.target !== published.target || leg.exitMark !== published.exitMark ||
+          leg.settled !== published.finalEquity) throw Error('首页目标流水与对应结算结果不一致');
+    }
+  }
   const pair = plans?.comparison;
   const automatic = pair && { comparison:pair, rows:[byKey.get(pair.small), byKey.get(pair.large)] };
   if (automatic && automatic.rows.some(row => !row)) throw Error('规模对照与候选快照不一致');
@@ -71,7 +101,7 @@ export function createSolutionSnapshot(result) {
       buckets,
       representative,
       analysis,
-      plans: scan.plans && { targetKeys: scan.plans.targetKeys, rows: scan.plans.rows, comparison:scan.plans.comparison, fixed:scan.plans.fixed, eligible: scan.plans.eligible, pending: scan.plans.pending, pfQuote: scan.plans.pfQuote, hlQuote: scan.plans.hlQuote },
+      plans: scan.plans && { focus:scan.plans.focus, targetKeys: scan.plans.targetKeys, rows: scan.plans.rows, comparison:scan.plans.comparison, fixed:scan.plans.fixed, eligible: scan.plans.eligible, pending: scan.plans.pending, pfQuote: scan.plans.pfQuote, hlQuote: scan.plans.hlQuote },
       complete,
       ctx: {
         book: { B: book.B },
@@ -102,10 +132,10 @@ export function displayHistory(storage) {
       previousKey = scope;
       previous = null;
       try {
-        const saved = JSON.parse(storage.getItem(key(scope)) ?? storage.getItem(key(scope,'AUTO-0.21.2')) ?? storage.getItem(key(scope,'AUTO-0.21.1')));
+        const saved = JSON.parse(storage.getItem(key(scope)) ?? storage.getItem(key(scope,'AUTO-0.21.3')) ?? storage.getItem(key(scope,'AUTO-0.21.2')) ?? storage.getItem(key(scope,'AUTO-0.21.1')));
         if (
           saved?.scope === scope &&
-          [modelVersion,'AUTO-0.21.2','AUTO-0.21.1'].includes(saved.view?.trace?.model) &&
+          [modelVersion,'AUTO-0.21.3','AUTO-0.21.2','AUTO-0.21.1'].includes(saved.view?.trace?.model) &&
           saved.view.ratioScan?.complete &&
           Array.isArray(saved.view.ratioScan.buckets) &&
           saved.view.ratioScan.ctx?.market?.pf &&
