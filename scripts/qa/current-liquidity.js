@@ -17,7 +17,7 @@ try {
           const r=data.result,s=r?.baseScan??r?.ratioScan;
           if(data.error || !s){solverEvents.push(data.error??r?.autoStatus);return;}
           const plans=s.plans,p=plans.pressure;
-          const row=x=>!x?null:{key:x.key,pf:x.pf,hl:x.hl,pfValue:x.pfValue,hypeValue:x.hypeValue,lev:x.leverage,depthStatus:x.depthStatus,
+          const row=x=>!x?null:{key:x.key,pf:x.pf,hl:x.hl,pfValue:x.pfValue,hypeValue:x.hypeValue,lev:x.leverage,depthStatus:x.depthStatus,summary:x.pressureSummary,
             cases:Object.fromEntries(['fail','pass'].map(end=>{
               const f=x.liquidity[end];
               return [end,[f.full,f,f.two].map(a=>({cash:a.settlement?.[end==='pass'?'hype':'personal'],status:a.status,clearance:a.pathStatus,
@@ -25,8 +25,9 @@ try {
             })),audits:Object.keys(x.pathAudit.pass??{})};
           framesById[r.trace.id]={id:r.trace.id,time:r.finishedAt,ms:r.solveMs,model:r.trace.model,
             clocks:JSON.parse(r.trace.inputs).market,account:r.trace.accountsId,rules:r.trace.rulesId,book:r.trace.marketId,
-            tested:r.stress.positive,status:p.status,reason:p.reason,B:s.ctx.book.B,R:s.ctx.params.R,
+            tested:r.stress.positive,funding:JSON.parse(r.trace.inputs).rules.fundingDebit,status:p.status,reason:p.reason,B:s.ctx.book.B,R:s.ctx.params.R,
             base:row(plans.rows.find(x=>x.key===plans.targetKeys[0])), pressure:row(p.row),
+            keys:[plans.targetKeys[0],p.key,...plans.targetKeys.slice(1)],
             fees:Object.fromEntries(['pf','hl'].map(k=>[k,[s.ctx.market[k].rate,s.ctx.market[k].multiplier,s.ctx.market[k].fx]]))};
           solverEvents.push([r.solveMs,r.trace.id,p.status]);
         });
@@ -35,27 +36,71 @@ try {
     };
   })()`});
   await send('Page.navigate',{url:process.env.CURRENT_URL??'http://127.0.0.1:4181/'});
-  for (const full of [false,true]) {
+  for (const budget of ['', '0.00001', '500']) {
+    const full=Boolean(budget);
     if(full) await run(`(()=>{
-      for(const [key,value] of Object.entries({adverseBps:'0.01',jumpBps:'0.01',delayBps:'0.01',fundingDebit:'0.00001'})){
+      for(const [key,value] of Object.entries({adverseBps:'0.01',asyncBps:'0.02',jumpBps:'0.03',delayBps:'0.01',fundingRatesBps:'0.01,0.02',fundingDebit:${JSON.stringify(budget)}})){
         const input=document.getElementById(key);input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));
       }
     })()`);
-    const gate="document.querySelector('#scan-desk')?.dataset.state==='ready' && framesById[document.querySelector('#scan-desk').dataset.resultId]?.tested.length==="+(full?4:0);
-    await wait(gate,90000);
-    const f=await run(`(()=>{
+    const gate="document.querySelector('#scan-desk')?.dataset.state==='ready' && framesById[document.querySelector('#scan-desk').dataset.resultId]?.funding==="+JSON.stringify(budget);
+    await wait(gate+" && "+`(window.acceptedFrame=(()=>{
       const q=id=>document.getElementById(id),id=q('scan-desk').dataset.resultId,f=framesById[id];
       return {...f,clocks:Object.fromEntries(['pf','hl'].map(k=>[k,[f.clocks[k].bookSource??f.clocks.source,f.clocks[k].bookAt??f.clocks[k].asOf]])),
         ids:['live-view','positions-view','liquidity-maximum'].map(k=>q(k).dataset.snapshotId),display:q('liquidity-maximum').textContent,
-        publishedKey:q('liquidity-maximum').dataset.point,tail:q('liquidity-evidence-body').textContent.includes('D 剩余可见深度不足')};
-    })()`);
+        publishedKey:q('liquidity-maximum').dataset.point,publishedKeys:[...q('plan-columns').rows[0].cells].slice(1).map(th=>th.dataset.point||null),
+        detail:[...q('liquidity-evidence-body').rows].map(tr=>[tr.dataset.case,[...tr.cells].map(td=>td.textContent)]),
+        headline:[q('scan-fail-cash').textContent,q('scan-pass-cash').textContent]};
+    })())`,90000);
+    const f=await run('window.acceptedFrame');
+    assert.deepEqual(f.publishedKeys,f.keys);
     assert.ok(f.ids.every(id=>id===f.id));
     for(const [source,stamp] of Object.values(f.clocks)){assert.match(source,/Vest|Hyperliquid/);assert.ok(Number.isFinite(Date.parse(stamp)));}
     assert.ok(f.base && f.book && f.rules && f.account);
     if(f.pressure){
       assert.equal(f.pressure.key,f.publishedKey);
       assert.equal(f.status,full?'feasible':'conditional');
-      assert.ok(f.tail);
+      const summary=f.pressure.summary;
+      assert.equal(summary.key,f.pressure.key);
+      assert.equal(summary.status,'pass');
+      const active=summary.cases.filter(c=>c.configured);
+      for(const c of active) {
+        assert.equal(c.status,'pass',c.label);
+        for(const end of ['fail','success']){
+          assert.ok(dec(c[end].cash).gte(end==='fail'?f.B:f.R));
+          assert.ok(c[end].initialMargin!=null && c[end].maxMarginUsed!=null && dec(c[end].minSurplus).gt(0));
+        }
+      }
+      for(const [field,end] of [['minFailure','fail'],['minSuccess','success']]){
+        const amounts=active.map(c=>dec(c[end].cash));
+        assert.ok(amounts.every(v=>v.gte(summary[field].value)));
+        assert.equal(summary.cases.find(c=>c.id===summary[field].id)[end].cash,summary[field].value);
+      }
+      assert.deepEqual(f.headline,[summary.minFailure,summary.minSuccess].map(x=>dec(x.value).toFixed(4)+' U'));
+      const endpoints=active.flatMap(c=>[c.fail,c.success]);
+      for(const item of endpoints){
+        assert.ok(dec(item.maxMarginUsed).lte(summary.maxMarginUsed.value));
+        assert.ok(dec(item.minSurplus).gte(summary.minSurplus.value));
+      }
+      const d=summary.cases.find(c=>c.id==='D');
+      assert.equal(d.status,'unknown');assert.equal(d.success.cash,null);assert.equal(d.fail.cash,null);
+      for(const c of summary.cases) assert.ok(f.detail.some(([id,cells])=>id===c.id && cells[0]===c.label));
+      for(const id of ['basis','async','delay','jump','funding']){
+        const c=summary.cases.find(c=>c.id===id);
+        assert.equal(c.status,full?'pass':'unknown');
+        assert.equal(c.configured,full);
+      }
+      if(full){
+        const initial=summary.cases.find(s=>s.id==='A'),charges=summary.cases.find(s=>s.id==='funding');
+        for(const end of ['fail','success']){
+          const accrual=charges[end].funding;
+          assert.equal(accrual.periods,2);
+          assert.ok(dec(accrual.sumBps).eq('0.03'));
+          const byRate=dec(accrual.peakNotional).times('0.03').div(10000);
+          assert.ok(byRate.minus(accrual.rateDebit).abs().lt('1e-36'));
+          assert.ok(dec(initial[end].cash).minus(charges[end].cash).minus(accrual.charged).abs().lt('1e-36'));
+        }
+      }
       for(const [end,tests] of Object.entries(f.pressure.cases)) for(const t of tests) {
         assert.equal(t.status,'pass');assert.equal(t.clearance,'pass');
         assert.ok(dec(t.cash).gte(end==='pass'?f.R:f.B));assert.ok(dec(t.surplus).gt(0));
@@ -70,6 +115,7 @@ try {
       }
       if(full) for(const name of ['adverseJump','basisWiden','delayedFill','asyncExit']) assert.ok(f.pressure.audits.includes(name));
     }else assert.equal(f.status,'none');
+    if (budget==='500') assert.equal(f.pressure,null,'过量资金费应保留基础目标并排除所有压力目标');
     evidence.push(f);
     if(process.env.UI_EVIDENCE) await writeFile(process.env.UI_EVIDENCE,JSON.stringify(evidence)+'\n');
     console.log('LIQUIDITY_LIVE',f.id,f.time,f.ms,f.status,f.base.key,f.pressure?.key,f.display);

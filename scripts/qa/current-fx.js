@@ -55,7 +55,9 @@ async function capture(asset) {
   assert.ok(scan?.representative, JSON.stringify(result.issues));
   assert.equal(shown.trace, result.trace.id);
   const original = scan.representative.row, fills = [];
-  assert.deepEqual(shown.cash, [original.fail, original.success].map(v => dec(v).toFixed(4) + ' U'));
+  const base=scan.plans.rows.find(row=>row.key===scan.plans.targetKeys[0]);
+  const summary=scan.plans.pressure.row?.pressureSummary;
+  assert.deepEqual(shown.cash, [summary?.minFailure.value??base.fail,summary?.minSuccess.value??base.success].map(v => dec(v).toFixed(4) + ' U'));
   for (const sign of [1,-1]) {
     const candidate = inspectRatio(scan.ctx, { sign, i: original.i, j: original.j });
     for (const path of ['fail','pass'])

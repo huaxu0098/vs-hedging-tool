@@ -50,7 +50,7 @@ try {
     if(!raw || !desk.dataset.resultId || !el('trace-id').textContent.endsWith(desk.dataset.resultId)) return false;
     const rules=JSON.parse(raw).rules;
     return ['ready','updating'].includes(desk.dataset.state) &&
-      ['mode','stage','R_success','jumpBps','delayBps','adverseBps','fundingDebit','external','movePct','hlUtil']
+      ['mode','stage','R_success','jumpBps','asyncBps','delayBps','adverseBps','fundingDebit','external','movePct','hlUtil']
         .every(id=>String(rules[id]??'')===el(id).value);
   })()`;
   const hasPlan = freshFrame + " && document.querySelector('#best-two').textContent.includes('第二优 PF')";
@@ -112,13 +112,14 @@ try {
   }
   for (const [field, value] of Object.entries({
     jumpBps: '1',
+    asyncBps: '1',
     delayBps: '1',
     adverseBps: '1',
     fundingDebit: '0.05'
   }))
     await set(field, value);
   await wait(
-    hasPlan + " && document.getElementById('stress-assumptions').textContent.includes('四项非零')",
+    hasPlan + " && document.getElementById('stress-assumptions').textContent.includes('五项非零')",
     40000
   );
   console.log(
@@ -129,7 +130,7 @@ try {
       )
     )
   );
-  for (const field of ['jumpBps', 'delayBps', 'adverseBps', 'fundingDebit']) await set(field, '');
+  for (const field of ['jumpBps', 'asyncBps', 'delayBps', 'adverseBps', 'fundingDebit']) await set(field, '');
   await set('jumpBps', '0');
   await wait(hasPlan + " && document.querySelector('#stress-assumptions').textContent.includes('零压力假设')", 40000);
   assert.match(await text('#stress-assumptions'), /零压力假设.*跳价/);

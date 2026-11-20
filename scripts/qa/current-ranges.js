@@ -46,7 +46,7 @@ try {
     )
   );
   console.log('RANGE12 极简首页与折叠详情通过');
-  await ready("document.getElementById('scan-representative').textContent.includes('最大 PF 目标仓位')");
+  await ready("document.getElementById('scan-cash').dataset.point");
   assert.ok(
     await run(`['scan-percent','scan-find','scan-reset','scan-slider','scan-smaller','scan-larger','scan-scale','scan-filter','scan-endpoint'].every(x=>!document.getElementById(x)) &&
     !document.getElementById('desk-details').open && !document.getElementById('scan-desk').innerText.includes('已选') &&
@@ -198,8 +198,7 @@ try {
   const current = calculateCurrent(g.rules,g.accounts,g.market,g.rates,Date.parse(guarded.at),g.options);
   assert.ok(guarded.id.endsWith(current.trace.id));
   const scan = current.ratioScan;
-  assert.deepEqual(guarded.targets, ['最大 PF 仓位','失败回收优先','成功留存优先']
-    .map(label=>scan.plans.rows.find(r=>r.labels.includes(label))?.key).filter(Boolean));
+  assert.deepEqual(guarded.targets,[scan.plans.targetKeys[0],scan.plans.pressure.key,...scan.plans.targetKeys.slice(1)].filter(Boolean));
   assert.ok(scan.buckets.every(bin => bin.edgeKey === 'joint' ? bin.both === scan.sets.both.count : bin.both === 0));
   if (scan.sets.both.count) {
     const range=scan.sets.both.range;

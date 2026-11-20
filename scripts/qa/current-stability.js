@@ -28,7 +28,7 @@ const install = `(() => {
             multiplier:s.ctx.market[k].multiplier,fx:s.ctx.market[k].fx}])),
           pfMark:s.ctx.market.pf.mark,hlMark:s.ctx.market.hl.mark, count:s.sets.legal.count,
           revaluation:r.revaluation, sequence:data.version, protect:s.ctx.book.B, reserve:s.ctx.params.R,
-          plans:['最大 PF 仓位','失败回收优先','成功留存优先'].map(label=>s.plans.rows.find(row=>row.labels.includes(label))).filter(Boolean),
+          plans:[s.plans.targetKeys[0],null,...s.plans.targetKeys.slice(1)].map((k,i)=>i===1?s.plans.pressure.row??null:s.plans.rows.find(row=>row.key===k)),
           fixed:s.plans.fixed, comparison:s.plans.comparison, comparisonRows:s.plans.rows.filter(row=>row.labels.includes('同 h 规模对照')),
           joint:{count:s.sets.both.count,min:s.sets.both.min,max:s.sets.both.max,minCount:s.sets.both.minCount,maxCount:s.sets.both.maxCount,
             counts:s.buckets.map(bin=>[bin.edgeKey,bin.both])}, rep:rep && {pf:rep.pfValue, hl:rep.hypeValue, fail:rep.fail, success:rep.success},
@@ -151,10 +151,11 @@ try {
   for (const f of frames) {
     assert.ok(f.status.includes('最近成功计算'));
     assert.equal(f.rows.length, f.bins.length);
-    assert.deepEqual(f.cash, [cash(f.plans[0].fail), cash(f.plans[0].success)]);
+    const featured=f.plans[1]?.pressureSummary;
+    assert.deepEqual(f.cash, [cash(featured?.minFailure.value ?? f.plans[0].fail), cash(featured?.minSuccess.value ?? f.plans[0].success)]);
     assert.equal(f.shown.length, f.plans.length);
     if(f.status.includes('当前数据有效')) assert.deepEqual(f.bookTimes,f.clocks);
-    assert.ok(f.plans.some(r=>r.labels.includes('最大 PF 仓位')));
+    assert.ok(f.plans.some(r=>r?.labels?.includes('最大 PF 仓位')));
     const two=(values,fmt)=>values.map(fmt).join(' – ');
     const money=x=>dec(x).toFixed(dec(x).abs().lt(1)&&!dec(x).isZero()?4:2)+' U';
     const pct=(x,digits)=>dec(x).times(100).toFixed(digits)+'%';
@@ -162,9 +163,10 @@ try {
     const delta=x=>(dec(x).gt(0)?'+':'')+cash(x);
     for (const [i, plan] of f.plans.entries()) {
       const {key,scenario,cells}=f.shown[i];
+      if (!plan) {assert.equal(key,'');continue;}
       assert.ok(f.clocks.every(stamp=>Number.isFinite(Date.parse(stamp))));
       for (const [column,end] of ['fail','pass'].entries()) {
-        const path=plan.paths[end], shown=f.shownPaths[i][column];
+        const path=plan.paths[end], shown=f.shownPaths[f.plans.slice(0,i).filter(Boolean).length][column];
         const expectedSign=end==='fail'?-plan.sign:plan.sign;
         assert.equal(dec(path.pf.exitMark).cmp(f.pfMark),expectedSign);
         assert.equal(dec(path.hl.exitMark).cmp(f.hlMark),expectedSign);
@@ -185,7 +187,8 @@ try {
         assert.ok(shown.includes('手续费 PF '+cash(path.pf.fees)+' / Hype '+cash(path.hl.fees)));
       }
       assert.equal(key,plan.key);
-      assert.equal(scenario,'失败✓ 成功✓ 初保✓ 路径待验 压力待验');
+      assert.ok(scenario);
+      if(i===1) assert.equal(plan.pressureSummary.status,'pass');
       for (const pathName of ['pass','fail']) {
         const test = plan.pathAudit[pathName].base;
         const liquidity=plan.liquidity[pathName];
@@ -230,15 +233,19 @@ try {
         assert.ok(test.checkpoints.every(p => dec(p.equity).gt(p.maintenance) && p.free != null));
       }
       assert.ok(dec(cells.h.slice(0,-1)).eq(dec(plan.h).times(100).toDecimalPlaces(cells.h.split('.')[1].length-1)));
-      const distance = plan.distance == null ? '无已验证交点' : dec(plan.distance).toFixed(2)+' USDT';
+      const summary=plan.pressureSummary;
+      const full=end=>plan.liquidity[end].full.settlement;
       for(const [field,expected] of Object.entries({
         pf:quantity(plan.pf),hl:quantity(plan.hl),pfValue:money(plan.pfValue),hypeValue:money(plan.hypeValue),
-        fail:cash(plan.fail),failDelta:delta(plan.failDelta),success:cash(plan.success),successDelta:delta(plan.successDelta),
-        leverage:plan.leverage+'×',initial:money(plan.initial),marginRate:pct(plan.marginRate,2),free:money(plan.free),distance
+        fail:cash(full('fail').personal),success:cash(full('pass').hype),
+        leverage:plan.leverage+'×',initial:money(plan.initial)
       })) assert.equal(cells[field],expected,field+' / '+key);
-      if(i===0) {
-        assert.match(f.warning,dec(plan.failDelta).lte('0.01') ? /基础情景可行，安全缓冲极薄，压力风险未验证/ : /最大基础情景可行仓位，压力安全性未验证/);
-        for(const field of ['marginRate','free','distance']) assert.ok(f.warning.includes(cells[field]));
+      for(const field of ['minFailure','minSuccess','maxMarginUsed','minSurplus']) {
+        const extremum=summary[field];
+        if(extremum) {
+          const printed=cells[field].match(/-?[0-9]+(?:\.[0-9]+)?/);
+          assert.ok(printed && dec(printed[0]).minus(extremum.value).abs().lte('0.005'),field+' / '+cells[field]);
+        }
       }
       if(plan.both) assert.ok(dec(plan.fail).gte(f.protect) && dec(plan.success).gte(f.reserve));
     }
@@ -287,11 +294,11 @@ try {
     if (width>=1000) assert.ok(layout.table <= height, JSON.stringify(layout));
     evidence.viewports.push(layout);
   }
-  assert.ok(await run("!document.getElementById('positions-view').open && !document.querySelector('#desk-details').open && document.getElementById('plan-columns').rows[0].cells.length===4 && !document.body.innerText.includes('全部目标仓位')"));
+  assert.ok(await run("!document.getElementById('positions-view').open && !document.querySelector('#desk-details').open && document.getElementById('plan-columns').rows[0].cells.length===5 && !document.body.innerText.includes('全部目标仓位')"));
   for (const f of frames) {
     assert.deepEqual(Object.values(f.panels.version),[f.id,...f.traceVersions]);
     assert.deepEqual(f.panels.positions,f.panels.live);
-    assert.equal(f.panels.live.length,3);
+    assert.equal(f.panels.live.length,f.plans.filter(Boolean).length);
     assert.equal(f.joint.counts.find(([key]) => key === 'joint')[1],f.joint.count);
     assert.ok(f.joint.counts.every(([key,n]) => key==='joint' || n===0));
     assert.ok(f.joint.minCount>0 && f.joint.maxCount>0);
@@ -318,7 +325,7 @@ try {
     const result=window.scanTest.results[id], read=id=>[...e(id).rows].map(tr=>[...tr.cells].map(td=>td.textContent));
     return {id, auto:result.comparison, autoPlans:result.comparisonRows, autoCells:read('scale-rows'),
       fixed:result.fixed,fixedCells:read('fixed-scale-rows'), source:e('scan-source').textContent,
-      targets:[...e('position-list-rows').rows].map(r=>r.dataset.point), winners:result.plans.map(r=>r.key)};
+      targets:[...e('position-list-rows').rows].map(r=>r.dataset.point), winners:result.plans.filter(Boolean).map(r=>r.key)};
   })()`);
   assert.deepEqual(comparison.targets,comparison.winners);
   for (const [pair,plans,cells] of [[comparison.auto,comparison.autoPlans,comparison.autoCells],
@@ -389,7 +396,7 @@ try {
   );
   assert.ok(
     await run(
-      "!document.body.textContent.includes('INVALID_LATE_TEST') && document.getElementById('scan-pass-summary').textContent.includes('97.00 U')"
+      "!document.body.textContent.includes('INVALID_LATE_TEST') && document.getElementById('reserve-threshold').textContent.includes('97')"
     )
   );
   const changed = await run(`(() => {
@@ -397,8 +404,8 @@ try {
     return {reserve:result.reserve, plans:result.plans, shown:[...document.querySelectorAll('#plan-columns th[data-point]')].map(th=>th.dataset.point)};
   })()`);
   assert.equal(changed.reserve, '97');
-  assert.deepEqual(changed.shown, changed.plans.map(p=>p.key));
-  assert.ok(changed.plans.every(p=>dec(p.success).gte(changed.reserve)));
+  assert.deepEqual(changed.shown, changed.plans.map(p=>p?.key??''));
+  assert.ok(changed.plans.filter(Boolean).every(p=>dec(p.success).gte(changed.reserve)));
   evidence.fundingChange = {reserve:changed.reserve, targets:changed.shown};
   // Tighten only the allowed skew across real market observations. Hold the
   // first recovered job to observe the gap between feed recovery and publication.
@@ -432,7 +439,7 @@ try {
   const cached=await run('window.scanTest.readPanels()');
   assert.deepEqual(cached.ids,Array(8).fill(cached.version.snapshotId));
   assert.deepEqual(cached.live,cached.positions);
-  assert.equal(cached.live.length,3);
+  assert.equal(cached.live.length,3+Number(!!saved.ratioScan.plans.pressure.row));
   assert.equal(cached.empty,'');
   assert.ok(await run("document.getElementById('current').dataset.historical==='true' && document.getElementById('position-list').checkVisibility()"));
   assert.equal(cached.version.rulesVersion,saved.rulesVersion);

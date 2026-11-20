@@ -161,7 +161,7 @@ test('AUTO09 达到已证明最优的现仓保持，双边差额为零', () => {
     capacity: ['30', '30']
   });
   const x = calc(
-    { adverseBps: '0.01', jumpBps: '0.01', delayBps: '0.01', fundingDebit: '0.001', B: '159' },
+    { adverseBps: '0.01', asyncBps:'0.01', jumpBps: '0.01', delayBps: '0.01', fundingDebit: '0.001', B: '159' },
     f
   );
   assert.equal(x.autoStatus, 'AUTO_HOLD');
@@ -348,17 +348,17 @@ test('未知数量、明确空仓及缺少实际设置的档位搜索严格区�
 
 test('空白、显式零、部分和非零压力；零两日波幅可计算', () => {
   const unspecified = calc();
-  assert.equal(unspecified.stress.missing.length, 4);
+  assert.equal(unspecified.stress.missing.length, 5);
   assert.ok(unspecified.candidate);
-  const zero = calc({ movePct: '0', adverseBps: '0', delayBps: '0', jumpBps: '0', fundingDebit: '0' });
-  assert.equal(zero.stress.zero.length, 4);
+  const zero = calc({ movePct: '0', asyncBps:'0', adverseBps: '0', delayBps: '0', jumpBps: '0', fundingDebit: '0' });
+  assert.equal(zero.stress.zero.length, 5);
   assert.equal(zero.stress.missing.length, 0);
   assert.equal(zero.stressedEquity, '1000');
   assert.ok(zero.candidate);
   const partial = calc({ jumpBps: '1', fundingDebit: '0' });
-  assert.equal(partial.stress.missing.length, 2);
-  const configured = calc({ jumpBps: '1', delayBps: '1', adverseBps: '1', fundingDebit: '0.01' });
-  assert.equal(configured.stress.positive.length, 4);
+  assert.equal(partial.stress.missing.length, 3);
+  const configured = calc({ jumpBps: '1', delayBps: '1', adverseBps: '1', asyncBps:'1', fundingDebit: '0.01' });
+  assert.equal(configured.stress.positive.length, 5);
 });
 
 test('首选、第二优与淘汰行都来自当次枚举和约束，不足两个候选时不补造', () => {
@@ -651,9 +651,9 @@ test('LEV11 档位证据区分交易所上限、当前设置、最低可行档�
   assert.ok(dec(c.leverageGrid[2].constraint.shortfall).gt(0));
   assert.equal(x.leverageStatus, 'LEVERAGE_UNVERIFIED');
 });
-test('STATE01 缺失、显式零、规划及未核实账户均只能产生条件方案；完整验证可通过', () => {
+test('STATE01 压力输入缺失、显式零、账户未核实或未进行逐仓验算时保持条件状态', () => {
   const f = fortyLevels();
-  const stress = { adverseBps: '0.1', jumpBps: '0.1', delayBps: '0.1', fundingDebit: '0.01', B: '159' };
+  const stress = { adverseBps: '0.1', asyncBps:'0.1', jumpBps: '0.1', delayBps: '0.1', fundingDebit: '0.01', B: '159' };
   const base = calc(stress, f);
   Object.assign(f.a.hl, {
     source: 'Hype 主网 API',
@@ -665,8 +665,10 @@ test('STATE01 缺失、显式零、规划及未核实账户均只能产生条件
     fee: '0',
     capacity: ['30', '30']
   });
-  assert.equal(calc(stress, f).autoStatus, 'AUTO_FEASIBLE');
-  for (const field of ['adverseBps', 'jumpBps', 'delayBps', 'fundingDebit'])
+  const preflight=calc(stress,f);
+  assert.equal(preflight.autoStatus,'AUTO_PARTIAL');
+  assert.ok(preflight.unverified.includes('未执行逐仓盘口与价格压力核验'));
+  for (const field of ['adverseBps', 'asyncBps', 'jumpBps', 'delayBps', 'fundingDebit'])
     for (const value of ['', '0']) {
       const x = calc({ ...stress, [field]: value }, f);
       assert.ok(x.candidate);
@@ -744,7 +746,7 @@ test('OPT02 搜索范围记录双边方向、步长和数量上限，预算中�
   const partial = calculateCurrent(inputs, f.a, f.m, {}, t, { searchBudget: 1 });
   assert.equal(partial.search.complete, false);
   assert.ok(!partial.maximum?.complete);
-  assert.equal(full.trace.model, 'AUTO-0.21.6');
+  assert.equal(full.trace.model, 'AUTO-0.21.7');
 });
 test('OPT03 PF 虚拟保证金、目标 Hype 初始、其他占用及调仓后真实可用分别核验', () => {
   const f = fixture();
@@ -1873,7 +1875,7 @@ test('每行原生买卖均价及双边费用来自同一个差额仓位，外�
   }
 });
 
-test('断线重载保留三目标与同规模对照的原始记录，资金来源之间隔离', () => {
+test('断线重载保留四个目标槽及同规模对照的原始记录，资金来源之间隔离', () => {
   const f = fixture(), result = scanFixture({}, f);
   result.calculationMarket = f.m;
   const data = new Map(), storage = {
@@ -1887,14 +1889,16 @@ test('断线重载保留三目标与同规模对照的原始记录，资金来�
   assert.equal(displayHistory(storage).read('account:BTC'),null);
   const [[key,raw]]=data.entries(), old=JSON.parse(raw);
   const restored=displayHistory(storage).read('plan:BTC');
-  assert.deepEqual(restored.targets.map(row=>row.key),result.ratioScan.plans.targetKeys);
-  for (const row of restored.targets) assert.equal(row,restored.ratioScan.plans.rows.find(p=>p.key===row.key));
+  const basicSlots=[0,2,3];
+  assert.deepEqual(basicSlots.map(i=>restored.targets[i].key),result.ratioScan.plans.targetKeys);
+  assert.equal(restored.targets[1],restored.ratioScan.plans.pressure?.row ?? null);
+  for (const i of basicSlots) assert.equal(restored.targets[i],restored.ratioScan.plans.rows.find(p=>p.key===restored.targets[i].key));
   assert.equal(restored.quoteSnapshotId,result.trace.marketId);
   delete old.view.ratioScan.plans.targetKeys;
   delete old.view.trace.accountsId;
   storage.setItem(key,JSON.stringify(old));
   const migrated=displayHistory(storage).read('plan:BTC');
-  assert.deepEqual(migrated.targets.map(row=>row.key),result.ratioScan.plans.targetKeys);
+  assert.deepEqual(basicSlots.map(i=>migrated.targets[i].key),result.ratioScan.plans.targetKeys);
   assert.equal(migrated.accountSnapshotId,null);
   delete old.view.ratioScan.plans;
   storage.setItem(key,JSON.stringify(old));
@@ -1922,15 +1926,17 @@ test('发布快照引用同一批目标并冻结，修改资金规则后各版�
   assert.equal(first.quoteSnapshotId,next.quoteSnapshotId);
   assert.equal(first.accountSnapshotId,next.accountSnapshotId);
   const plans=first.ratioScan.plans;
-  assert.equal(first.targets.length,3);
-  for (const [i,row] of first.targets.entries()) {
+  assert.equal(first.targets.length,4);
+  assert.equal(first.targets[1],plans.pressure.row ?? null);
+  for (const [i,slot] of [0,2,3].entries()) {
+    const row=first.targets[slot];
     assert.equal(row,plans.rows.find(r=>r.key===plans.targetKeys[i]));
     assert.throws(()=>{row.fail='0'},TypeError);
   }
   for (const row of first.scale.automatic.rows)
     assert.equal(row,plans.rows.find(r=>r.key===row.key));
   const none=publish({recoveryBuffer:'1000'});
-  assert.deepEqual(none.targets,[null,null,null]);
+  assert.deepEqual(none.targets,[null,null,null,null]);
   assert.equal(none.ratioScan.plans.eligible,0);
   assert.ok(Object.isFrozen(first) && Object.isFrozen(first.targets) && Object.isFrozen(first.scale.fixed.rows));
 });
@@ -2173,7 +2179,7 @@ test('完整路径：成功终点现金与维持保证金都充足，途中基�
   Object.assign(f.a.hl,{qty:'-4',equity:'75',free:'35',currentMarginCredit:'40',leverage:'10'});
   f.m.hl.marginTiers.push({lowerBound:'450',maxLeverage:5});
   const rules = {B:'100',R_success:'10',R_free:'0',minBuffer:'0',adverseBps:'200',
-    jumpBps:'25',delayBps:'300',fundingDebit:'0.1'};
+    jumpBps:'25',asyncBps:'1',delayBps:'300',fundingDebit:'0.1'};
   const scan = scanFixture(rules,f).ratioScan;
   const point = {sign:1,i:10,j:4};
   const row = inspectRatio(scan.ctx,point,{includePathAudit:true});
@@ -2233,7 +2239,7 @@ test('完整路径：PF 空、Hype 多，跌破长仓清算界后反弹也不得
   const f=fixture();
   Object.assign(f.a.hl,{qty:'4',equity:'75',free:'35',currentMarginCredit:'40',leverage:'10'});
   const scan=scanFixture({B:'100',R_success:'10',R_free:'0',minBuffer:'0',
-    adverseBps:'200',jumpBps:'25',delayBps:'300',fundingDebit:'0.1'},f).ratioScan;
+    adverseBps:'200',jumpBps:'25',asyncBps:'1',delayBps:'300',fundingDebit:'0.1'},f).ratioScan;
   const target={sign:-1,i:10,j:4};
   const row=inspectRatio(scan.ctx,target,{includePathAudit:true});
   assert.equal(row.conditionalEndpoints.successHype,'26.9');
@@ -2403,7 +2409,7 @@ test('发布验收：三个方向逐个对齐，跨候选价格或起始行情�
   assert.equal(pointKey(focus),view.targets[0].key);
   for (const end of ['fail','pass'])
     assert.equal(focus.paths[end].pf.exitMark,view.targets[0].paths[end].pf.exitMark);
-  for (const p of view.targets) for (const end of ['fail','pass']) {
+  for (const p of view.targets.filter(Boolean)) for (const end of ['fail','pass']) {
     const path=p.paths[end], ledger=p.pathAudit[end].base.settlement;
     assert.equal(path.pf.exitMark,ledger.pfMark);
     assert.equal(path.hl.finalEquity,ledger.hype);
@@ -2411,7 +2417,7 @@ test('发布验收：三个方向逐个对齐，跨候选价格或起始行情�
     assert.equal(dec(path.pf.markPnl).cmp(0),end==='pass'?1:-1);
   }
   const bad=structuredClone(result);
-  bad.ratioScan.plans.rows.find(p=>p.key===view.targets[1].key).paths.fail.pf.exitMark='100';
+  bad.ratioScan.plans.rows.find(p=>p.key===view.targets[2].key).paths.fail.pf.exitMark='100';
   assert.throws(()=>createSolutionSnapshot(bad),/不一致/);
   const stale=structuredClone(result);
   stale.calculationMarket.pf.mark='101';
@@ -2562,7 +2568,7 @@ function pressureFixture() {
 
 test('LIQSEL01 前两档退出成为数量和现金硬约束，压力最大值与逐点独立穷举一致',()=>{
   const initial={B:'157',R_success:'72',R_free:'0',pfFee:'0.0001',hlFee:'0.0005'};
-  for (const patch of [{},{adverseBps:'4',jumpBps:'8',delayBps:'2',fundingDebit:'0.1'},
+  for (const patch of [{},{adverseBps:'4',jumpBps:'8',delayBps:'2',asyncBps:'1',fundingDebit:'0.1'},
       {R_success:'71',recoveryBuffer:'2',minMaintenanceSurplus:'8'}]) {
     const result=scanFixture({...initial,...patch},pressureFixture());
     const scan=result.ratioScan,pressure=scan.plans.pressure;
@@ -2689,4 +2695,139 @@ test('LIQSEL07 现仓差额、手续费与延迟扣款进入撤档求解，最�
   assert.ok(sizes.length);
   assert.equal(worker.plans.pressure.row.i,Math.max(...sizes));
   assert.equal(configured.plans.pressure.row.i,Math.max(...sizes));
+});
+
+
+test('PRESSRANK01 0.1168 BTC 空对 0.01798 BTC 多，撤档跌破 500 U 不得进入压力最大方案',()=>{
+  // Reconstruct the supplied cash boundary on a controlled native book. The
+  // historical exchange levels are unavailable; this is a regression fixture.
+  const {ctx}=scanFixture().ratioScan;
+  Object.assign(ctx.book,{pf:'10000',hl:'409',B:'500',challengeFloor:'9400',challengeTarget:'12000'});
+  Object.assign(ctx.params,{R:'100',target:'12000',recoveryBuffer:'0'});
+  for(const [side,rate] of [['pf','0.0001'],['hl','0.0005']]){
+    Object.assign(ctx.market[side],{mark:'60000',rate,step:'0.00001',minQty:'0.00001',minNotional:'0',free:ctx.book[side],
+      bids:[['59999.5','1'],['59998.496','1'],['59997','1']],asks:[['60000.5','1'],['60001.7','1'],['60002.5','1']]});
+  }
+  const check=()=>planRecord({ctx},{sign:-1,i:11680,j:1798});
+  ctx.book.hl=out(dec(ctx.book.hl).plus('500.0015').minus(check().liquidity.fail.full.settlement.personal));
+  const row=check();
+  assert.equal(dec(row.liquidity.fail.full.settlement.personal).toFixed(4),'500.0015');
+  assert.equal(dec(row.liquidity.fail.settlement.personal).toFixed(4),'499.9619');
+  assert.equal(row.liquidity.fail.status,'fail');
+  assert.equal(row.configuredPass,false);
+  assert.equal(row.pressureSummary.status,'fail');
+});
+
+test('PRESSRANK02 全网格与所有同规模并列项的独立排序一致，收紧不同步或资金费可改变仓位',()=>{
+  const fixture=pressureFixture();
+  const baseline={B:'157',R_success:'65',R_free:'0',pfFee:'0.0001',hlFee:'0.0005',
+    adverseBps:'1',asyncBps:'1',jumpBps:'1',delayBps:'1',fundingDebit:'0.01'};
+  let tied=false;
+  const outcomes=[];
+  for (const patch of [{},{B:'142'},{asyncBps:'150'},{fundingDebit:'4'},{fundingDebit:'1.95',fundingRatesBps:'70,25'},{asyncBps:'900',fundingDebit:'7'}]) {
+    const r={...inputs,...baseline,...patch};
+    const configured=scanFixture(r,fixture).ratioScan;
+    const desk=calculateCurrent(r,fixture.a,fixture.m,{},t,{scanRatios:true,baseObjectives:true}).ratioScan;
+    const valid=[];
+    for(const sign of [1,-1]) for(let i=1;i<=10;i++) for(let j=0;j<=6;j++){
+      if (!ratioSlice(desk,sign,i,'eligible').some(([lo,hi])=>lo<=j && j<=hi)) continue;
+      const row=planRecord(configured,{sign,i,j}),p=row.pressureSummary;
+      if (!row.configuredPass || p.status!=='pass') continue;
+      const cases=p.cases.filter(c=>c.configured && c.status==='pass');
+      const fail=min(...cases.map(c=>dec(c.fail.cash))),success=min(...cases.map(c=>dec(c.success.cash)));
+      assert.ok(fail.eq(p.minFailure.value) && success.eq(p.minSuccess.value));
+      valid.push({row,headroom:min(fail.minus(r.B),success.minus(r.R_success)),
+        margin:dec(p.maxMarginUsed.value),surplus:dec(p.minSurplus.value)});
+    }
+    valid.sort((a,b)=>b.row.i-a.row.i || b.headroom.cmp(a.headroom) || b.surplus.cmp(a.surplus) ||
+      a.margin.cmp(b.margin) || Number(a.row.leverage)-Number(b.row.leverage) ||
+      b.row.sign-a.row.sign || a.row.j-b.row.j);
+    const best=valid[0]?.row.key??null;
+    assert.equal(configured.plans.pressure.key,best);
+    assert.equal(desk.plans.pressure.key,best);
+    outcomes.push(best);
+    if (valid.length && valid.filter(x=>x.row.i===valid[0].row.i).length>1) tied=true;
+  }
+  assert.ok(tied);
+  assert.ok(new Set(outcomes).size>1);
+});
+
+
+test('PRESSRANK03 延迟增加仓位时单独核验抵押品，先尝试更高合法杠杆再缩仓',()=>{
+  const f=pressureFixture();
+  Object.assign(f.a.pf,{qty:'-7',free:'930'});
+  const r={...inputs,mode:'keepPF',B:'153',R_success:'65',R_free:'19.9',delayBps:'100'};
+  const x=calculateCurrent(r,f.a,f.m,{},t,{scanRatios:true});
+  const scan=x.ratioScan, point={i:7,j:3,sign:-1};
+  const at=lev=>recordFromInspection(scan.ctx,inspectRatio(scan.ctx,point,{includePathAudit:true,fixedLeverage:lev}));
+  const basic=at(3),larger=at(4);
+  assert.equal(basic.configuredPass,false);
+  assert.equal(basic.pressureSummary.retryLeverage,true);
+  assert.equal(larger.configuredPass,true);
+  const winner=scan.plans.pressure.row;
+  assert.equal(winner.key,larger.key);
+  assert.equal(winner.leverage,'4');
+  assert.equal(winner.pressureSummary.key,winner.key);
+});
+
+
+test('PRESSRANK04 逐期资金费和金额预算属于同一类压力，错误输入阻断，清除后旧快照失效',()=>{
+  const f=pressureFixture();
+  const r={...inputs,B:'157',R_success:'65',R_free:'0',adverseBps:'1',asyncBps:'1',jumpBps:'1',delayBps:'1',fundingDebit:''};
+  const run=p=>calculateCurrent({...r,...p},f.a,f.m,{},t,{scanRatios:true,baseObjectives:true});
+  const absent=run({}),entries=run({fundingRatesBps:' 2.5， 1 , 0 '});
+  assert.equal(absent.stress.positive.length,4);
+  assert.equal(entries.stress.positive.length,5);
+  assert.deepEqual(entries.stress.fundingRatesBps,['2.5','1','0']);
+  assert.ok(!entries.missingFields.some(g=>g.id==='fundingDebit'));
+  assert.equal(entries.ratioScan.plans.pressure.status,'feasible');
+  const cleared=run({fundingRatesBps:''});
+  assert.notEqual(entries.trace.rulesId,cleared.trace.rulesId);
+  assert.equal(cleared.trace.rulesId,absent.trace.rulesId);
+  assert.deepEqual(cleared.stress.fundingRatesBps,[]);
+  assert.equal(cleared.ratioScan.plans.pressure.status,'conditional');
+  const zero=run({fundingRatesBps:'0, 0.00'});
+  assert.equal(zero.stress.zero.length,1);
+  assert.equal(zero.stress.missing.length,0);
+  assert.equal(zero.ratioScan.plans.pressure.status,'conditional');
+  const budget=run({fundingRatesBps:'0,0',fundingDebit:'0.05'});
+  assert.equal(budget.stress.positive.length,5);
+  for (const fundingRatesBps of ['3,,4','1,','-1','NaN','1e999','3， -0.1']) {
+    const error=run({fundingRatesBps,fundingDebit:'0.05'});
+    assert.equal(error.autoStatus,'AUTO_DATA_BLOCKED');
+    assert.ok(!error.ratioScan && !error.needsSearch);
+    assert.ok(error.missingFields.some(g=>g.id==='fundingRatesBps'));
+  }
+});
+
+
+test('PRESSRANK05 较大手数缺少已配置情景证据时不得以较小仓位冒充最大',()=>{
+  const scan=scanFixture({B:'157',R_success:'65',R_free:'0'},pressureFixture()).ratioScan;
+  const largest=scan.plans.pressure.row.i;
+  const observed=new Set();
+  const search=searchLiquidityMaximum(scan,point=>{
+    const row=planRecord(scan,point);
+    observed.add(point.i);
+    if(point.i!==largest || !row.configuredPass) return row;
+    return {...row,configuredPass:false,pressureSummary:{...row.pressureSummary,status:'unknown'}};
+  });
+  assert.equal(search.status,'incomplete');
+  assert.equal(search.key,null);
+  assert.ok(![...observed].some(i=>i<largest));
+});
+
+
+test('四方案快照核对压力极值的情景来源，并拒收借用其他候选的压力汇总',()=>{
+  const f=pressureFixture();
+  const result=scanFixture({B:'157',R_free:'0',R_success:'72'},f);
+  result.calculationMarket=f.m;
+  const frame=createSolutionSnapshot(result),plans=frame.ratioScan.plans;
+  assert.deepEqual(frame.targets.map(t=>t?.key),[plans.targetKeys[0],plans.pressure.key,...plans.targetKeys.slice(1)]);
+  assert.equal(frame.targets[1],plans.pressure.row);
+  for(const change of [p=>{p.pressure.row.pressureSummary.minFailure.value='10000';},
+      p=>{p.pressure.row.pressureSummary.leverage='999';},p=>{p.pressure.row.pressureSummary.cases.find(c=>c.id==='B').success.cash='0';}]){
+    const damaged=structuredClone(result);
+    change(damaged.ratioScan.plans);
+    assert.throws(()=>createSolutionSnapshot(damaged),/压力/);
+  }
 });

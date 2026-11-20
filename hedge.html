@@ -40,7 +40,7 @@
           </table>
         </section>
         <section id="scan-focus" aria-labelledby="cash-heading">
-          <h2 id="cash-heading">资金结果 <small class="history-label"></small> <time id="cash-calculated-at"></time></h2>
+          <h2 id="cash-heading"><span id="cash-source">资金结果</span> <small class="history-label"></small> <time id="cash-calculated-at"></time></h2>
           <div id="scan-cash" class="scan-paths">
             <div><h3>失败后 · 个人回收</h3><strong id="scan-fail-cash">—</strong><small id="scan-fail-summary"></small></div>
             <div><h3 id="scan-pass-title">通过后 · Hype 剩余</h3><strong id="scan-pass-cash">—</strong><small id="scan-pass-summary"></small></div>
@@ -57,13 +57,12 @@
           </dl>
         </section>
         <section id="scan-results" aria-labelledby="bands-heading">
-          <div class="bands-heading"><h2 id="bands-heading">三种条件目标方案 <small class="history-label"></small></h2><small><span id="plan-stress"></span><span id="plan-caption"></span></small></div>
+          <div class="bands-heading"><h2 id="bands-heading">四种条件目标方案 <small class="history-label"></small></h2><small><span id="plan-stress"></span><span id="plan-caption"></span></small></div>
           <div id="max-risk" hidden>
             <strong id="max-risk-title"></strong>
             <span id="max-risk-values"></span>
             <a id="scale-link" href="#scale-details" hidden>查看同比例扩仓差额</a>
           </div>
-          <small id="liquidity-maximum" hidden></small>
           <div id="plan-comparison" class="table-wrap" hidden>
             <table class="plan-matrix" aria-labelledby="bands-heading">
               <thead id="plan-columns"><tr><th scope="col">比较指标</th></tr></thead>
@@ -75,11 +74,13 @@
       </div>
       </details>
       <details id="positions-view" name="workbench-view"><summary hidden>仓位明细</summary>
-        <h2>三个方案的目标仓位 <small class="history-label"></small></h2>
-        <p class="position-assumptions">基础平仓沿用本快照可见深度。撤档压力按两边平仓侧最优档消失重算，未来流动性和成交价待核实。点差成本相对买卖中价，滑点相对同侧首档。路径进度表示条件价格位置，实际发生时间未知。可用抵押品按新增仓位估算，可提款额另按平台规则核算。</p>
+        <h2>四个方案的目标仓位 <small class="history-label"></small></h2>
+        <p class="position-assumptions">PF 与 Hype 按各自原生盘口估价。压力情景按当前可见深度推算条件平仓，实际退出深度待核实。</p>
         <p id="positions-empty">等待首份计算快照</p>
         <div class="table-wrap"><table id="position-list" hidden><thead><tr><th>方案</th><th>PF 数量 / 名义额</th><th>Hype 数量 / 名义额</th><th>失败路径 · 个人回收</th><th>成功路径 · Hype 剩余</th></tr></thead><tbody id="position-list-rows"></tbody></table></div>
-        <details id="liquidity-evidence"><summary>最大压力情景仓位的退出证据</summary><div id="liquidity-evidence-body"></div></details>
+        <section id="plan-evidence" aria-labelledby="plan-evidence-heading" hidden>
+          <h3 id="plan-evidence-heading">逐方案压力核验</h3>
+        </section>
         <section id="scale-details">
           <h2>同一比例的扩仓对照 <small class="history-label"></small></h2>
           <div class="scale-method"><h3>A · 固定杠杆</h3><p id="fixed-scale-caption"></p>
@@ -459,7 +460,7 @@
         <details id="subset-detail"><summary>逐段核对七类候选的数量、现金、手续费与风险</summary><p>各类数量可重叠。全部合法仓位包含提前强平的组合，该类现金列为假设能到达终点的估值。其余六类均通过路径保证金检查。</p><div class="table-wrap"><table><thead id="subset-columns"></thead><tbody id="scan-subsets"></tbody></table></div></details>
         <details id="scan-exclusions"><summary>各段未达到两端约束的数量</summary><div id="scan-risk-counts"></div></details>
       </details>
-      <details id="scan-detail"><summary>双向成交成本与首页目标流水</summary><pre id="scan-audit"></pre></details>
+      <details id="scan-detail"><summary>基础最大仓位的双向成交成本与流水</summary><pre id="scan-audit"></pre></details>
 
       <details class="card" id="trace-panel">
         <summary>本次计算依据 · <span id="trace-id"></span></summary>
@@ -471,7 +472,7 @@
       </details>
       </details>
         <details class="desk-group" id="stress-guide"><summary>压力假设</summary>
-          <p>四项均为本机用户假设。基差或跳价取对 Hype 不利的一侧，两者取较大变动；终点按调仓差额计延迟成本；持仓期间另检验盘口错位，允许延迟幅度与不利基差同时发生。两种路径分别验算，资金费每条路径只扣一次。空白表示未配置，手工填 0 表示明确采用零压力。</p>
+          <p>分别配置不利基差、双边报价不同步、单边调仓延迟、不利跳价和持有期间累计资金费。组合情景在完整盘口、撤一档、撤两档下叠加已配的不利价格偏移，按实际调仓差额计延迟成本。资金费可填持有期总支出（U）或用逗号分隔的逐期不利费率（基点）。逐期测算沿用同一目标仓位，按路径内最高原生名义额计提。两种预算同时填写时取较大值，每条路径只扣一次。空白表示未配置，手工填 0 表示采用零压力假设。</p>
           <div class="form" id="stress-fields"></div>
         </details>
       <details class="desk-group" id="connection-details"><summary>合约规格与行情连接</summary>

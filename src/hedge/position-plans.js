@@ -1,3 +1,4 @@
+import { pressureSummary } from './pressure-summary.js';
 import { exitLiquidity } from './exit-liquidity.js';
 import { adjustmentAfterOrders } from './order-adjustment.js';
 import { sumPostings, settlementBridge, settlementTolerance, checkSignedPath, checkPFBoundary } from './settlement-ledger.js';
@@ -201,15 +202,31 @@ export function recordFromInspection(ctx, row, pairs = {fail:reachableLedgers(ct
   const liquid=exits.every(test=>test?.status==='pass');
   const depthStatus=exits.some(test=>test?.status==='fail') ? 'fail' :
     exits.some(test=>test?.status==='insufficient') ? 'insufficient' : liquid ? 'pass' : 'unknown';
-  const settlementOK=Object.entries(pathAudit).every(([end,group])=>group &&
-    Object.values(group).every(test=>test.shift==null || (test.settlement && (end==='fail'
-      ? dec(test.settlement.personal).gte(dec(ctx.book.B).plus(ctx.params.recoveryBuffer??'0'))
-      : dec(test.settlement.hype).gte(ctx.params.R)))));
+  const pressure=pressureSummary(ctx,row,liquidity);
   const verification=row.verification && {...row.verification};
-  if (verification?.stress==='pass') {
-    if (verification.path!=='pass') verification.stress=verification.path;
-    else if (!liquid || !settlementOK)
-      verification.stress=exits.some(test=>test?.status==='unknown' || !test) ? 'unknown' : 'fail';
+  if (pressure) {
+    // A priced endpoint on an existing risk path is still a hard gate.
+    // Preserve its reason in the published status even when the A–C exits pass.
+    const checks=[];
+    const floor=dec(ctx.book.B).plus(ctx.params.recoveryBuffer??'0');
+    for(const [end,group] of Object.entries(pathAudit)) {
+      for (const test of Object.values(group??{})) {
+        if(test.shift==null) continue;
+        const value=test.settlement?.[end==='fail'?'personal':'hype'];
+        checks.push(value==null?(test.status==='fail'?'fail':'unknown'):
+          dec(value).gte(end==='fail'?floor:ctx.params.R)?'pass':'fail');
+      }
+    }
+    checks.push(verification?.initial??'unknown',verification?.path??'unknown');
+    if (ctx.checks.fullStress) checks.push(verification?.stress??'unknown');
+    if (!row.coversWithBuffer || !row.survives) checks.push('fail');
+    const status=checks.includes('fail')?'fail':checks.includes('unknown')?'unknown':'pass';
+    if (status!=='pass' && pressure.status!=='fail') {
+      pressure.status=status;
+      pressure.worstCase={id:'path',label:'账户与持仓路径核验',endpoint:null,
+        reason:row.failStop??row.passStop??row.reason?.label??row.reason?.code??'已配置路径未满足资金或保证金约束'};
+    }
+    if (verification?.stress==='pass') verification.stress=pressure.status;
   }
   return {
     sign, i, j, key: pointKey(row), h: row.h,
@@ -225,9 +242,8 @@ export function recordFromInspection(ctx, row, pairs = {fail:reachableLedgers(ct
     successPersonal: row.passStop ? null : row.successPersonal,
     successDelta: row.passStop ? null : out(dec(row.successPersonal).minus(ctx.book.B)),
     failStop: row.failStop, passStop: row.passStop,
-    pathAudit, verification, liquidity, depthStatus,
-    configuredPass:!!(row.both && liquid && settlementOK && row.verification?.initial==='pass' && row.verification?.path==='pass' &&
-      (!ctx.checks.fullStress || verification?.stress==='pass')),
+    pathAudit, verification, liquidity, depthStatus, pressureSummary:pressure,
+    configuredPass:!!(row.both && pressure?.status==='pass'),
     depth:{fail:orderEvidence(ctx,row,'fail'),pass:orderEvidence(ctx,row,'pass')},
     coverage: verification?.stress==='pass' && ctx.checks?.fullStress && row.crossChecked &&
       Object.values(pathAudit).every(group=>group?.basisWiden && group?.basisNarrow &&

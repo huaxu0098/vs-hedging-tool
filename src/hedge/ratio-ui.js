@@ -1,5 +1,4 @@
 import { publicationState } from './display-history.js';
-import { planObjectives as objectives } from './position-plans.js';
 import { dec } from './math.js';
 import { inspectRatio, ratioSlice } from './ratio-scan.js';
 import { capitalGroups, reportGroups, subsetGroups, recoveryCushion } from './range-report.js';
@@ -139,22 +138,57 @@ function auditText() {
     );
   write('scan-audit', lines.join('\n'));
 }
+const objectives = [
+  ['base','基础情景最大仓位'],
+  ['pressure','已配置压力下最大仓位'],
+  ['failure','失败端回收缓冲优先'],
+  ['success','成功端现金留存优先']
+];
+
+const fullCash = (plan, end) => {
+  const evidence=plan.liquidity?.[end]?.full;
+  if (evidence) return evidence.settlement?.[end==='fail'?'personal':'hype'] ?? null;
+  return end==='fail' ? plan.fail : plan.success;
+};
+
+// The two pressure figures can be reached under different shocks. Keep each
+// cash amount paired with its scenario; a recorded A–C result may predate this audit.
+function showHeadline(snapshot,diagnostic) {
+  const [base,pressure]=snapshot.targets, scan=snapshot.ratioScan;
+  const stress=pressure?.pressureSummary;
+  const certified=stress?.status==='pass' && stress.minFailure?.value!=null && stress.minSuccess?.value!=null;
+  const target=certified ? pressure : base ?? diagnostic;
+  const fail=certified ? stress.minFailure.value : fullCash(target,'fail');
+  const pass=certified ? stress.minSuccess.value : fullCash(target,'pass');
+  const floor=scan.recoveryFloor ?? scan.ctx.book.B, reserve=scan.ctx.params.R, B=scan.ctx.book.B;
+  const source=certified?'压力最大仓位 · 已核价情景最低资金':base?
+    (scan.plans?.pressure?.status==='none'?'无可行压力仓位 · 基础最大资金对照':'基础最大资金对照 · 压力待核实'):'条件路径对照';
+  write('cash-source',source);
+  const cash=$('scan-cash');
+  cash.dataset.point=target.key??'';
+  cash.dataset.objective=certified?'pressure':base?'base':'diagnostic';
+  write('scan-fail-cash',settlementAmount(fail));
+  write('scan-pass-cash',settlementAmount(pass));
+  const cushion=fail==null?null:recoveryCushion(fail,B);
+  $('scan-fail-summary').classList.toggle('thin-buffer',!!cushion?.thin);
+  const delta=(amount,limit)=>signedCash(dec(amount).minus(limit));
+  write('scan-fail-summary',fail==null?'完整退出未验证':
+    (certified?stress.minFailure.label+' · ':'')+'较本金 '+delta(fail,B)+
+    (cushion.thin?' · 极薄缓冲':'')+(dec(floor).gt(B)?' · 保护门槛 '+usd(floor):''));
+  write('scan-pass-summary',pass==null?'完整退出未验证':
+    (certified?stress.minSuccess.label+' · ':'')+'较最低留存 '+delta(pass,reserve));
+  write('scan-representative',(!certified && !base?'仅作路径对照 · ':'')+pct(target.h));
+  write('scan-position','PF '+targetQty(target.pf,scan.ctx.market.pf)+' / '+usd(target.pfValue)+
+    ' · Hype '+targetQty(target.hl,scan.ctx.market.hl)+' / '+usd(target.hypeValue));
+}
 function showRepresentative(snapshot, auditScan) {
   const { ratioScan:scan, targets:[maximum], stress } = snapshot;
-  const { objective, group, buffer, complete } = scan.representative;
+  const { buffer } = scan.representative;
   const row = scan.plans?.focus ?? scan.representative.row;
   const { book, params } = scan.ctx;
-  // Prices, cash and advanced postings follow the same signed target.
+  // Advanced rule, cutoff and ledger evidence belongs to the base objective.
   const target = maximum ?? row;
-  const diagnostic = !maximum && objective === 'diagnostic';
-  write('scan-representative', maximum ? '基础情景最大 PF 目标仓位 · ' + pct(target.h) :
-    diagnostic ? '条件对照 · 当前无可推荐仓位' : '条件目标方案 · ' + pct(target.h));
-  const unit = side => scan.ctx.market[side].unit === 'contract' ? '张' : scan.ctx.market[side].unit;
-  write('scan-position', (diagnostic ? '仅作路径对照（对照比例 ' + pct(target.h) + '）' : '') +
-    ' PF ' + (target.sign > 0 ? '多 ' : '空 ') + usd(target.pfValue) + '（' + dec(target.pf).abs() + ' ' + unit('pf') +
-    '） · Hype ' + (target.j === 0 ? '空仓 ' : target.sign > 0 ? '空 ' : '多 ') + usd(target.hypeValue) +
-    '（' + dec(target.hl).abs() + ' ' + unit('hl') + '）' +
-    (diagnostic ? ' · ' + (names[group] ?? '通过保证金检查') : '') + (!complete && !diagnostic ? ' · 限已扫描规模' : ''));
+  showHeadline(snapshot,row);
   const excess = dec(maximum?.failDelta ?? row.failureVsProtection),
     B = dec(book.B);
   const cushion = maximum ? recoveryCushion(maximum.fail,book.B) : row.cushion;
@@ -162,9 +196,6 @@ function showRepresentative(snapshot, auditScan) {
   const thin = cushion.thin;
   const stressIncomplete = stress?.missing.length || stress?.zero.length;
   $('scan-fail-net').classList.toggle('thin-buffer', thin);
-  const focusThin = target.fail != null && thin;
-  $('scan-fail-summary').classList.toggle('thin-buffer', focusThin && !target.failStop);
-  write('scan-fail-cash', target.failStop ?? settlementAmount(target.fail));
   write(
     'scan-fail-net',
     target.failStop
@@ -188,7 +219,6 @@ function showRepresentative(snapshot, auditScan) {
     'scan-pass-title',
     row.funded ? '提款线 · Hype 到账前剩余' : '通过后 · Hype 剩余'
   );
-  write('scan-pass-cash', target.passStop ?? settlementAmount(target.success));
   const diff = dec(target.successPersonal).minus(B);
   write(
     'scan-pass-net',
@@ -206,12 +236,6 @@ function showRepresentative(snapshot, auditScan) {
           ' · 相对累计投入 ' +
           settlementAmount(params.profitBasis==null ? null : dec(target.successPersonal).minus(params.profitBasis))
   );
-  write('scan-fail-summary', target.failStop ? '该路径未结算' :
-    (excess.lt(0) ? '距本金差 ' : '高于本金 ') + settlementAmount(excess.abs()) +
-    (focusThin ? ' · 极薄缓冲' : ''));
-  write('scan-pass-summary', target.passStop ? '该路径未结算' :
-    (diff.lt(0) ? '个人距本金差 ' : '个人较本金多 ') + settlementAmount(diff.abs()) +
-    ' · ' + (target.survives ? '满足 ' : '低于 ') + usd(params.R) + ' 留存');
   if (maximum && (maximum.sign!==row.sign || maximum.i!==row.i || maximum.j!==row.j)) {
     // Older snapshots can contain a preference ledger for a different position.
     for (const id of ['scan-deadline','scan-deadline-note','scan-risk','scan-funded'])
@@ -330,6 +354,7 @@ function patchRows(body, next) {
       if (row.dataset.band !== incoming.dataset.band) row.dataset.band = incoming.dataset.band;
       if (row.dataset.subset !== incoming.dataset.subset) row.dataset.subset = incoming.dataset.subset;
     }
+    if (incoming.dataset.case) row.dataset.case=incoming.dataset.case;
     if (row.className !== incoming.className) row.className = incoming.className;
     const cells = Array.from(incoming.cells);
     for (const [j, cell] of cells.entries()) {
@@ -544,24 +569,43 @@ const comparisonMetrics = [
   ['pfValue', 'PF 名义金额', p => usd(p.pfValue)],
   ['hl', 'Hype 目标仓位', (p,s) => targetQty(p.hl, s.ctx.market.hl)],
   ['hypeValue', 'Hype 名义金额', p => usd(p.hypeValue)],
-  ['fail', '失败后个人回收', p => settlementAmount(p.fail)],
-  ['failDelta', '失败端本金盈亏', p => signedCash(p.failDelta)],
-  ['success', '成功后 Hype 剩余', p => settlementAmount(p.success)],
-  ['successDelta', '成功端个人资金较本金', p => signedCash(p.successDelta)],
+  ['fail', '完整盘口 · 失败回收', p => settlementAmount(fullCash(p,'fail'))],
+  ['success', '完整盘口 · 成功留存', p => settlementAmount(fullCash(p,'pass'))],
+  ['minFailure', '已核价最低失败回收', p => settlementAmount(p.pressureSummary?.minFailure?.value)],
+  ['minSuccess', '已核价最低成功留存', p => settlementAmount(p.pressureSummary?.minSuccess?.value)],
   ['leverage', 'Hype 建议杠杆', p => p.leverage == null ? '未验证' : p.leverage + '×'],
-  ['initial', 'Hype 初始保证金', p => usd(p.initial)],
-  ['marginRate', '保证金占 Hype 权益', p => pct(p.marginRate, 2)],
-  ['free', '开仓后可用抵押品', p => usd(p.free)],
-  ['distance', '成功线至 Hype 强平距离', distanceText]
+  ['initial', 'Hype 开仓初始保证金', p => usd(p.initial)],
+  ['maxMarginUsed', 'Hype 路径最大保证金占用', p => usd(p.pressureSummary?.maxMarginUsed?.value)],
+  ['minSurplus', 'Hype 路径最小清算余量', p => settlementAmount(p.pressureSummary?.minSurplus?.value)],
+  ['worstCase', '最差已配置情景', p => caseLabel(p.pressureSummary?.worstCase)]
 ];
+
+function caseLabel(witness) {
+  if(!witness) return '未验证';
+  const path={fail:'失败',success:'通过',pass:'通过'}[witness.endpoint];
+  return witness.label+(path?' · '+path:'');
+}
 
 function initComparison() {
   const head = $('plan-columns').rows[0];
-  for (const [,name] of objectives) {
+  for (const [key,name] of objectives) {
     const th = document.createElement('th');
     th.scope = 'col';
+    th.dataset.objective=key;
+    if(key==='pressure') th.id='liquidity-maximum';
+    const link=document.createElement('button');
+    link.type='button';
+    link.setAttribute('aria-controls',key==='pressure'?'liquidity-evidence':'evidence-'+key);
+    link.textContent=name;
+    link.setAttribute('aria-label','查看'+name+'的压力明细');
+    link.onclick=()=>{
+      const fold=$('plan-evidence').querySelector('details[data-objective="'+key+'"]');
+      $('positions-view').open=true;
+      fold.open=true;
+      fold.querySelector('summary').focus();
+    };
     const scenario = document.createElement('small');
-    th.append(name, scenario);
+    th.append(link,scenario);
     head.append(th);
   }
   for (const [key,label] of comparisonMetrics) {
@@ -577,10 +621,11 @@ function initComparison() {
 
 const statusText = value => ({pass:'通过',fail:'未通过',unknown:'未验证',insufficient:'深度不足'})[value] ?? '未验证';
 function planChecks(plan) {
-  const v = plan.verification ?? {};
-  const short = value => ({pass:'✓',fail:'×'})[value] ?? '待验';
-  return '失败' + short(v.failureFunds) + ' 成功' + short(v.successFunds) +
-    ' 初保' + short(v.initial) + ' 路径' + short(v.liquidation==='fail' || plan.coverage==='verified' ? v.liquidation : 'unknown') + ' 压力' + short(v.stress);
+  const summary=plan.pressureSummary;
+  if (!summary) return '逐项压力未验证';
+  if (summary.status==='fail') return '已配置压力未通过';
+  if (summary.status!=='pass') return '已配置压力待验证';
+  return summary.fullStress ? '已配置情景通过' : '已核价条件通过';
 }
 function renderComparison(snapshot) {
   const { ratioScan:scan, targets:winners, stress } = snapshot ?? {targets:objectives.map(() => null)};
@@ -588,8 +633,8 @@ function renderComparison(snapshot) {
   const baseOnly = stress && !stress.positive.length;
   const partial = stress && (stress.missing.length > 0 || stress.zero.length > 0);
   const scenario = !stress ? '压力状态未知' : baseOnly ? '基础情景' : partial ? '部分压力情景' : '已配置压力情景';
-  const coverage = !stress ? scenario : stress.missing.length ? (baseOnly ? '压力未配置' : '压力未配齐') :
-    stress.zero.length ? '含零压力假设' : '四项压力已配置';
+  const coverage = !stress ? scenario : stress.missing.length ? (baseOnly ? '价格与资金费压力未配置' : '价格与资金费压力未配齐') :
+    stress.zero.length ? '含零压力假设' : '价格与资金费压力已配置';
   write('plan-stress', scan ? (scenario === coverage ? scenario : scenario + ' · ' + coverage) : '');
   $('plan-comparison').hidden = !winners.some(Boolean);
   const ratio = formatRatios(winners.filter(Boolean));
@@ -597,29 +642,33 @@ function renderComparison(snapshot) {
     const header = $('plan-columns').rows[0].cells[col+1];
     const point = plan?.key ?? '';
     if (header.dataset.point !== point) header.dataset.point = point;
-    setText(header.lastElementChild, plan ? planChecks(plan) : '无合格方案');
-    for (const [index, [,,format]] of comparisonMetrics.entries()) {
+    header.dataset.snapshotId=snapshot?.snapshotId??'';
+    header.dataset.pressureStatus=plan?.pressureSummary?.status??'unknown';
+    header.firstElementChild.disabled=!plan;
+    const empty=col===1 && scan ? (scan.plans?.pressure?.reason??'本帧缺少压力结果') : '无合格方案';
+    setText(header.lastElementChild, plan ? planChecks(plan) : empty);
+    header.title=plan?.pressureSummary?.missing?.join('、')??'';
+    for (const [index, [key,,format]] of comparisonMetrics.entries()) {
       const td = $('plan-rows').rows[index].cells[col+1];
       setText(td, plan ? format(plan, scan, ratio) : '—');
+      const witness=plan?.pressureSummary?.[key];
+      td.title=witness?.label ? caseLabel(witness)+(witness.reason?' · '+witness.reason:'') : '';
     }
   }
   $('max-risk').hidden = !max;
   if (!max) return;
-  const scope = scan.complete ? '' : '已扫描范围内的';
-  const thin = max.fail != null && recoveryCushion(max.fail, scan.ctx.book.B).thin;
-  const warning = baseOnly && thin ? '基础情景可行，安全缓冲极薄，压力风险未验证' :
-    baseOnly ? '最大基础情景可行仓位，压力安全性未验证' :
-    !stress || partial ? '最大条件目标仓位，压力安全性未验证' : '最大基础情景仓位，压力核验另列';
-  const stressWarning=max.verification?.stress==='fail' ? ' · 配置的压力情景未通过' :
-    !baseOnly && !partial && max.coverage!=='verified' ? ' · 完整路径风险未验证' : '';
-  write('max-risk-title', scope + warning + stressWarning);
-  const exit=max.liquidity?.fail;
-  const exitNote=exit?.settlement && dec(exit.settlement.personal).lt(dec(scan.ctx.book.B).plus(scan.ctx.params.recoveryBuffer??'0'))
-    ? ' · 撤去退出最优档后失败回收 '+settlementAmount(exit.settlement.personal)+'，低于回收门槛'
-    : exit?.status==='insufficient' ? ' · 撤去退出最优档后，剩余深度不足以平仓' : '';
-  write('max-risk-values','占用 '+pct(max.marginRate,2)+' · 开仓可用 '+usd(max.free)+
-    ' · 回本缓冲 '+settlementAmount(max.failDelta)+' · 强平距 '+distanceText(max,scan)+
-    (Number(max.minimumHeadroom)<0 ? ' · 途中可用 0 U（缺 '+usd(dec(max.minimumHeadroom).neg())+'）':'')+exitNote);
+  const floor=scan.recoveryFloor??scan.ctx.book.B;
+  const exit=max.liquidity?.fail, depthSummary=max.pressureSummary;
+  const failedExit=exit?.settlement && dec(exit.settlement.personal).lt(floor);
+  const warning=depthSummary?.status==='fail' ? '基础最大仓位未通过压力筛选' :
+    !depthSummary || depthSummary.status==='unknown' ? '基础最大仓位的压力结果未验证' :
+    '基础最大仓位满足已核价条件';
+  write('max-risk-title',warning);
+  const explanation = failedExit ? '撤去最优档后回收 '+settlementAmount(exit.settlement.personal)+'，门槛 '+usd(floor) :
+    exit?.status==='insufficient' ? '撤去最优档后无法全量退出' :
+    depthSummary?.status==='fail' && depthSummary.worstCase ? caseLabel(depthSummary.worstCase) :
+    '初始保证金占权益 '+pct(max.marginRate,2);
+  write('max-risk-values',explanation+' · D 可见深度不足，完整退出未验证');
   $('scale-link').hidden = !scan.plans.comparison;
 }
 
@@ -706,27 +755,72 @@ function liquidityLines(cell,first,scan) {
     ' · 全量均价、滑点、退出手续费及最终资金均未验证');
 }
 
-function pressureMetric(snapshot) {
-  const scan=snapshot?.ratioScan, result=scan?.plans?.pressure, row=result?.row;
-  const el=$('liquidity-maximum'), body=$('liquidity-evidence-body');
-  el.hidden=!snapshot;
-  el.dataset.point=row?.key ?? '';
-  el.dataset.snapshotId=snapshot?.snapshotId ?? '';
-  $('liquidity-evidence').hidden=!row;
-  body.replaceChildren();
-  const prefix='最大压力情景可行仓位 · ';
-  if (!row) {
-    setText(el,prefix+(result?.reason ?? '本帧尚无压力搜索结果'));
-    return;
+const evidenceColumns = ['压力情景','判定','失败后个人回收','通过后 Hype 剩余',
+  '开仓初始保证金','最大占用（失败 / 通过）','最小清算余量（失败 / 通过）'];
+
+function initPressureDetails() {
+  for(const [key,name] of objectives) {
+    const fold=document.createElement('details');
+    fold.dataset.objective=key;
+    const summary=document.createElement('summary');
+    summary.textContent=name+' · 压力明细';
+    const scope=document.createElement('p');
+    const wrap=document.createElement('div');
+    wrap.className='table-wrap';
+    const table=document.createElement('table');
+    const tr=table.createTHead().insertRow();
+    for(const label of evidenceColumns){
+      const th=document.createElement('th');
+      th.scope='col'; th.textContent=label; tr.append(th);
+    }
+    table.setAttribute('aria-label',name+'的逐情景现金与保证金');
+    const body=table.createTBody();
+    fold.id=key==='pressure'?'liquidity-evidence':'evidence-'+key;
+    if(key==='pressure') body.id='liquidity-evidence-body';
+    wrap.append(table); fold.append(summary,scope,wrap); $('plan-evidence').append(fold);
   }
-  const worst=(end,field)=>[row.liquidity[end].full,row.liquidity[end],row.liquidity[end].two]
-    .reduce((a,test)=>dec(test.settlement[field]).lt(a)?dec(test.settlement[field]):a,dec(row.liquidity[end].full.settlement[field]));
-  setText(el,prefix+'PF '+targetQty(row.pf,scan.ctx.market.pf)+'（'+usd(row.pfValue)+'） / Hype '+
-    targetQty(row.hl,scan.ctx.market.hl)+'（'+usd(row.hypeValue)+'） · A–C 失败最低 '+settlementAmount(worst('fail','personal'))+
-    ' / 成功最低 '+settlementAmount(worst('pass','hype'))+' · '+result.reason);
-  for (const [end,title] of [['fail','PF 失败'],['pass','PF 达标']]) {
-    detailLine(body,title+' · '+targetQty(row.pf,scan.ctx.market.pf)+' / Hype '+targetQty(row.hl,scan.ctx.market.hl));
-    liquidityLines(body,row.liquidity[end],scan);
+}
+
+function renderPressureDetails(snapshot) {
+  const section=$('plan-evidence');
+  section.hidden=!snapshot?.targets.some(Boolean);
+  for(const [i,fold] of [...section.querySelectorAll(':scope > details')].entries()){
+    const target=snapshot?.targets[i], s=target?.pressureSummary;
+    fold.hidden=!target;
+    fold.dataset.point=target?.key??'';
+    fold.dataset.snapshotId=snapshot?.snapshotId??'';
+    const missing=s?.missing?.length ? ' · 未验证 '+s.missing.join('、') : '';
+    const reason=target ? 'PF '+targetQty(target.pf,snapshot.ratioScan.ctx.market.pf)+' / Hype '+
+      targetQty(target.hl,snapshot.ratioScan.ctx.market.hl)+' · '+planChecks(target)+missing : '';
+    const objective=i===1 && target ? ' · 同规模优先提高两端资金的最低余量，再比较清算余量、峰值占用和杠杆。' : '';
+    setText(fold.querySelector('p'),reason+objective);
+    const table=fold.querySelector('table');
+    table.hidden=!s?.cases?.length;
+    const next=document.createElement('tbody');
+    for(const scenario of s?.cases??[]){
+      const tr=next.insertRow();
+      tr.dataset.case=scenario.id;
+      const f=scenario.fail,p=scenario.success;
+      tr.insertCell().textContent=scenario.label;
+      const condition=tr.insertCell();
+      condition.append(statusText(scenario.status));
+      if(scenario.reason) detailLine(condition,scenario.reason);
+      for(const path of [f,p]){
+        const cash=tr.insertCell();
+        cash.append(settlementAmount(path?.cash));
+        if(path?.reason && path.reason!==scenario.reason) detailLine(cash,path.reason);
+        const funding=path?.funding;
+        if(funding) {
+          if(funding.periods) detailLine(cash,funding.periods+' 期共 '+funding.sumBps+' bp，路径峰值名义额 '+
+            usd(funding.peakNotional)+'，逐期预算合计 '+settlementAmount(funding.rateDebit));
+          detailLine(cash,'固定预算 '+settlementAmount(funding.fixedDebit)+' · 计入一次 '+settlementAmount(funding.charged));
+        }
+      }
+      tr.insertCell().textContent=usd(f?.initialMargin??p?.initialMargin);
+      tr.insertCell().textContent=usd(f?.maxMarginUsed)+' / '+usd(p?.maxMarginUsed);
+      tr.insertCell().textContent=settlementAmount(f?.minSurplus)+' / '+settlementAmount(p?.minSurplus);
+    }
+    patchRows(table.tBodies[0],next);
   }
 }
 
@@ -758,16 +852,23 @@ function renderPlans(snapshot) {
     tr.dataset.point = r.key;
     const heading = tr.insertCell();
     heading.append(name);
+    const details=document.createElement('details');
+    details.dataset.path='account-risk';
+    const disclosure=document.createElement('summary');
+    disclosure.textContent='查看保证金与资金约束';
+    details.append(disclosure); heading.append(details);
+    detailLine(details,'Hype 占权益 '+pct(r.marginRate,2)+' · 开仓可用 '+usd(r.free)+' · 强平距离 '+distanceText(r,scan));
+    detailLine(details,'两端相对本金的差额，失败 '+signedCash(r.failDelta)+' / 通过 '+signedCash(r.successDelta));
     const v = r.verification ?? {};
     for (const [label,value] of [['失败回收',v.failureFunds],['成功留存',v.successFunds],['初始保证金',v.initial],
         ['维持保证金约束',v.maintenance],['设定价格路径',v.path],['压力测试',v.stress]])
-      detailLine(heading,label + ' · ' + statusText(value));
-    if (r.fail!=null) detailLine(heading,'失败端要求 '+usd(scan.recoveryFloor??scan.ctx.book.B)+
+      detailLine(details,label + ' · ' + statusText(value));
+    if (r.fail!=null) detailLine(details,'失败端要求 '+usd(scan.recoveryFloor??scan.ctx.book.B)+
       '，高于门槛 '+settlementAmount(dec(r.fail).minus(scan.recoveryFloor??scan.ctx.book.B))+
       (recoveryCushion(r.fail,scan.ctx.book.B).thin?' · 极薄缓冲':''));
-    detailLine(heading,r.coverage==='verified' ? '已核对设定情景与全仓数据' : '路径风险未充分验证');
-    if (Number(r.minimumHeadroom)<0) detailLine(heading,'途中可新增 0 U。抵押品缺口 '+usd(dec(r.minimumHeadroom).neg()));
-    if (Number(r.minimumInitialHeadroom)<0) detailLine(heading,'无法追加仓位的初保资金缺口 '+usd(dec(r.minimumInitialHeadroom).neg())+'。清算按权益与维持保证金核验');
+    detailLine(details,r.coverage==='verified' ? '已核对设定情景与全仓数据' : '路径风险未充分验证');
+    if (Number(r.minimumHeadroom)<0) detailLine(details,'途中可新增 0 U。抵押品缺口 '+usd(dec(r.minimumHeadroom).neg()));
+    if (Number(r.minimumInitialHeadroom)<0) detailLine(details,'无法追加仓位的初保资金缺口 '+usd(dec(r.minimumInitialHeadroom).neg())+'。清算按权益与维持保证金核验');
     for (const side of ['pf', 'hl']) {
       const leg = scan.ctx.market[side], adj = r.adjustments?.[side];
       const cell = tr.insertCell();
@@ -779,9 +880,14 @@ function renderPlans(snapshot) {
         (remaining.isZero() ? '无需调仓' : (remaining.gt(0) ? '差额买入 ' : '差额卖出 ') + remaining.abs() + ' ' + leg.unit));
     }
     for (const key of ['fail','pass']) {
-      const cell = tr.insertCell(), path = r.paths?.[key];
-      cell.append(settlementAmount(key === 'fail' ? r.fail : r.success));
-      if (!path) { detailLine(cell, r[key === 'fail' ? 'failStop' : 'passStop'] || '该快照未记录路径价格'); continue; }
+      const summaryCell = tr.insertCell(), path = r.paths?.[key];
+      summaryCell.append(settlementAmount(fullCash(r,key)));
+      if (!path) { detailLine(summaryCell, r[key === 'fail' ? 'failStop' : 'passStop'] || '该快照未记录路径价格'); continue; }
+      const cell=document.createElement('details');
+      cell.dataset.path=key+'-book-audit';
+      const disclosure=document.createElement('summary');
+      disclosure.textContent='查看触线、成交与清算路径';
+      cell.append(disclosure); summaryCell.append(cell);
       for (const side of ['pf','hl']) {
         const unit = side === 'pf' ? report.pfQuote : report.hlQuote;
         const line = path[side], mark = line.mark ?? snapshot.prices[side].mark;
@@ -818,7 +924,7 @@ function renderPlans(snapshot) {
       for (const [kind,test] of Object.entries(r.pathAudit?.[key] ?? {})) {
         const label = {base:'基础同步',basisWiden:'基差扩大',basisNarrow:'基差收敛',
           adverseJump:'不利跳价',basisAdverse:'基差对当前 Hype 仓不利',basisFavorable:'基差对当前 Hype 仓有利',
-          asyncExit:'盘口异步且退出时仍承受不利偏移',dislocation:'途中错位后恢复同步',delayedFill:'延迟成交后',beforeFill:'延迟成交前（原仓）'}[kind];
+          asyncExit:'盘口异步且退出时仍承受不利偏移',dislocation:'途中错位后恢复同步',delayedFill:'延迟成交后',beforeFill:'延迟成交前（原仓）',funding:'累计资金费',fundingOnly:'累计资金费',async:'双边报价不同步',asyncOnly:'双边报价不同步',singleLegDelay:'单边调仓延迟'}[kind] ?? test.label ?? '配置价格路径';
         const low=test.worst;
         if (low) {
           detailLine(cell,label+' · '+(test.proof?.continuous?'解析检验 '+test.proof.intervals+' 段':'路径风险未充分验证')+
@@ -853,13 +959,13 @@ function renderPlans(snapshot) {
   $('position-list').hidden = !hasTargets;
   $('positions-empty').hidden = hasTargets;
   write('positions-empty', hasTargets ? '' : !snapshot ? '等待首份计算快照' :
-    report?.legacy ? '该历史快照未保存三项优化目标' :
+    report?.legacy ? '该历史快照缺少分方案明细' :
     report?.pending ? '分成待到账，目标建议已暂停' : '本次计算没有合格目标方案');
   renderScaleComparison(snapshot);
   renderScaleComparison(snapshot,true);
   write('plan-caption', !report ? '' : report.pending ? '分成待到账' :
     report.legacy ? '历史条件目标' : !report.eligible ? '当前门槛下无合格方案' :
-    scan.complete ? '按两端现金约束筛选' : '限已扫描规模');
+    scan.complete ? '' : '限已扫描规模');
   const units = side => scan.ctx.market[side].unit === 'contract' ? '张' : scan.ctx.market[side].unit;
   function appendRisk(r) {
     const cost = k => [r.failCost, r.passCost].map(v => v ? fmt(v[k], 4) : '未知').join(' / ');
@@ -870,6 +976,8 @@ function renderPlans(snapshot) {
       r.distance == null ? '无已验证交点' : fmt(r.distance, 4) + ' ' + report.hlQuote, cost('fees') + ' U', cost('slippage') + ' U']) detail.insertCell().textContent = str;
   }
   for (const r of report?.rows ?? []) appendRisk(r);
+  const pressure=snapshot?.targets[1];
+  if(pressure && !report?.rows?.some(r=>r.key===pressure.key && r.leverage===pressure.leverage)) appendRisk(pressure);
   patchRows($('plan-risk-rows'), riskBody);
 }
 
@@ -878,7 +986,7 @@ function draw(snapshot, auditScan) {
   audit = null;
   const scan = frame,
     rep = scan?.representative;
-  pressureMetric(snapshot);
+  renderPressureDetails(snapshot);
   renderComparison(snapshot);
   renderPlans(snapshot);
   renderAnalysis(scan);
@@ -978,6 +1086,9 @@ function draw(snapshot, auditScan) {
       'scan-deadline-note'
     ])
       write(field, '');
+    write('cash-source', '资金结果');
+    $('scan-cash').dataset.point='';
+    $('scan-cash').dataset.objective='';
     write('scan-fail-cash', '—');
     write('scan-pass-cash', '—');
     if (scan) write('scan-representative', '当前条件下无可推荐仓位');
@@ -1135,6 +1246,7 @@ export function renderScan(result, m, r, plan, status, snapshot) {
 }
 export function setupScan() {
   initComparison();
+  initPressureDetails();
   const buttons = [...$('desk-views').querySelectorAll('button')];
   for (const button of buttons) {
     const panel = $(button.getAttribute('aria-controls'));

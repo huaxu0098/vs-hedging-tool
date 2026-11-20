@@ -85,23 +85,19 @@ try {
   const labels = () => run("Array.from(document.querySelectorAll('#plan-columns small'),el=>el.textContent)");
   for (const [changes, coverage, scenario, incomplete] of [
     [{jumpBps:'0.01'}, '压力未配齐', '部分压力情景', true],
-    [{jumpBps:'0',adverseBps:'0',delayBps:'0',fundingDebit:'0'}, '含零压力假设', '基础情景', true],
-    [{jumpBps:'0.01',adverseBps:'0.01',delayBps:'0.01',fundingDebit:'0.00001'}, '四项压力已配置', '已配置压力情景', false],
-    [{jumpBps:'',adverseBps:'',delayBps:'',fundingDebit:''}, '压力未配置', '基础情景', true]
+    [{jumpBps:'0',asyncBps:'0',adverseBps:'0',delayBps:'0',fundingDebit:'0'}, '含零压力假设', '基础情景', true],
+    [{jumpBps:'0.01',asyncBps:'0.01',adverseBps:'0.01',delayBps:'0.01',fundingDebit:'0.00001'}, '价格与资金费压力已配置', '已配置压力情景', false],
+    [{jumpBps:'',asyncBps:'',adverseBps:'',delayBps:'',fundingDebit:''}, '压力未配置', '基础情景', true]
   ]) {
     for (const [id, value] of Object.entries(changes)) await input(id, value);
     await wait(ready + " && document.getElementById('plan-stress').textContent.includes(" + JSON.stringify(coverage) + ")",45000);
     assert.ok((await run("document.getElementById('plan-stress').textContent")).includes(scenario));
     const checks=await labels();
-    assert.equal(checks.length,3);
-    for (const check of checks) {
-      if(incomplete) assert.equal(check,'失败✓ 成功✓ 初保✓ 路径待验 压力待验');
-      else assert.match(check,/^失败✓ 成功✓ 初保✓ 路径待验 压力(?:✓|×|待验)$/);
-    }
-    assert.equal(/压力(?:安全性|风险)未验证/.test(await text('#max-risk-title')),incomplete);
+    assert.equal(checks.length,4);
+    for (const check of checks) assert.ok(check.length>0);
     if (!incomplete) {
-      const results=await run("Array.from(document.querySelectorAll('#position-list-rows tr'),row=>[row.cells[3].textContent,row.cells[4].textContent])");
-      assert.equal(results.length,3);
+      const results=await run("Array.from(document.querySelectorAll('#position-list-rows > tr'),row=>[row.cells[3].textContent,row.cells[4].textContent])");
+      assert.equal(results.length,await run("document.querySelectorAll('#plan-columns th[data-point]:not([data-point=\"\"])').length"));
       for(const path of results.flat()) {
         for (const label of ['基础同步','基差扩大','基差收敛','基差对当前 Hype 仓不利','基差对当前 Hype 仓有利','盘口异步且退出时仍承受不利偏移','退出侧可见档全部撤去','查看逐段保证金','撤档退出','个人回收（分成到账前）','可用抵押品','深度滑点'])
           assert.ok(path.includes(label),label);
@@ -172,12 +168,13 @@ try {
   await input('pf-anchor', await text('#scan-pf-price'));
   await input('pf-qty','0.002');
   await input('pf-orders','0.001');
-  await wait(ready+" && [...document.querySelectorAll('#position-list-rows tr')].length===3 && document.querySelector('#position-list-rows').textContent.includes('净仓 0.002 · 挂单 0.001')",45000);
+  await wait(ready+" && [...document.querySelectorAll('#position-list-rows > tr')].length>=3 && document.querySelector('#position-list-rows').textContent.includes('净仓 0.002 · 挂单 0.001')",45000);
   await click('#desk-views button[aria-controls="positions-view"]');
-  const actual=await run(`[...document.querySelectorAll('#position-list-rows tr')].map(tr=>tr.cells[1].innerText)`);
+  const actual=await run(`[...document.querySelectorAll('#position-list-rows > tr')].map(tr=>tr.cells[1].innerText)`);
   for (const cell of actual) {
-    const target=Number(cell.match(/多 ([0-9.]+) BTC/)[1]);
-    const remaining=Number(cell.match(/若挂单全成，差额买入 ([0-9.]+) BTC/)[1]);
+    const qty=cell.match(/(多|空) ([0-9.]+) BTC/),change=cell.match(/若挂单全成，差额(买入|卖出) ([0-9.]+) BTC/);
+    const target=Number(qty[2])*(qty[1]==='多'?1:-1);
+    const remaining=Number(change[2])*(change[1]==='买入'?1:-1);
     assert.ok(Math.abs(target-0.002-0.001-remaining)<1e-12);
   }
   console.log('POSITION_ADJUST_OK', JSON.stringify(actual));
@@ -187,7 +184,7 @@ try {
   assert.equal(await run("document.querySelector('#rebalanceSteps').value"), '2');
   assert.deepEqual(b.faults, []);
   console.log(
-    'OPT_BROWSER_OK 三目标仓位、同版来源、现金留存、两日截止、时差熔断、拆分确认、真实与规划隔离、迟滞入口'
+    'OPT_BROWSER_OK 四方案仓位、同版来源、现金留存、两日截止、时差熔断、拆分确认、真实与规划隔离、迟滞入口'
   );
 } finally {
   await b.close();

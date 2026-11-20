@@ -17,14 +17,31 @@ function finalizeSnapshot(view) {
   // Only older on-disk reports need to resolve named objectives.
   const keys = plans?.targetKeys ?? planObjectives.map(([label]) =>
     plans?.rows.find(row => row.labels.includes(label))?.key ?? null);
-  const targets = keys.map(key => key == null ? null : byKey.get(key));
-  if (targets.length !== planObjectives.length || targets.includes(undefined) ||
-      (plans?.eligible > 0 && !plans.pending && !plans.legacy && targets.some(row => !row)))
+  const baseTargets = keys.map(key => key == null ? null : byKey.get(key));
+  if (baseTargets.length !== planObjectives.length || baseTargets.includes(undefined) ||
+      (plans?.eligible > 0 && !plans.pending && !plans.legacy && baseTargets.some(row => !row)))
     throw Error('目标索引与候选快照不一致');
   const pressure=plans?.pressure;
   if (pressure?.row && (pressure.key!==pressure.row.key || !pressure.row.configuredPass ||
       !['feasible','conditional'].includes(pressure.status))) throw Error('流动性压力最大仓位与结算证据不一致');
-  for (const row of [...targets,pressure?.row].filter(Boolean)) {
+  const targets=[baseTargets[0],pressure?.row ?? null,baseTargets[1],baseTargets[2]];
+  if (trace.model===modelVersion && pressure?.row) {
+    const summary=pressure.row.pressureSummary, scan=view.ratioScan;
+    const active=summary?.cases?.filter(item=>item.configured) ?? [];
+    const capital=dec(scan.ctx.book.B).plus(scan.ctx.params.recoveryBuffer??'0');
+    if (summary?.status!=='pass' || !['A','B','C'].every(id=>active.some(c=>c.id===id)) ||
+        active.some(c=>c.status!=='pass' || c.fail.cash==null || dec(c.fail.cash).lt(capital) ||
+          c.success.cash==null || dec(c.success.cash).lt(scan.ctx.params.R)))
+      throw Error('压力最大仓位未通过本帧资金门槛');
+    for (const [name,end] of [['minFailure','fail'],['minSuccess','success']]) {
+      const minimum=summary[name];
+      const source=active.find(c=>c.id===minimum?.id);
+      if (!source || minimum.value!==source[end].cash || active.some(c=>dec(c[end].cash).lt(minimum.value)))
+        throw Error('压力资金极值与本帧情景不一致');
+    }
+  }
+  for (const row of targets.filter(Boolean)) {
+    if (row.pressureSummary && (row.pressureSummary.key!==row.key || row.pressureSummary.leverage!==row.leverage)) throw Error('压力结果与本帧目标仓位不一致');
     if (dec(row.pf).cmp(0) !== row.sign || (dec(row.hl).cmp(0) && dec(row.hl).cmp(0) !== -row.sign))
       throw Error('双边有符号目标与计算方向不一致');
     for (const end of ['fail','pass']) {
@@ -152,10 +169,10 @@ export function displayHistory(storage) {
       previousKey = scope;
       previous = null;
       try {
-        const saved = JSON.parse(storage.getItem(key(scope)) ?? storage.getItem(key(scope,'AUTO-0.21.5')) ?? storage.getItem(key(scope,'AUTO-0.21.4')) ?? storage.getItem(key(scope,'AUTO-0.21.3')) ?? storage.getItem(key(scope,'AUTO-0.21.2')) ?? storage.getItem(key(scope,'AUTO-0.21.1')));
+        const saved = JSON.parse(storage.getItem(key(scope)) ?? storage.getItem(key(scope,'AUTO-0.21.6')) ?? storage.getItem(key(scope,'AUTO-0.21.5')) ?? storage.getItem(key(scope,'AUTO-0.21.4')) ?? storage.getItem(key(scope,'AUTO-0.21.3')) ?? storage.getItem(key(scope,'AUTO-0.21.2')) ?? storage.getItem(key(scope,'AUTO-0.21.1')));
         if (
           saved?.scope === scope &&
-          [modelVersion,'AUTO-0.21.5','AUTO-0.21.4','AUTO-0.21.3','AUTO-0.21.2','AUTO-0.21.1'].includes(saved.view?.trace?.model) &&
+          [modelVersion,'AUTO-0.21.6','AUTO-0.21.5','AUTO-0.21.4','AUTO-0.21.3','AUTO-0.21.2','AUTO-0.21.1'].includes(saved.view?.trace?.model) &&
           saved.view.ratioScan?.complete &&
           Array.isArray(saved.view.ratioScan.buckets) &&
           saved.view.ratioScan.ctx?.market?.pf &&

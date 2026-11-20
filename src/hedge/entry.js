@@ -80,9 +80,11 @@ const ruleFields = {
   hlUtil: 'Hype 最大保证金占权益（%）',
   movePct: '假定两日内有利价格变动（%，选填）',
   jumpBps: '不利跳价（基点）',
+  asyncBps: '双边不同步时 Hype 单边不利变动（基点）',
   delayBps: 'Hype 调仓延迟期间不利变动（基点）',
-  fundingDebit: '持有期间资金费支出压力（U）',
-  adverseBps: 'Hype 不利基差及汇率偏移（基点，1 基点 = 0.01%）',
+  fundingDebit: '整个持仓期的资金费预算（U）',
+  fundingRatesBps: '各结算期的不利资金费率（基点，逗号分隔）',
+  adverseBps: 'Hype 不利基差变动（基点，1 基点 = 0.01%）',
   externalFx: '每单位外币的已确认 USDC 估值（选填）',
   recoveryBuffer: '失败回本之外要求的额外安全缓冲（U，选填）',
   registration: '本金中已支付的报名费（U）',
@@ -129,7 +131,7 @@ function input(box, id, label, type = 'text') {
   l.textContent = label;
   e.id = id;
   e.type = type;
-  if (type === 'text') e.inputMode = 'decimal';
+  if (type === 'text' && id!=='fundingRatesBps') e.inputMode = 'decimal';
   l.append(e);
   $(box).append(l);
 }
@@ -141,7 +143,7 @@ const planFields = {
 for (const [k, label] of Object.entries(planFields)) input('plan-fields', k, label);
 for (const [k, label] of Object.entries(ruleFields))
   input(
-    k in stressFields ? 'stress-fields' : ['quoteSecs','quoteSkewMs','depegAlertBps'].includes(k) ? 'clock-fields' : 'rule-fields',
+    k in stressFields || k === 'fundingRatesBps' ? 'stress-fields' : ['quoteSecs','quoteSkewMs','depegAlertBps'].includes(k) ? 'clock-fields' : 'rule-fields',
     k,
     label,
     k === 'deadline' ? 'datetime-local' : 'text'

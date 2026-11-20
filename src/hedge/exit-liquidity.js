@@ -29,7 +29,30 @@ function reprice(leg, book, entry, shift, extraDebit) {
     sumPostings([entry.friction,extraDebit]),book);
 }
 
-export function exitLiquidity(ctx,row,end,removedLevels=1) {
+// Independent configured event magnitudes can coincide at exit. The direction
+// refers to the Hype position and all movements here are in its native unit.
+export function pressureExitOffset(leg,sign,checks) {
+  const width=sumPostings([checks.basisBps ?? checks.adverseBps ?? '0', checks.asyncBps ?? '0',
+    checks.stress?.jumpBps ?? '0', checks.stress?.delayBps ?? '0']);
+  return dec(width).times(leg.mark).div(10000).times(-sign);
+}
+
+// The precise future settlement marks are unknown. Each scheduled adverse
+// rate is applied to an upper bound on native notional over this price path.
+function fundingOnPath(leg,qty,shock,offset,exitMark) {
+  const marks=[dec(leg.mark),dec(leg.mark).plus(offset),dec(exitMark)];
+  if (shock.arrivalMark!=null) marks.push(dec(shock.arrivalMark));
+  const peak=marks.reduce((a,b)=>a.gt(b)?a:b);
+  const notional=dec(qty).abs().times(leg.multiplier).times(leg.fx).times(peak);
+  const rates=shock.ratesBps??[];
+  const sumBps=sumPostings(rates);
+  const rateDebit=notional.times(sumBps).div(10000);
+  const fixed=dec(qty).isZero()?dec('0'):dec(shock.fixedFunding??'0');
+  return {periods:rates.length,sumBps,peakMark:out(peak),peakNotional:out(notional),
+    rateDebit:out(rateDebit),fixedDebit:out(fixed),charged:out(fixed.gt(rateDebit)?fixed:rateDebit)};
+}
+
+export function exitLiquidity(ctx,row,end,removedLevels=1,shock={}) {
   const pair=row.paths?.[end], market=ctx.market;
   if (!pair || !market.pf.bids || !row.lines) return null;
   const sides=['pf','hl'], books={}, removed={}, fills={}, empty={}, costs={}, fees={};
@@ -78,18 +101,18 @@ export function exitLiquidity(ctx,row,end,removedLevels=1) {
     pfShift=pfShift.plus(oldVwap.minus(fills.pf.vwap).div(market.pf.factor));
   }
   if (pfShift.cmp(0)!==(end==='pass' ? row.sign : -row.sign)) {
+    report.status='fail'; report.pathStatus='fail';
     report.reason='撤档后 PF 边界已越过起始价';
     return report;
   }
-  const afterLag=row.pathAudit?.[end]?.asyncExit;
-  const offset=removedLevels===0 ? dec('0') : dec(afterLag?.nativeOffset ?? row.stress?.priceShock ?? '0');
+  const offset=dec(shock.offset ?? '0');
   const hlShift=pfShift.plus(offset.div(market.hl.factor));
   const shifts={pf:out(pfShift),hl:out(hlShift)};
   for (const side of sides) {
     const leg=market[side], displacement=out(dec(shifts[side]).times(leg.factor));
     recordCoverage(side,displacement,true);
     if (dec(leg.mark).plus(displacement).lte(0)) {
-      report.reason='移动后的退出价格无法核实';
+      report.status='fail'; report.pathStatus='fail'; report.reason='移动后的退出价格越界';
       return report;
     }
     if (fills[side].status==='covered') {
@@ -104,16 +127,39 @@ export function exitLiquidity(ctx,row,end,removedLevels=1) {
     report.reason='可见盘口未能覆盖双边退出';
     return report;
   }
-  const before=removedLevels!==0 ? row.pathAudit?.[end]?.beforeFill : null;
-  const debit=removedLevels===0 ? '0' : sumPostings([row.stress?.delayDebit ?? '0',row.stress?.fundingDebit ?? '0']);
+  const before=shock.delayed ? row.pathAudit?.[end]?.beforeFill : null;
+  if (shock.delayed && !dec(row.hl).minus(hl.adjustment).isZero() &&
+      (!before || !market.hl.configuredLeverage)) {
+    report.reason=!before?'延迟成交前的已有仓位缺少同帧清算路径':'延迟前原仓的实际杠杆及保证金占用未核实';
+    return report;
+  }
+  const funding=shock.funding ? fundingOnPath(market.hl,row.hl,shock,offset,
+    dec(market.hl.mark).plus(hlShift.times(market.hl.factor))) : null;
+  const debit=sumPostings([shock.debit??'0',funding?.charged??'0']);
+  report.funding=funding;
+  report.before=before ?? null;
+  report.debit=debit;
+  if (row.verification?.initial!=='pass') {
+    report.status=row.verification?.initial??'unknown';
+    report.reason='初始保证金准入未通过，无法建立目标仓位';
+    return report;
+  }
   const model={...market,hl:{...market.hl,leverage:String(row.lev ?? market.hl.leverage)}};
   const interim=out(offset.div(market.hl.factor));
-  const walk=validateMargin(ctx.book,model,'hl',row.hl,['0',interim,shifts.hl],ctx.checks.catalog,debit,{openFree:row.free}).at(-1);
+  if (dec(model.hl.mark).plus(offset).lte(0)) {
+    report.status='fail'; report.pathStatus='fail'; report.reason='不利错位导致中间标记价越界';
+    return report;
+  }
+  // The original exposure owns the delay prefix; the new position begins at
+  // its own arrival mark. Check the entire return/catch-up segment as well.
+  const pathMarks=['0',interim,shifts.hl];
+  if (shock.arrivalMark!=null) pathMarks.unshift(out(dec(shock.arrivalMark).minus(market.hl.mark).div(market.hl.factor)));
+  const walk=validateMargin(ctx.book,model,'hl',row.hl,pathMarks,ctx.checks.catalog,debit,{openFree:row.free}).at(-1);
   const pfWalk=validateMargin(ctx.book,model,'pf',row.pf,['0',shifts.pf],ctx.checks.catalog,'0',{}).at(-1);
   report.path=walk;
   report.pfPath=pfWalk;
-  if (row.verification.initial!=='pass' || walk.status!=='pass' || pfWalk.status!=='pass' ||
-      !walk.proof?.continuous || !pfWalk.proof?.continuous || (before && before.status!=='pass')) {
+  if (walk.status!=='pass' || pfWalk.status!=='pass' ||
+      !walk.proof?.continuous || !pfWalk.proof?.continuous || (before && (before.status!=='pass' || !before.proof?.continuous))) {
     report.status=[walk.status,pfWalk.status,row.verification.initial,before?.status].includes('fail')?'fail':'unknown';
     report.pathStatus=report.status;
     report.reason='退出前的保证金或路径未通过核验';
@@ -122,11 +168,11 @@ export function exitLiquidity(ctx,row,end,removedLevels=1) {
   report.pathStatus='pass';
   const cushion=dec(ctx.checks.minMaintenanceSurplus ?? '0');
   const reserveMark=dec(ctx.checks.minPriceBuffer ?? '0');
-  if (!dec(row.hl).isZero()) {
-    const marginFloor=dec(walk.worst.surplus).gte(cushion);
+  if (!dec(row.hl).isZero() || before) {
+    const marginFloor=dec(walk.worst.surplus).gte(cushion) && (!before || dec(before.worst.surplus).gte(cushion));
     const guarded=out(dec(shifts.hl).minus(reserveMark.times(dec(row.hl).cmp(0)).div(model.hl.factor)));
     const guardPrice=dec(model.hl.mark).plus(dec(guarded).times(model.hl.factor));
-    const guard=end!=='pass' || reserveMark.isZero() ||
+    const guard=end!=='pass' || reserveMark.isZero() || dec(row.hl).isZero() ||
       (guardPrice.gt(0) && validateMargin(ctx.book,model,'hl',row.hl,[shifts.hl,guarded],
         ctx.checks.catalog,debit,{openFree:row.free}).at(-1).status==='pass');
     if (!marginFloor || !guard) {

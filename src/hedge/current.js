@@ -101,9 +101,11 @@ export const rules = {
   hlUtil: '100',
   externalCurrency: 'USDC',
   adverseBps: '',
+  asyncBps: '',
   jumpBps: '',
   delayBps: '',
   fundingDebit: '',
+  fundingRatesBps: '',
   quoteSecs: '5',
   depegAlertBps: '50',
   quoteSkewMs: '3000',
@@ -115,6 +117,7 @@ export const rules = {
 
 export const stressFields = {
   adverseBps: '基差及汇率',
+  asyncBps: '跨平台异步偏移',
   jumpBps: '跳价',
   delayBps: '调仓延迟',
   fundingDebit: '资金费'
@@ -123,9 +126,22 @@ export function stressCoverage(r) {
   const missing = [],
     zero = [],
     positive = [];
-  for (const [field, label] of Object.entries(stressFields)) {
-    if (!specified(r[field])) missing.push(label);
-    else (nonnegative(r[field]).isZero() ? zero : positive).push(label);
+  let fundingRatesBps=[], fundingScheduleError=null;
+  if (r.fundingRatesBps!=null && String(r.fundingRatesBps).trim()!=='') {
+    try {
+      if (typeof r.fundingRatesBps!=='string') throw Error();
+      fundingRatesBps=r.fundingRatesBps.split(/[,，]/).map(item=>out(nonnegative(item.trim())));
+    } catch {
+      fundingScheduleError='逐期资金费须以逗号分隔，每期填写有效的非负 bp 数值';
+    }
+  }
+  const scheduledFunding=fundingRatesBps.some(rate=>dec(rate).gt(0));
+  for (const [field,label] of Object.entries(stressFields)) {
+    if (field==='fundingDebit' && fundingScheduleError) { missing.push(label); continue; }
+    const scalar=specified(r[field]) ? nonnegative(r[field]) : null;
+    if (scalar?.gt(0) || field==='fundingDebit' && scheduledFunding) positive.push(label);
+    else if (scalar!=null || field==='fundingDebit' && fundingRatesBps.length) zero.push(label);
+    else missing.push(label);
   }
   const label = missing.length ? '压力未配置：' + missing.join('、') : '';
   const zeros = zero.length ? '零压力假设：' + zero.join('、') : '';
@@ -133,7 +149,8 @@ export function stressCoverage(r) {
     missing,
     zero,
     positive,
-    label: [label, zeros].filter(Boolean).join('；') || '四项非零压力参数已设置'
+    fundingRatesBps, fundingScheduleError,
+    label: [fundingScheduleError, label, zeros].filter(Boolean).join('；') || '五项非零压力参数已设置'
   };
 }
 
@@ -377,7 +394,24 @@ export function splitReserves(saved = {}) {
   return { ...rest, R_success: rest.R_success ?? R ?? rules.R_success, R_free: rest.R_free ?? rules.R_free };
 }
 function baseContext(ctx) {
-  return {...ctx,checks:{...ctx.checks,stress:undefined,adverseBps:'0',basisBps:null,basisRate:null,fullStress:false}};
+  return {...ctx,checks:{...ctx.checks,stress:undefined,pressureInputs:{},fundingRatesBps:[],adverseBps:'0',asyncBps:null,basisBps:null,basisRate:null,fullStress:false}};
+}
+// The ordinary leverage grid chooses the smallest setting affordable at the
+// current book. A delayed adjustment can be affordable only at a higher legal
+// setting. Keep the same two quantities and recheck all stressed ledgers
+// before giving up that PF size.
+function pressureCandidate(ctx,point,known) {
+  const base=known.get(pointKey(point)) ?? planRecord({ctx},point);
+  if (base.configuredPass || !base.pressureSummary?.retryLeverage || !base.both || !base.leverage) return base;
+  const grid=inspectRatio(ctx,point,{includeLeverageGrid:true}).leverageGrid ?? [];
+  let unresolved=null;
+  for (const tier of grid) {
+    if (tier.status!=='pass' || tier.leverage<=Number(base.leverage)) continue;
+    const row=recordFromInspection(ctx,inspectRatio(ctx,point,{fixedLeverage:tier.leverage,includePathAudit:true}));
+    if (row.configuredPass) return row;
+    if (row.pressureSummary?.status==='unknown') unresolved=row;
+  }
+  return unresolved ?? base;
 }
 export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(), options = {}) {
   r = splitReserves(r);
@@ -403,8 +437,8 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
     const configuredRows=riskContext===scan.ctx ? new Map(scan.plans.rows.map(row=>[row.key,row])) : new Map();
     // Every pressure candidate must also pass A. Its grid is a sufficient
     // search domain even when the report publishes the three base objectives.
-    const pressure=searchLiquidityMaximum(scan,point=>configuredRows.get(pointKey(point)) ??
-      planRecord({ctx:riskContext},point),pending,riskContext);
+    const pressure=searchLiquidityMaximum(scan,point=>pressureCandidate(riskContext,point,configuredRows),
+      pending,riskContext);
     scan.plans.pressure=pressure;
     let ordinary=scan;
     if (scan.ctx.checks.stress) {
@@ -423,6 +457,7 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
           recordFromInspection(riskContext,inspectRatio(riskContext,target,{
             fixedLeverage:target.leverage==null?null:Number(target.leverage),includePathAudit:true}));
         target.configuredPass=audit.configuredPass;
+        target.pressureSummary=audit.pressureSummary;
         target.depthStatus=audit.depthStatus;
         target.liquidity=audit.liquidity;
         target.pathAudit=audit.pathAudit;
@@ -439,15 +474,21 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
       result.unverified=[...(result.unverified??[]),'部分目标的退出深度、路径资金或全仓数据未通过完整核验'];
     }
   }
+  if (result.autoStatus==='AUTO_FEASIBLE' && !result.ratioScan && !result.needsSearch) {
+    result.autoStatus='AUTO_PARTIAL';
+    result.unverified=[...(result.unverified??[]),'未执行逐仓盘口与价格压力核验'];
+  }
   result.missingFields = [];
   const add = (id, label) => {
     if (!result.missingFields.some((x) => x.label === label)) result.missingFields.push({ id, label });
   };
   if (result.autoStatus === 'AUTO_PARTIAL' || result.autoStatus === 'AUTO_DATA_BLOCKED') {
     for (const gap of result.inputGaps ?? []) add(gap.id, gap.text);
-    for (const [field, label] of Object.entries(stressFields))
-      if (!specified(r[field]) || dec(r[field]).isZero())
-        add(field, label + (!specified(r[field]) ? '未配置' : '采用零压力假设'));
+    for (const [field,label] of Object.entries(stressFields)) {
+      if (field==='fundingDebit' && result.stress?.fundingScheduleError) continue;
+      if (result.stress?.missing.includes(label)) add(field,label+'未配置');
+      else if (result.stress?.zero.includes(label)) add(field,label+'采用零压力假设');
+    }
     if (r.stage === 'challenge' && !result.deadline) add('deadline', '考核实际截止时间未配置');
     for (const label of [...result.issues, ...(result.unverified ?? [])]) {
       if (/压力未配置|零压力假设/.test(label) || result.inputGaps?.some((g) => g.text === label)) continue;
@@ -623,6 +664,10 @@ function computeCurrent(r, a, data, fxData, now, options) {
       ? new Date(r.deadline).toISOString()
       : null;
   result.stress = stressCoverage(r);
+  if (result.stress.fundingScheduleError) {
+    issues.push(result.stress.fundingScheduleError);
+    result.inputGaps.push({id:'fundingRatesBps',text:result.stress.fundingScheduleError});
+  }
   for (const k of ['pf', 'hl']) {
     const name = k === 'pf' ? 'VS' : 'Hype';
     for (const [field, label] of [
@@ -844,7 +889,8 @@ function computeCurrent(r, a, data, fxData, now, options) {
     !issues.some((x) => /过期|缺失|未录入|请录入|断开|休市|确认时间|连接失败|熔断|来源混用/.test(x)) &&
     currencies.ok &&
     !terminal &&
-    !pending
+    !pending &&
+    !result.stress.fundingScheduleError
   )
     result.autoStatus = 'AUTO_PARTIAL';
   if (expired && !issues.length && market) {
@@ -982,14 +1028,19 @@ function computeCurrent(r, a, data, fxData, now, options) {
     liveLimits: true,
     basisBps: specified(r.adverseBps) ? out(nonnegative(r.adverseBps)) : null,
     basisRate: specified(r.adverseBps) ? currencies.hypeToVest?.mid ?? null : null,
-    fullStress: result.stress.positive.length === 4 && currencies.hypeToVest?.mid != null,
+    fullStress: !result.stress.missing.length && !result.stress.zero.length && currencies.hypeToVest?.mid != null,
+    pressureInputs:{basis:r.adverseBps,async:r.asyncBps,delay:r.delayBps,jump:r.jumpBps,
+      funding:specified(r.fundingDebit) ? r.fundingDebit : result.stress.fundingRatesBps.length ? '0' : r.fundingDebit},
+    fundingRatesBps:result.stress.fundingRatesBps,
+    asyncBps:specified(r.asyncBps) ? out(nonnegative(r.asyncBps)) : null,
     adverseBps: out(nonnegative(r.adverseBps || '0')),
     minMaintenanceSurplus: out(nonnegative(r.minMaintenanceSurplus || '0')),
     minPriceBuffer: out(nonnegative(r.minBuffer ?? '0')),
     now: new Date(now).toISOString()
   };
-  if ([r.adverseBps, r.jumpBps, r.delayBps, r.fundingDebit].some((x) => nonnegative(x || '0').gt(0)))
+  if (result.stress.positive.length)
     checks.stress = {
+      asyncBps: r.asyncBps || '0',
       jumpBps: r.jumpBps || '0',
       basisBps: r.adverseBps || '0',
       delayBps: r.delayBps || '0',
