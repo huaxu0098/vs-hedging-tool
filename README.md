@@ -59,6 +59,7 @@ VS 也可通过“数据连接 → 从 VS 页面只读推送当前快照”配�
 
 ## 行情与验证范围
 
+- 浏览器验收和临时截图使用 `scripts/qa/chrome.js`，扩展验收使用 `scripts/qa/extension-browser.js`。这两个入口在 macOS 上为测试实例关闭 Chrome 的更新签名副本功能，避免反复验收时积累程序副本。
 - Vest BTC、ETH、SOL 使用对应 `-PERP` 的公开 ticker、depth 和 exchangeInfo。Hyperliquid 标记价和档位来自主网 Info，五档盘口优先使用官方 WebSocket 的 l2Book，起始连接和重连时可使用新鲜的 REST 盘口。标记价记录 REST 请求时间，盘口记录交易所事件时间，两者分别检查时效。[官方 WebSocket 订阅](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions)黄金、指数的真实标的和合约映射待核实，仍可先查看资金区间。
 - 工作台以 USDC 为资金账本单位。两侧原生 Mark 与成交盘口分别标注报价币。高级连接详情列出标的、报价币、结算币、乘数、元数据来源、美元现货 Bid/Ask 和源时间。首页分别显示 Vest 的原生买一、卖一与 Mark，以及 Hype 的原生买一、卖一与 Mark。买入消耗卖盘，卖出消耗买盘，按实际调仓数量计算多档成交均价和费用。条件终点按各自盘口深度平移至该终点再反向平仓，未来深度变化会影响实际结算。标准 BTC 永续基础路径按相同原生点数变动，Hype 的每个 USDT 价格点按每 BTC 兑付 1 USDC。稳定币现货汇率仅作高级详情中的独立汇率风险参考。如另行配置外币到账资金，需单独核实其 USDC 估值。
 - Vest BTC-PERP 的 `exchangeInfo` 返回 BTC / USDC；官方规格说明 USDC 结算、线性 1:1。Hyperliquid 标准永续 BTC 的 `metaAndAssetCtxs` 提供市场代码和抵押币索引，`spotMeta` 核对结算币。官方规格列明其价格以 USDT 计价，每数值点盈亏按 USDC 1:1 结算。接口直接声明的报价币优先使用；报价或结算币无法核实时显示 `QUOTE_CURRENCY_UNVERIFIED`。必要 FX 超过盘口有效期、断连或无来源时撤回仓位。脱锚报警阈值默认 50 bp，可在资金规则中修改；美元估值偏离独立显示。历史手工无方向汇率不会参与计算。[Vest 合约规格](https://docs.vestmarkets.com/platform/perpetual-contract-specifications) · [Hyperliquid 合约规格](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/contract-specifications)

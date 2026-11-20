@@ -124,6 +124,7 @@ export async function extensionBrowser({ buildExtension } = {}) {
       executable,
       [
         '--headless=new',
+        ...(process.platform === 'darwin' ? ['--disable-features=MacAppCodeSignClone'] : []),
         '--window-size=1440,1200',
         '--remote-debugging-pipe',
         '--enable-unsafe-extension-debugging',

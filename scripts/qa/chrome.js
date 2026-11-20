@@ -36,6 +36,7 @@ export async function openTestBrowser({ hedge = false, current = false } = {}) {
     executable,
     [
       '--headless=new',
+      ...(process.platform === 'darwin' ? ['--disable-features=MacAppCodeSignClone'] : []),
       '--no-first-run',
       '--no-default-browser-check',
       '--disable-extensions',
