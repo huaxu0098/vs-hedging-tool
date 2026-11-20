@@ -355,13 +355,10 @@ function renderRisk(result, accounts, market) {
       (accounts.hl.fee != null ? '（公开账户 API）' : '（本机设置）')
   );
   put('cost-sources', sources.join(' ｜ '));
-  const paths =
-    c && market.pf
-      ? [c.lines.fail, c.lines.pass].map((x) => fmt(out(dec(String(market.pf.mark)).plus(x))))
-      : ['—', '—'];
+  const paths = ['fail','pass'].map(key => fmt(c?.paths?.[key]?.pf.exitMark));
   const margin = (key) => money(c?.constraints.find((x) => x.code === key + '_INITIAL_MARGIN')?.required);
   renderPairs('risk-values', [
-    ['VS 失败价 / 成功价', paths.join(' / ')],
+    ['VS 失败价 / 成功价' + (c ? '（PF ' + (dec(c.vsTargetQuantity).gt(0) ? '多 ' : '空 ') + dec(c.vsTargetQuantity).abs() + '）' : ''), paths.join(' / ')],
     ['Hype 在 VS 成功线的映射标记价', fmt(c?.pressureMark)],
     [
       'Hype 目标仓强平标记价',
@@ -452,7 +449,10 @@ function currentFrame(a, m, t) {
     base.externalValue, Number(r.external) > 0 ? base.externalRate : null]);
   if (running && running.context !== context) cancelAuto();
   wantedKey = key;
-  if (completed?.key === key) {
+  // A later observation of identical prices may reuse the previous solve only
+  // while that solve's own two books and marks are still fresh.
+  if (completed?.key === key && ['pf','hl'].every(side =>
+    quoteClock(completed.result.calculationMarket[side], t, base.timing.quoteTTL).ok)) {
     // The book may return to the last completed inputs while a different tick
     // is still in flight. Keep that validated result and discard the older job.
     if (running && running.key !== key) {
@@ -469,8 +469,6 @@ function currentFrame(a, m, t) {
     // frames to both views while keeping rules/account revisions isolated.
     if (state === 'updating' && interruptedScope === scope)
       return { ...base, retained, frameState:'recovering', trigger, refreshPending:true };
-    if (state === 'updating' && lastGood?.context === context)
-      return { ...retained, observed:base, retained, frameState:state, trigger, refreshPending:true };
     return { ...base, retained, frameState:state, trigger, refreshPending:state === 'updating',
       issues:[reason], priorError:state === 'failed' ? reason : null };
   };

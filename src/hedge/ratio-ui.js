@@ -653,6 +653,12 @@ function renderScaleComparison(snapshot, fixed = false) {
   patchRows($(prefix + '-rows'),body);
 }
 
+function detailLine(cell, text) {
+  const line = document.createElement('small');
+  line.textContent = text;
+  cell.append(line);
+}
+
 function renderPlans(snapshot) {
   const scan = snapshot?.ratioScan;
   const report = scan?.plans;
@@ -663,9 +669,32 @@ function renderPlans(snapshot) {
     if (!r) continue;
     const tr = positionRows.insertRow();
     tr.dataset.point = r.key;
-    for (const value of [name, targetQty(r.pf,scan.ctx.market.pf) + ' / ' + usd(r.pfValue),
-      targetQty(r.hl,scan.ctx.market.hl) + ' / ' + usd(r.hypeValue), settlementAmount(r.fail),settlementAmount(r.success)])
-      tr.insertCell().textContent = value;
+    tr.insertCell().textContent = name;
+    for (const side of ['pf', 'hl']) {
+      const leg = scan.ctx.market[side], adj = r.adjustments?.[side];
+      const cell = tr.insertCell();
+      cell.append(targetQty(r[side],leg) + ' / ' + usd(side === 'pf' ? r.pfValue : r.hypeValue));
+      if (!adj) { detailLine(cell, '该快照未记录调仓差额'); continue; }
+      detailLine(cell, '净仓 ' + adj.current + ' · 挂单 ' + (adj.pending ?? '未知') + ' ' + leg.unit);
+      const remaining = adj.remaining == null ? null : dec(adj.remaining);
+      detailLine(cell, !remaining ? adj.text : (adj.pending != null && !dec(adj.pending).isZero() ? '若挂单全成，' : '') +
+        (remaining.isZero() ? '无需调仓' : (remaining.gt(0) ? '差额买入 ' : '差额卖出 ') + remaining.abs() + ' ' + leg.unit));
+    }
+    for (const key of ['fail','pass']) {
+      const cell = tr.insertCell(), path = r.paths?.[key];
+      cell.append(settlementAmount(key === 'fail' ? r.fail : r.success));
+      if (!path) { detailLine(cell, r[key === 'fail' ? 'failStop' : 'passStop'] || '该快照未记录路径价格'); continue; }
+      for (const side of ['pf','hl']) {
+        const unit = side === 'pf' ? report.pfQuote : report.hlQuote;
+        const line = path[side], mark = snapshot.prices[side].mark;
+        const direction = dec(line.exitMark).cmp(mark);
+        detailLine(cell, (side === 'pf' ? 'PF' : 'Hype') + (direction > 0 ? ' ↑ ' : direction < 0 ? ' ↓ ' : ' → ') +
+          fmt(line.exitMark) + ' ' + unit + ' · 平仓 ' + (line.exitPrice == null ? '无仓位' : fmt(line.exitPrice)));
+      }
+      detailLine(cell, 'Hype 净盈亏 ' + signedCash(path.hypeNet));
+      detailLine(cell, '手续费 PF ' + settlementAmount(path.pf.fees) + ' / Hype ' + settlementAmount(path.hl.fees));
+      detailLine(cell, '盘口成交成本 PF ' + settlementAmount(path.pf.executionCost) + ' / Hype ' + settlementAmount(path.hl.executionCost));
+    }
   }
   const hasTargets = snapshot?.targets.some(Boolean) ?? false;
   patchRows($('position-list-rows'),positionRows);
@@ -814,28 +843,28 @@ export function renderScan(result, m, r, plan, status, snapshot) {
     ['hl', 'Hype']
   ]) {
     const q = m[key];
-    const old = !q?.mark && snapshot?.prices?.[key];
-    const c = observed.currencies?.[key] ?? (old && {baseAsset:old.base, quoteAsset:old.quote});
-    write('scan-' + key + '-product', (key === 'pf' ? 'Vest ' : 'Hyperliquid ') + (m.asset ?? '') + ' Perp');
-    write(
-      'scan-' + key + '-unit',
-      c?.quoteAsset && c?.baseAsset ? c.quoteAsset + '/' + c.baseAsset : '报价币待核实'
-    );
+    const saved = snapshot?.prices?.[key];
+    const book = q?.levels?.[0]?.[0] && q.levels[1]?.[0] ? {
+      bid:q.levels[0][0][0], ask:q.levels[1][0][0], bookAt:q.bookAt ?? q.asOf
+    } : null;
+    const prices = book ?? saved;
+    const c = observed.currencies?.[key] ?? (saved && {baseAsset:saved.base, quoteAsset:saved.quote});
     const prefix = 'scan-' + key + '-';
-    const clock = observed.timing?.clocks?.[key];
-    const paused = m.errors?.[key] || old || clock?.ok === false;
-    write(prefix + 'health', (q?.mark || old) && paused ? ' · 已失效' : '');
-    write(prefix + 'price', q?.mark ?? old?.mark ?? '—');
-    const markSource = '标记时间 ' + time(q?.markAt ?? old?.markAt ?? q?.asOf ?? old?.asOf);
-    if ($(prefix + 'price').title !== markSource) $(prefix + 'price').title = markSource;
-    write(prefix + 'bid', q?.levels?.[0]?.[0]?.[0] ?? old?.bid ?? '—');
-    write(prefix + 'ask', q?.levels?.[1]?.[0]?.[0] ?? old?.ask ?? '—');
-    write(prefix + 'quote', q?.levels
-      ? [m.source === '手工确认盘口' && m.source, '盘口 ' + time(q.bookAt ?? q.asOf),
-        m.errors?.[key] || (observed.timing?.clocks?.[key]?.ok === false && '报价过期或盘口无效')]
-          .filter(Boolean).join(' · ')
-      : old ? '历史盘口 · ' + time(old.bookAt ?? old.asOf) + ' · ' + (m.errors?.[key] || '等待新报价')
-      : m.errors?.[key] || title + ' 正在连接盘口');
+    write(prefix + 'product', (key === 'pf' ? 'Vest ' : 'Hyperliquid ') + (m.asset ?? '') + ' Perp');
+    write(prefix + 'unit', c?.quoteAsset && c?.baseAsset ? c.quoteAsset + '/' + c.baseAsset : '报价币待核实');
+    const bookInvalid = m.errors?.[key] || observed.timing?.clocks?.[key]?.ok === false;
+    write(prefix + 'health', prices && (!book || bookInvalid) ? ' · 已失效' : '');
+    write(prefix + 'price', q?.mark ?? saved?.mark ?? '—');
+    const markAt = q?.mark != null ? q.markAt ?? q.asOf : saved?.markAt ?? saved?.asOf;
+    $(prefix + 'price').title = (q?.mark == null && saved ? '历史标记时间 ' : '标记时间 ') + time(markAt);
+    write(prefix + 'bid', prices?.bid ?? '—');
+    write(prefix + 'ask', prices?.ask ?? '—');
+    const clock = $(prefix + 'book-time');
+    const bookAt = prices?.bookAt;
+    if (clock.dateTime !== (bookAt ?? '')) clock.dateTime = bookAt ?? '';
+    write(prefix + 'book-time', bookAt ? (book ? '盘口 ' : '历史盘口 ') + time(bookAt) : '盘口时间未知');
+    write(prefix + 'quote', [m.source === '手工确认盘口' && m.source, clock.textContent,
+      m.errors?.[key] || (bookInvalid && '报价过期或盘口无效') || (!book && '等待新报价')].filter(Boolean).join(' · '));
   }
   const displayed = result.ratioScan ? result : result.retained;
   const tr = snapshot?.trace;
@@ -898,7 +927,7 @@ export function renderScan(result, m, r, plan, status, snapshot) {
     validity = '当前数据有效 · 条件估算';
     if (displayed?.ratioScan?.complete === false) validity += '（部分网格）';
   } else if (state === 'updating') {
-    validity = tr ? (result.trigger === '行情更新' ? '行情重算中' : '输入已变更，正在重算') + ' · 保留上次条件结果' : '输入就绪，首次计算中';
+    validity = tr ? (result.trigger === '行情更新' ? '行情重算中' : '输入已变更，正在重算') + ' · 历史快照，暂停新建议' : '输入就绪，首次计算中';
   } else if (waitingForMarket) {
     validity = '等待双边盘口';
   } else {
@@ -907,10 +936,14 @@ export function renderScan(result, m, r, plan, status, snapshot) {
   }
   const completedAt = snapshot?.calculatedAt;
   const lastTime = completedAt ? new Date(completedAt).toLocaleString('zh-CN',{hour12:false}) : '—';
-  const historical = !!tr && (quoteBreak || !['ready','updating'].includes(state) || !result.ratioScan);
+  const historical = !!tr && (state !== 'ready' || !result.ratioScan);
+  const cashClock = $('cash-calculated-at');
+  if (cashClock.dateTime !== (completedAt ?? '')) cashClock.dateTime = completedAt ?? '';
+  write('cash-calculated-at', completedAt ? '最后成功计算 ' + time(completedAt) : '等待首次计算');
   const main = $('current');
   if (main.dataset.historical !== String(historical)) main.dataset.historical = String(historical);
-  $('snapshot-note').hidden = !historical;
+  if (main.dataset.frameState !== state) main.dataset.frameState = state;
+  $('snapshot-note').hidden = !historical || state === 'updating';
   write('snapshot-note', historical ? '历史快照 · ' + lastTime + '。新目标建议已暂停，以下资金、区间与仓位仅供核对。' : '');
   write('scan-status', validity + ' ｜ 最近成功计算 ' + lastTime);
   write(

@@ -642,12 +642,12 @@ main.live-desk {padding-block:14px}
 #positions-view h2 {font-size:16px; margin:8px 0}
 #positions-view h3 {font-size:14px; margin:12px 0 4px}
 #fixed-scale-caption {font-size:13px; color:#50645b; margin:6px 0}
-.history-label {display:none; font-size:12px; font-weight:600; color:#755323}
+.history-label {visibility:hidden; display:inline; font-size:12px; font-weight:600; color:#755323}
 #snapshot-note {margin:0 0 6px; padding:5px 10px; border-left:3px solid #98713d; background:#f6f0e6; color:#684f2d}
-#current[data-historical="true"] .history-label {display:inline}
-#current[data-historical="true"] :is(#scan-representative,#max-risk,#plan-caption) {display:none}
-#current[data-historical="true"] :is(#scan-focus,#ratio-intervals,#plan-comparison,#positions-view) {color:#516158}
-#current[data-historical="true"] :is(#scan-focus strong,#scan-both,#plan-rows td) {color:#516158}
+#current[data-historical="true"] .history-label {visibility:visible}
+#current[data-historical="true"]:not([data-frame-state="updating"]) :is(#scan-representative,#max-risk,#plan-caption) {display:none}
+#current[data-historical="true"]:not([data-frame-state="updating"]) :is(#scan-focus,#ratio-intervals,#plan-comparison,#positions-view) {color:#516158}
+#current[data-historical="true"]:not([data-frame-state="updating"]) :is(#scan-focus strong,#scan-both,#plan-rows td) {color:#516158}
 #current[data-historical="true"] #desk-state {color:#79551e}
 @media(min-width:781px) {
   #current .desk-title {margin-bottom:4px}
@@ -661,10 +661,28 @@ main.live-desk {padding-block:14px}
   #scale-details h2 {grid-column:1/-1}
   #scale-details :is(td,th) {min-width:0; font-size:12px; white-space:normal}
 }
+#plan-columns small::before {content:'条件目标 · '}
+#current[data-historical="true"] #desk-details .frame-key::before,
 #current[data-historical="true"] #plan-columns small::before {content:'历史快照 · '}
 @media(max-width:520px) {
   #desk-state {min-height:1.35em}
   #desk-views {margin-bottom:3px}
   #scan-desk {row-gap:4px}
   #scan-focus .scan-rep {margin-top:3px}
+}
+
+#cash-calculated-at, .book-table time {font-size:11px; font-weight:400; font-variant-numeric:tabular-nums; white-space:nowrap; color:#50645b}
+#position-list td {vertical-align:top}
+#position-list td small {display:block; font-size:12px; color:#52635b; line-height:1.45}
+
+@media(max-width:520px) {
+  #scan-desk:has(#plan-comparison:not([hidden])) :is(#scan-position,#plan-caption) {display:none}
+  #max-risk #scale-link {display:none}
+  #scan-results .bands-heading {gap:0 6px}
+  #scan-results .bands-heading h2 {margin:0}
+  #current #plan-columns small::before, #current[data-historical="true"] #plan-columns small::before {content:none}
+  #desk-state {min-height:2.7em}
+  #ratio-intervals,#scan-results {padding-top:4px}
+  #scan-desk .book-table :is(td,th) {line-height:1.2}
+  #scan-desk .scan-sets dt {line-height:1.25}
 }

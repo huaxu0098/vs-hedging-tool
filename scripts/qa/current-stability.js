@@ -52,11 +52,11 @@ const install = `(() => {
     const cols=[...e('plan-columns').rows[0].cells].slice(1);
     const live=cols.flatMap((th,i)=>th.dataset.point ? [[th.dataset.point,th.firstChild.textContent,
       matrix.pf[i]+' / '+matrix.pfValue[i],matrix.hl[i]+' / '+matrix.hypeValue[i],matrix.fail[i],matrix.success[i]]] : []);
-    const positions=[...e('position-list-rows').rows].map(row=>[row.dataset.point,...[...row.cells].map(c=>c.textContent)]);
+    const positions=[...e('position-list-rows').rows].map(row=>[row.dataset.point,...[...row.cells].map(c=>c.firstChild?.textContent ?? '')]);
     return {version,ids,live,positions,empty:e('positions-empty').textContent,visible:!e('position-list').hidden,
       emptyVisible:!e('positions-empty').hidden,liveVisible:!e('plan-comparison').hidden};
   };
-  let lastId, firstRow, main, root, region, firstCell, previousQuote, neighborBody, neighborCell;
+  let lastClocks, lastClockId, lastId, firstRow, main, root, region, firstCell, previousQuote, neighborBody, neighborCell;
   function frame() {
     const e=id=>document.getElementById(id),desk=e('scan-desk');
     if(lastId) {
@@ -71,8 +71,14 @@ const install = `(() => {
           JSON.stringify(panels.live)!==JSON.stringify(panels.positions) ||
           panels.visible!==!!panels.live.length || panels.liveVisible!==panels.visible ||
           panels.emptyVisible===panels.visible || (panels.visible && panels.empty)) test.panelMismatches=(test.panelMismatches||0)+1;
+      const clockPair=['pf','hl'].map(k=>e('scan-'+k+'-book-time').dateTime).join('|');
+      if(desk.dataset.state==='updating' && lastClockId===panels.version.snapshotId && lastClocks!==clockPair)
+        test.historyTicks=(test.historyTicks||0)+1;
+      lastClocks=clockPair;lastClockId=panels.version.snapshotId;
       if(desk.dataset.state==='updating') {
         test.pendingPaints++;
+        if(e('current').dataset.historical!=='true' || !e('scan-status').textContent.includes('历史快照') ||
+          e('cash-calculated-at').dateTime!==panels.version.calculatedAt) test.conflict=true;
         if(!/重算/.test(e('scan-status').textContent) || e('scan-status').textContent.includes('当前数据有效')) test.conflict=true;
       }
       if(desk.dataset.state==='ready' && !e('scan-status').textContent.includes('当前数据有效 · 条件估算')) test.conflict=true;
@@ -93,6 +99,8 @@ const install = `(() => {
       firstRow??=e('plan-rows').rows[0];lastId=id;
       test.commits.push({ ...test.results[id], panels:test.readPanels(), prices:[e('scan-pf-price').textContent,e('scan-hl-price').textContent],
         cash:[e('scan-fail-cash').textContent,e('scan-pass-cash').textContent], position:e('scan-position').textContent,
+        clocks:['pf','hl'].map(k=>e('scan-'+k+'-book-time').dateTime),
+        shownPaths:[...e('position-list-rows').rows].map(row=>[row.cells[3].textContent,row.cells[4].textContent]),
         shown:[...e('plan-columns').rows[0].cells].slice(1).map((th,i)=>({
           key:th.dataset.point, scenario:th.lastElementChild.textContent,
           cells:Object.fromEntries([...e('plan-rows').rows].map(tr=>[tr.dataset.metric,tr.cells[i+1].textContent]))
@@ -143,6 +151,17 @@ try {
     const delta=x=>(dec(x).gt(0)?'+':'')+cash(x);
     for (const [i, plan] of f.plans.entries()) {
       const {key,scenario,cells}=f.shown[i];
+      assert.ok(f.clocks.every(stamp=>Number.isFinite(Date.parse(stamp))));
+      for (const [column,end] of ['fail','pass'].entries()) {
+        const path=plan.paths[end], shown=f.shownPaths[i][column];
+        const expectedSign=end==='fail'?-plan.sign:plan.sign;
+        assert.equal(dec(path.pf.exitMark).cmp(f.pfMark),expectedSign);
+        assert.equal(dec(path.hl.exitMark).cmp(f.hlMark),expectedSign);
+        for(const [venue,symbol] of [['pf','PF'],['hl','Hype']])
+          assert.ok(shown.includes(symbol+(expectedSign>0?' ↑ ':' ↓ ')+dec(path[venue].exitMark).toFixed(2)));
+        assert.ok(shown.includes('Hype 净盈亏 '+delta(path.hypeNet)));
+        assert.ok(shown.includes('手续费 PF '+cash(path.pf.fees)+' / Hype '+cash(path.hl.fees)));
+      }
       assert.equal(key,plan.key);
       assert.equal(scenario,'基础情景');
       assert.ok(dec(cells.h.slice(0,-1)).eq(dec(plan.h).times(100).toDecimalPlaces(cells.h.split('.')[1].length-1)));
@@ -187,7 +206,7 @@ try {
   assert.ok(new Set(frames.map(f => JSON.stringify(f.shown))).size > 1);
   evidence.live = frames.map(({ rows, bins, ...f }) => ({ ...f, bands: bins.length }));
   evidence.observation = await run(
-    '(({paints,pendingPaints,blanks,neighborBlanks=0,neighborRemounts=0,replacedFirstRow=false,remounts=0,unreadable=false,posted,elapsedMs,quoteChanges,panelMismatches=0})=>({panelMismatches,paints,pendingPaints,blanks,neighborBlanks,neighborRemounts,replacedFirstRow,remounts,unreadable,posted,elapsedMs,quoteChanges}))(window.scanTest)'
+    '(({paints,pendingPaints,blanks,neighborBlanks=0,neighborRemounts=0,replacedFirstRow=false,remounts=0,unreadable=false,posted,elapsedMs,quoteChanges,panelMismatches=0,historyTicks=0})=>({historyTicks,panelMismatches,paints,pendingPaints,blanks,neighborBlanks,neighborRemounts,replacedFirstRow,remounts,unreadable,posted,elapsedMs,quoteChanges}))(window.scanTest)'
   );
   evidence.viewports = [];
   for (const [width,height] of [[1280,720],[390,844],[1440,900]]) {
@@ -327,6 +346,7 @@ try {
   assert.deepEqual(renewed.ids,Array(4).fill(renewed.version.snapshotId));
   assert.deepEqual(renewed.positions,renewed.live);
   evidence.reload={historical:cached.version.snapshotId,renewed:renewed.version.snapshotId,targets:renewed.live.length};
+  assert.ok(evidence.observation.historyTicks>0);
   assert.equal(evidence.observation.panelMismatches,0);
   assert.ok(evidence.observation.elapsedMs >= 60000 && evidence.observation.quoteChanges > 1);
   assert.equal(evidence.observation.neighborBlanks, 0);

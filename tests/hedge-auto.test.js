@@ -1866,8 +1866,8 @@ test('每行原生买卖均价及双边费用来自同一个差额仓位，外�
     assert.ok(dec(r.fail).minus(r.failHype).eq('15'), JSON.stringify([r.fail, r.failHype, scan.ctx.book.external]));
     for(const [key,path] of [['failCost','fail'],['passCost','pass']]) {
       const {pf,hl}=actual.paths[path];
-      const total=dec(pf.entryFee).plus(hl.entryFee).plus(pf.exitFee).plus(hl.exitFee);
-      assert.ok(total.eq(r[key].fees));
+      const total=sumPostings([pf.entryFee,hl.entryFee,pf.exitFee,hl.exitFee]);
+      assert.equal(r[key].fees,total);
     }
   }
 });
@@ -2116,5 +2116,53 @@ test('固定杠杆与自动杠杆对照使用同一对大小仓，并独立核�
     }
     const [small,large]=fixed.rows;
     assert.ok(dec(large.initial).times(small.hypeValue).minus(dec(small.initial).times(large.hypeValue)).abs().lt('1e-38'));
+  }
+});
+
+test('候选各自按有符号 PF 数量反解两条原生触线价，并独立对账两侧成交成本', () => {
+  const f=fixture();
+  f.m.pf.levels=[[['99.8','2'],['99.6','30']],[['100.3','2'],['100.7','30']]];
+  f.m.hl.mark='104';
+  f.m.hl.levels=[[['103.7','1'],['103.5','30']],[['104.1','1'],['104.4','30']]];
+  const close=(a,b)=>assert.ok(dec(a).minus(b).abs().lt('1e-12'),a+' / '+b);
+  const scan=scanFixture({pfFee:'0.0002',hlFee:'0.0006',external:'12',externalAt:at}, f).ratioScan;
+  const ctx={...scan.ctx,market:{...scan.ctx.market,pf:{...scan.ctx.market.pf,factor:'2'},
+    hl:{...scan.ctx.market.hl,factor:'0.75'}}};
+  for (const sign of [1,-1]) for (const i of [6,8]) for (const stressed of [false,true]) {
+    const settings={...ctx,checks:{...ctx.checks,stress: stressed ? {jumpBps:'30',basisBps:'0',delayBps:'2',fundingDebit:'0.1'} : undefined}};
+    const r=planRecord({ctx:settings},{sign,i,j:2});
+    for (const [key,pfTarget,side] of [['fail',900,-1],['pass',1100,1]]) {
+      const path=r.paths[key];
+      assert.equal(dec(path.pf.exitMark).cmp('100'),sign*side);
+      const shift=dec(path.pf.exitMark).minus(100).div(2);
+      close(path.hl.exitMark,dec('104').plus(shift.times('0.75')).plus(stressed?dec('104').times('0.003').times(sign):0));
+      for (const [venue,qty,fee] of [['pf',r.pf,'0.0002'],['hl',r.hl,'0.0006']]) {
+        const leg=path[venue], q=dec(qty), spec=ctx.market[venue];
+        const fill=venue==='pf'?r.pfFill:r.hlFill;
+        const move=q.times(dec(leg.exitMark).minus(spec.mark));
+        close(leg.fees,q.abs().times(dec(fill.price).plus(leg.exitPrice)).times(fee));
+        close(leg.executionCost,q.times(dec(fill.price).minus(spec.mark).plus(dec(leg.exitMark).minus(leg.exitPrice))));
+        const net=move.minus(leg.executionCost).minus(leg.fees);
+        if (venue==='pf') close(net.plus(1000),pfTarget);
+        else {
+          close(path.hypeNet,net.minus(stressed ? dec('104').times(2).times('0.0002').plus('0.1') : 0));
+          close(key==='fail'?r.fail:r.success,dec('120').plus(path.hypeNet).plus(key==='fail'?12:0));
+        }
+      }
+    }
+  }
+});
+
+test('每个目标从当前净仓及同向剩余挂单计算差额，覆盖加仓、减仓与反手', () => {
+  for (const [current, target, pending, remaining] of [
+    ['2','6','1','3'], ['8','6','-1','-1'], ['-2','6','3','5'], ['2','6','4','0']
+  ]) {
+    const f=fixture();
+    Object.assign(f.a.pf,{qty:current,orders:[{qty:pending}]});
+    Object.assign(f.a.hl,{qty:'-1', orders:[{qty:'-1'}]});
+    const scan=scanFixture({},f).ratioScan;
+    const p=planRecord(scan,{sign:1,i:Number(target),j:2});
+    assert.deepEqual([p.adjustments.pf.current,p.adjustments.pf.pending,p.adjustments.pf.remaining],[current,pending,remaining]);
+    assert.equal(p.adjustments.hl.remaining,'0');
   }
 });

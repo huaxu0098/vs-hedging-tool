@@ -1,4 +1,5 @@
-import { sumPostings } from './settlement-ledger.js';
+import { adjustmentAfterOrders } from './order-adjustment.js';
+import { sumPostings, settlementBridge, settlementTolerance } from './settlement-ledger.js';
 import { executionDetail } from './solver.js';
 import { dec, out } from './math.js';
 import { exactRatio, adjacentScale, inspectRatio, ratioSlice, scalesPerBlock, lastLotAtRatio } from './ratio-scan.js';
@@ -77,19 +78,45 @@ function execution(leg) {
   return { delta: leg.adjustment, price: dec(leg.adjustment).isZero() ? null : leg.entryPrice };
 }
 
-function costs(path, row, endpoint, leg) {
-  if (!path?.pf || !path.hl) return null;
-  let exit = path.hl;
-  if (row.stress?.priceShock && !dec(row.stress.priceShock).isZero()) {
-    if (!row.lines || !leg.factor) return null;
-    const shift = dec(row.lines[endpoint]).plus(dec(row.stress.priceShock).div(leg.factor));
-    const fill = executionDetail(leg, out(dec(row.hl).neg()), out(shift));
-    exit = { exitFee: fill.fee, exitSlippage: fill.impact };
-  }
-  const total = (a, b) => out(dec(path.pf[a]).plus(path.pf[b]).plus(path.hl[a]).plus(exit[b]));
-  return { fees: total('entryFee', 'exitFee'), slippage: total('entrySlippage', 'exitSlippage') };
+function adjustment(ledger, pending) {
+  if (!ledger) return null;
+  const current = out(dec(ledger.target).minus(ledger.adjustment));
+  return { current, pending:pending ?? null, ...adjustmentAfterOrders(ledger.adjustment, pending) };
 }
 
+// Use the candidate's two signed settlement ledgers. Only the Hype exit is
+// repriced under a Hype shock; PF still closes at its own rule boundary.
+function endpoint(ctx, row, key) {
+  const path = row.paths?.[key];
+  if (!path?.pf || !path.hl || (key === 'fail' ? row.failStop : row.passStop)) return null;
+  const pf = path.pf, leg = ctx.market.hl;
+  let hl = path.hl;
+  if (row.stress) {
+    if (!leg.factor || !row.lines) return null; // A legacy saved report may lack the native book.
+    const shift = out(dec(row.lines[key]).plus(dec(row.stress.priceShock).div(leg.factor)));
+    const exit = executionDetail(leg, out(dec(hl.target).neg()), shift);
+    const friction = sumPostings([hl.friction, row.stress.delayDebit, row.stress.fundingDebit]);
+    hl = settlementBridge(hl.start, leg, hl.target, hl.adjustment, shift,
+      {price:hl.entryPrice, fee:hl.entryFee, impact:hl.entrySlippage}, exit, friction);
+  }
+  const compact = ledger => ({
+    exitMark:ledger.exitMark, exitPrice:ledger.exitPrice,
+    fees:sumPostings([ledger.entryFee, ledger.exitFee]),
+    slippage:sumPostings([ledger.entrySlippage, ledger.exitSlippage]),
+    // Signed mark-to-fill cost can include improvement. Fees are separate.
+    executionCost:out(dec(ledger.entryFill).plus(ledger.exitFill).neg())
+  });
+  const expected = key === 'fail'
+    ? (ctx.book.external == null ? null : sumPostings([hl.settled, ctx.book.external])) : hl.settled;
+  if (expected != null && dec(expected).minus(key === 'fail' ? row.fail : row.success).abs().gt(settlementTolerance))
+    throw Error('候选触线路径与现金账本不一致');
+  return { pf:compact(pf), hl:compact(hl), hypeNet:out(dec(hl.settled).minus(hl.start)) };
+}
+
+function costs(path) {
+  return path && {fees:sumPostings([path.pf.fees, path.hl.fees]),
+    slippage:sumPostings([path.pf.slippage, path.hl.slippage])};
+}
 // One scalar evaluation supplies every displayed field for one exact tuple.
 // Even a legal quantity can reach liquidation before a requested cash endpoint.
 export function planRecord(scan, point) {
@@ -98,6 +125,7 @@ export function planRecord(scan, point) {
 
 export function recordFromInspection(ctx, row) {
   const { sign, i, j } = row;
+  const paths = {fail:endpoint(ctx,row,'fail'), pass:endpoint(ctx,row,'pass')};
   return {
     sign, i, j, key: pointKey(row), h: row.h,
     fraction: ctx.market.pf.factor ? exactRatio(ctx.market, row.pf, row.hl) : null,
@@ -111,8 +139,9 @@ export function recordFromInspection(ctx, row) {
     success: row.passStop ? null : row.success,
     successDelta: row.passStop ? null : out(dec(row.successPersonal).minus(ctx.book.B)),
     failStop: row.failStop, passStop: row.passStop,
-    failCost: row.failStop ? null : costs(row.paths?.fail, row, 'fail', ctx.market.hl),
-    passCost: row.passStop ? null : costs(row.paths?.pass, row, 'pass', ctx.market.hl),
+    paths, failCost:costs(paths.fail), passCost:costs(paths.pass),
+    adjustments:{pf:adjustment(row.paths?.fail.pf, ctx.market.pf.pendingQty),
+      hl:adjustment(row.paths?.fail.hl, ctx.market.hl.pendingQty)},
     leverage: row.lev == null ? null : String(row.lev),
     maintenance: row.maintenance ?? null, free: row.free ?? null, otherInitial: row.otherInitial ?? null,
     baseSurplus: row.baseSurplus ?? null, stressSurplus: row.stressSurplus ?? null,

@@ -32,15 +32,15 @@
           <table class="book-table">
             <thead><tr><th scope="col">永续合约</th><th scope="col">Bid 买一</th><th scope="col">Ask 卖一</th><th scope="col">Mark 标记</th></tr></thead>
             <tbody>
-              <tr><th scope="row"><b id="scan-pf-product">Vest</b><small><span id="scan-pf-unit"></span><span id="scan-pf-health"></span></small></th>
+              <tr><th scope="row"><b id="scan-pf-product">Vest</b><small><span id="scan-pf-unit"></span><span id="scan-pf-health"></span> <time id="scan-pf-book-time"></time></small></th>
                 <td id="scan-pf-bid">—</td><td id="scan-pf-ask">—</td><td id="scan-pf-price">—</td></tr>
-              <tr><th scope="row"><b id="scan-hl-product">Hyperliquid</b><small><span id="scan-hl-unit"></span><span id="scan-hl-health"></span></small></th>
+              <tr><th scope="row"><b id="scan-hl-product">Hyperliquid</b><small><span id="scan-hl-unit"></span><span id="scan-hl-health"></span> <time id="scan-hl-book-time"></time></small></th>
                 <td id="scan-hl-bid">—</td><td id="scan-hl-ask">—</td><td id="scan-hl-price">—</td></tr>
             </tbody>
           </table>
         </section>
         <section id="scan-focus" aria-labelledby="cash-heading">
-          <h2 id="cash-heading">资金结果 <small class="history-label">历史快照</small></h2>
+          <h2 id="cash-heading">资金结果 <small class="history-label">历史快照</small> <time id="cash-calculated-at"></time></h2>
           <div id="scan-cash" class="scan-paths">
             <div><h3>失败后 · 个人回收</h3><strong id="scan-fail-cash">—</strong><small id="scan-fail-summary"></small></div>
             <div><h3 id="scan-pass-title">通过后 · Hype 剩余</h3><strong id="scan-pass-cash">—</strong><small id="scan-pass-summary"></small></div>
@@ -76,7 +76,7 @@
       <details id="positions-view" name="workbench-view"><summary hidden>仓位明细</summary>
         <h2>三个方案的目标仓位 <small class="history-label">历史快照</small></h2>
         <p id="positions-empty">等待首份计算快照</p>
-        <div class="table-wrap"><table id="position-list" hidden><thead><tr><th>方案</th><th>PF 数量 / 名义额</th><th>Hype 数量 / 名义额</th><th>失败回收</th><th>成功后 Hype 剩余</th></tr></thead><tbody id="position-list-rows"></tbody></table></div>
+        <div class="table-wrap"><table id="position-list" hidden><thead><tr><th>方案</th><th>PF 数量 / 名义额</th><th>Hype 数量 / 名义额</th><th>失败路径 · 个人回收</th><th>成功路径 · Hype 剩余</th></tr></thead><tbody id="position-list-rows"></tbody></table></div>
         <section id="scale-details">
           <h2>同一比例的扩仓对照 <small class="history-label">历史快照</small></h2>
           <div class="scale-method"><h3>A · 固定杠杆</h3><p id="fixed-scale-caption"></p>

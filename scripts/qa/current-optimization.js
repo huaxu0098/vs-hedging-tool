@@ -151,6 +151,21 @@ try {
   assert.match(await text('#margin-detail-title'), /真实账户/);
   await input('rebalanceSteps', '3');
   await wait(ready + " && document.querySelector('#hysteresis').textContent.includes('阈值 3')", 40000);
+  // Existing net position and unfilled buy quantity, entered through the actual
+  // account form in this isolated browser. All three targets must use both.
+  await input('pf-anchor', await text('#scan-pf-price'));
+  await input('pf-qty','0.002');
+  await input('pf-orders','0.001');
+  await wait(ready+" && [...document.querySelectorAll('#position-list-rows tr')].length===3 && document.querySelector('#position-list-rows').textContent.includes('净仓 0.002 · 挂单 0.001')",45000);
+  await click('#desk-views button[aria-controls="positions-view"]');
+  const actual=await run(`[...document.querySelectorAll('#position-list-rows tr')].map(tr=>tr.cells[1].innerText)`);
+  for (const cell of actual) {
+    const target=Number(cell.match(/多 ([0-9.]+) BTC/)[1]);
+    const remaining=Number(cell.match(/若挂单全成，差额买入 ([0-9.]+) BTC/)[1]);
+    assert.ok(Math.abs(target-0.002-0.001-remaining)<1e-12);
+  }
+  console.log('POSITION_ADJUST_OK', JSON.stringify(actual));
+  await click('#scan-config');
   await b.set('#funding-view', 'plan');
   assert.equal(await run("document.querySelector('#R_success').value"), '98');
   assert.equal(await run("document.querySelector('#rebalanceSteps').value"), '2');

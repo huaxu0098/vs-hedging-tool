@@ -10,6 +10,8 @@ import {
   normalizeExposure,
   estimateFill
 } from './math.js';
+import { remainingOrder } from './order-adjustment.js';
+export { remainingOrder } from './order-adjustment.js';
 import { buildPlanReport } from './position-plans.js';
 import { analyzeRatios } from './ratio-analysis.js';
 import { validLeverageCap } from './leverage.js';
@@ -139,23 +141,6 @@ export function fieldTime(account, field) {
   const key = field + 'At';
   return Object.hasOwn(account, key) ? account[key] : (account.origins?.[field]?.at ?? account.at);
 }
-export function remainingOrder(delta, current, orders) {
-  if (!Array.isArray(orders)) return { text: '未确认挂单，待核对', remaining: null };
-  const d = dec(delta);
-  if (!orders.length) return { text: '已确认无挂单', remaining: out(d) };
-  const sizes = orders.map((o) => dec(o.qty));
-  const projected = out(sizes.reduce((s, x) => s.plus(x), dec(current)));
-  if (orders.some((o, i) => o.conditional || o.reduceOnly || sizes[i].times(d).lte(0))) {
-    return { text: '存在条件、减仓或方向冲突挂单，先核对', remaining: null, projected };
-  }
-  const rest = sizes.reduce((s, x) => s.minus(x), d);
-  return {
-    text: rest.times(d).lt(0) ? '原挂单已超过目标，先核对' : '若同向挂单全部成交',
-    remaining: rest.times(d).lt(0) ? null : out(rest),
-    projected
-  };
-}
-
 function hlTiers(tiers) {
   if (!Array.isArray(tiers) || !tiers.length) return null;
   let prior = dec('0'),
