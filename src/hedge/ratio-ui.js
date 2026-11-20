@@ -147,7 +147,7 @@ function showRepresentative(snapshot, auditScan) {
   // Prices, cash and advanced postings follow the same signed target.
   const target = maximum ?? row;
   const diagnostic = !maximum && objective === 'diagnostic';
-  write('scan-representative', maximum ? '最大 PF 目标仓位 · ' + pct(target.h) :
+  write('scan-representative', maximum ? '基础情景最大 PF 目标仓位 · ' + pct(target.h) :
     diagnostic ? '条件对照 · 当前无可推荐仓位' : '条件目标方案 · ' + pct(target.h));
   const unit = side => scan.ctx.market[side].unit === 'contract' ? '张' : scan.ctx.market[side].unit;
   write('scan-position', (diagnostic ? '仅作路径对照（对照比例 ' + pct(target.h) + '）' : '') +
@@ -179,7 +179,7 @@ function showRepresentative(snapshot, auditScan) {
           (thin ? ' · 极薄缓冲（几乎零缓冲）' : '') +
           (thin && stressIncomplete
             ? stress.positive.length
-              ? '，已配置情景刚好覆盖，完整压力未验证'
+              ? '，基础情景刚好覆盖，完整压力未验证'
               : '，仅基础情景刚好覆盖，完整压力未验证'
             : '') +
           (dec(buffer).gt(0) ? ' · 额外缓冲要求 ' + usd(buffer) : ' · 未设额外安全缓冲')
@@ -575,7 +575,7 @@ function initComparison() {
   }
 }
 
-const statusText = value => ({pass:'通过',fail:'未通过',unknown:'未验证'})[value] ?? '未验证';
+const statusText = value => ({pass:'通过',fail:'未通过',unknown:'未验证',insufficient:'深度不足'})[value] ?? '未验证';
 function planChecks(plan) {
   const v = plan.verification ?? {};
   const short = value => ({pass:'✓',fail:'×'})[value] ?? '待验';
@@ -609,12 +609,12 @@ function renderComparison(snapshot) {
   const thin = max.fail != null && recoveryCushion(max.fail, scan.ctx.book.B).thin;
   const warning = baseOnly && thin ? '基础情景可行，安全缓冲极薄，压力风险未验证' :
     baseOnly ? '最大基础情景可行仓位，压力安全性未验证' :
-    !stress || partial ? '最大条件目标仓位，压力安全性未验证' : '最大条件目标仓位，按已配置压力估算';
+    !stress || partial ? '最大条件目标仓位，压力安全性未验证' : '最大基础情景仓位，压力核验另列';
   const stressWarning=max.verification?.stress==='fail' ? ' · 配置的压力情景未通过' :
     !baseOnly && !partial && max.coverage!=='verified' ? ' · 完整路径风险未验证' : '';
   write('max-risk-title', scope + warning + stressWarning);
   const exit=max.liquidity?.fail;
-  const exitNote=exit?.status==='fail' && exit.settlement
+  const exitNote=exit?.settlement && dec(exit.settlement.personal).lt(dec(scan.ctx.book.B).plus(scan.ctx.params.recoveryBuffer??'0'))
     ? ' · 撤去退出最优档后失败回收 '+settlementAmount(exit.settlement.personal)+'，低于回收门槛'
     : exit?.status==='insufficient' ? ' · 撤去退出最优档后，剩余深度不足以平仓' : '';
   write('max-risk-values','占用 '+pct(max.marginRate,2)+' · 开仓可用 '+usd(max.free)+
@@ -679,6 +679,55 @@ function detailLine(cell, text) {
   const line = document.createElement('small');
   line.textContent = text;
   cell.append(line);
+}
+
+function liquidityLines(cell,first,scan) {
+  for (const [label,test] of [['A 完整盘口',first.full],['B 撤档退出 · 撤最优档',first],['C 撤前两档',first.two],['D 剩余可见深度不足',first.shortfall]]) {
+    if (!test) continue;
+    const cash=test.settlement;
+    detailLine(cell,label+' · 退出核验'+statusText(test.status)+' · '+(cash ? '个人资金 '+settlementAmount(cash.personal)+
+      ' / Hype '+settlementAmount(cash.hype) : '全量退出资金未验证')+
+      (test.reason?' · '+test.reason:'')+
+      ' · 清算路径 '+statusText(test.pathStatus)+'，最低维持余量 '+settlementAmount(test.path?.worst?.surplus));
+    for (const [side,venue] of [['pf','PF'],['hl','Hype']]) {
+      const f=test.depth[side], unit=scan.ctx.market[side].unit;
+      detailLine(cell,venue+' 可成交 '+(f.covered??'未知')+' / 未覆盖 '+(f.uncovered??'未知')+' '+unit+
+        ' · 退出均价 '+fmt(f.vwap)+' · 档内滑点 '+settlementAmount(f.slippage)+
+        ' · 撤档新增成交成本 '+settlementAmount(test.extraExitCost?.[side])+
+        ' · 退出手续费 '+settlementAmount(test.exitFees?.[side]));
+      const part=f.coveredExecution;
+      if(part && (f.status!=='covered' || !part.atEndpoint)) detailLine(cell,
+        venue+(part.atEndpoint?' 终点':' 当前盘口')+'已覆盖部分均价 '+fmt(part.vwap)+
+        ' · 滑点 '+settlementAmount(part.slippage)+' · 手续费 '+settlementAmount(part.fee));
+    }
+  }
+  detailLine(cell,'退出侧可见档全部撤去时 · 可成交 0，未覆盖 PF '+(first.withdrawn.pf.uncovered??'未知')+
+    ' '+scan.ctx.market.pf.unit+' / Hype '+(first.withdrawn.hl.uncovered??'未知')+' '+scan.ctx.market.hl.unit+
+    ' · 全量均价、滑点、退出手续费及最终资金均未验证');
+}
+
+function pressureMetric(snapshot) {
+  const scan=snapshot?.ratioScan, result=scan?.plans?.pressure, row=result?.row;
+  const el=$('liquidity-maximum'), body=$('liquidity-evidence-body');
+  el.hidden=!snapshot;
+  el.dataset.point=row?.key ?? '';
+  el.dataset.snapshotId=snapshot?.snapshotId ?? '';
+  $('liquidity-evidence').hidden=!row;
+  body.replaceChildren();
+  const prefix='最大压力情景可行仓位 · ';
+  if (!row) {
+    setText(el,prefix+(result?.reason ?? '本帧尚无压力搜索结果'));
+    return;
+  }
+  const worst=(end,field)=>[row.liquidity[end].full,row.liquidity[end],row.liquidity[end].two]
+    .reduce((a,test)=>dec(test.settlement[field]).lt(a)?dec(test.settlement[field]):a,dec(row.liquidity[end].full.settlement[field]));
+  setText(el,prefix+'PF '+targetQty(row.pf,scan.ctx.market.pf)+'（'+usd(row.pfValue)+'） / Hype '+
+    targetQty(row.hl,scan.ctx.market.hl)+'（'+usd(row.hypeValue)+'） · A–C 失败最低 '+settlementAmount(worst('fail','personal'))+
+    ' / 成功最低 '+settlementAmount(worst('pass','hype'))+' · '+result.reason);
+  for (const [end,title] of [['fail','PF 失败'],['pass','PF 达标']]) {
+    detailLine(body,title+' · '+targetQty(row.pf,scan.ctx.market.pf)+' / Hype '+targetQty(row.hl,scan.ctx.market.hl));
+    liquidityLines(body,row.liquidity[end],scan);
+  }
 }
 
 function intervalEvidence(cell,label,name,test) {
@@ -764,25 +813,11 @@ function renderPlans(snapshot) {
       }
       detailLine(cell,'深度滑点 PF ' + settlementAmount(path.pf.slippage) + ' / Hype ' + settlementAmount(path.hl.slippage));
       const stressDepth=r.liquidity?.[key];
-      if (stressDepth) {
-        for (const [side,venue] of [['pf','PF'],['hl','Hype']]) {
-          const fill=stressDepth.depth[side], gone=stressDepth.withdrawn[side], unit=scan.ctx.market[side].unit;
-          if (fill.status==='noTrade') continue;
-          detailLine(cell,venue+' 退出最优档撤去 '+(stressDepth.removed[side]??'未知')+' '+unit+
-            '，覆盖 '+pct(fill.coverageRatio,2)+'，未覆盖 '+(fill.uncovered??'未知')+' '+unit+
-            '，均价 '+fmt(fill.vwap)+'，剩余档内滑点 '+settlementAmount(fill.slippage)+
-            '，同一标记价下撤档增加的成交成本 '+settlementAmount(stressDepth.extraExitCost?.[side]));
-          detailLine(cell,venue+' 退出侧可见档全部撤去：未覆盖 '+gone.uncovered+' '+unit+'，成交价、滑点和结余未验证');
-        }
-        const cash=stressDepth.settlement;
-        detailLine(cell,cash ? '撤档退出 · PF 触线 '+fmt(cash.pfMark)+' / 平仓 '+fmt(cash.pfPrice)+
-          '，Hype 平仓 '+fmt(cash.hlPrice)+'，个人回收 '+settlementAmount(cash.personal)+'，Hype 剩余 '+settlementAmount(cash.hype)+
-          (stressDepth.reason?' · '+stressDepth.reason:'') : '撤档退出 · '+(stressDepth.reason??'平仓流动性不足，全量退出现金未验证'));
-      }
+      if (stressDepth) liquidityLines(cell,stressDepth,scan);
       if (key === 'pass' && r.successPersonal != null) detailLine(cell,'个人资金（到账前） ' + settlementAmount(r.successPersonal));
       for (const [kind,test] of Object.entries(r.pathAudit?.[key] ?? {})) {
         const label = {base:'基础同步',basisWiden:'基差扩大',basisNarrow:'基差收敛',
-          basisAdverse:'基差对当前 Hype 仓不利',basisFavorable:'基差对当前 Hype 仓有利',
+          adverseJump:'不利跳价',basisAdverse:'基差对当前 Hype 仓不利',basisFavorable:'基差对当前 Hype 仓有利',
           asyncExit:'盘口异步且退出时仍承受不利偏移',dislocation:'途中错位后恢复同步',delayedFill:'延迟成交后',beforeFill:'延迟成交前（原仓）'}[kind];
         const low=test.worst;
         if (low) {
@@ -843,6 +878,7 @@ function draw(snapshot, auditScan) {
   audit = null;
   const scan = frame,
     rep = scan?.representative;
+  pressureMetric(snapshot);
   renderComparison(snapshot);
   renderPlans(snapshot);
   renderAnalysis(scan);
@@ -1083,7 +1119,7 @@ export function renderScan(result, m, r, plan, status, snapshot) {
       .join(' · ')
   );
   if (frameKey !== (id || 'empty')) {
-    const auditScan = displayed?.trace?.id === id ? displayed.ratioScan : null;
+    const auditScan = displayed?.trace?.id === id ? (displayed.baseScan ?? displayed.ratioScan) : null;
     draw(snapshot, auditScan);
     // All panels are patched synchronously from one publication before exposing its version.
     frameKey = id || 'empty';

@@ -21,7 +21,10 @@ function finalizeSnapshot(view) {
   if (targets.length !== planObjectives.length || targets.includes(undefined) ||
       (plans?.eligible > 0 && !plans.pending && !plans.legacy && targets.some(row => !row)))
     throw Error('目标索引与候选快照不一致');
-  for (const row of targets.filter(Boolean)) {
+  const pressure=plans?.pressure;
+  if (pressure?.row && (pressure.key!==pressure.row.key || !pressure.row.configuredPass ||
+      !['feasible','conditional'].includes(pressure.status))) throw Error('流动性压力最大仓位与结算证据不一致');
+  for (const row of [...targets,pressure?.row].filter(Boolean)) {
     if (dec(row.pf).cmp(0) !== row.sign || (dec(row.hl).cmp(0) && dec(row.hl).cmp(0) !== -row.sign))
       throw Error('双边有符号目标与计算方向不一致');
     for (const end of ['fail','pass']) {
@@ -80,7 +83,7 @@ export function publicationState(result,snapshot,market,blocked=false) {
 }
 
 export function createSolutionSnapshot(result) {
-  const scan = result.ratioScan;
+  const scan = result.baseScan ?? result.ratioScan;
   const { inputs, ...trace } = result.trace;
   if (![trace.id,trace.marketId,trace.accountsId,trace.rulesId,trace.model,trace.at].every(Boolean))
     throw Error('计算快照缺少行情、账户或规则版本');
@@ -118,12 +121,12 @@ export function createSolutionSnapshot(result) {
       buckets,
       representative,
       analysis,
-      plans: scan.plans && { focus:scan.plans.focus, targetKeys: scan.plans.targetKeys, rows: scan.plans.rows, comparison:scan.plans.comparison, fixed:scan.plans.fixed, eligible: scan.plans.eligible, pending: scan.plans.pending, pfQuote: scan.plans.pfQuote, hlQuote: scan.plans.hlQuote },
+      plans: scan.plans && { pressure:scan.plans.pressure, focus:scan.plans.focus, targetKeys: scan.plans.targetKeys, rows: scan.plans.rows, comparison:scan.plans.comparison, fixed:scan.plans.fixed, eligible: scan.plans.eligible, pending: scan.plans.pending, pfQuote: scan.plans.pfQuote, hlQuote: scan.plans.hlQuote },
       complete,
       ctx: {
         book: { B: book.B },
         params: {
-          R: params.R,
+          R: params.R, recoveryBuffer: params.recoveryBuffer,
           target: params.target,
           profitBasis: params.profitBasis,
           externalPriced: params.externalPriced
@@ -149,10 +152,10 @@ export function displayHistory(storage) {
       previousKey = scope;
       previous = null;
       try {
-        const saved = JSON.parse(storage.getItem(key(scope)) ?? storage.getItem(key(scope,'AUTO-0.21.4')) ?? storage.getItem(key(scope,'AUTO-0.21.3')) ?? storage.getItem(key(scope,'AUTO-0.21.2')) ?? storage.getItem(key(scope,'AUTO-0.21.1')));
+        const saved = JSON.parse(storage.getItem(key(scope)) ?? storage.getItem(key(scope,'AUTO-0.21.5')) ?? storage.getItem(key(scope,'AUTO-0.21.4')) ?? storage.getItem(key(scope,'AUTO-0.21.3')) ?? storage.getItem(key(scope,'AUTO-0.21.2')) ?? storage.getItem(key(scope,'AUTO-0.21.1')));
         if (
           saved?.scope === scope &&
-          [modelVersion,'AUTO-0.21.4','AUTO-0.21.3','AUTO-0.21.2','AUTO-0.21.1'].includes(saved.view?.trace?.model) &&
+          [modelVersion,'AUTO-0.21.5','AUTO-0.21.4','AUTO-0.21.3','AUTO-0.21.2','AUTO-0.21.1'].includes(saved.view?.trace?.model) &&
           saved.view.ratioScan?.complete &&
           Array.isArray(saved.view.ratioScan.buckets) &&
           saved.view.ratioScan.ctx?.market?.pf &&

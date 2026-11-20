@@ -465,6 +465,13 @@ function auditHypePaths(ctx,c) {
     if (!excursion.isZero())
       paths.dislocation = walk(market,q,['0',out(excursion),out(decimal(end).plus(excursion)),end],
         checks.stress?.fundingDebit ?? '0',c.availableAfter);
+    const jump=decimal(checks.stress?.jumpBps ?? 0);
+    if (side && jump.gt(0)) {
+      const offset=decimal(leg.mark).times(jump).div(10000).times(-side);
+      const shift=out(decimal(end).plus(offset.div(factor)));
+      paths.adverseJump={...walk(market,q,['0',out(offset.div(factor)),shift],'0',c.availableAfter),
+        shift,nativeOffset:out(offset)};
+    }
     if (stress) {
       const shifted = out(decimal(end).plus(decimal(stress.priceShock).div(factor)));
       paths.delayedFill = walk(market,q,['0',shifted],out(decimal(stress.fundingDebit).plus(stress.delayDebit)),c.availableAfter);

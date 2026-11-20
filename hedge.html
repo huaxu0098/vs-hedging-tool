@@ -63,6 +63,7 @@
             <span id="max-risk-values"></span>
             <a id="scale-link" href="#scale-details" hidden>查看同比例扩仓差额</a>
           </div>
+          <small id="liquidity-maximum" hidden></small>
           <div id="plan-comparison" class="table-wrap" hidden>
             <table class="plan-matrix" aria-labelledby="bands-heading">
               <thead id="plan-columns"><tr><th scope="col">比较指标</th></tr></thead>
@@ -78,6 +79,7 @@
         <p class="position-assumptions">基础平仓沿用本快照可见深度。撤档压力按两边平仓侧最优档消失重算，未来流动性和成交价待核实。点差成本相对买卖中价，滑点相对同侧首档。路径进度表示条件价格位置，实际发生时间未知。可用抵押品按新增仓位估算，可提款额另按平台规则核算。</p>
         <p id="positions-empty">等待首份计算快照</p>
         <div class="table-wrap"><table id="position-list" hidden><thead><tr><th>方案</th><th>PF 数量 / 名义额</th><th>Hype 数量 / 名义额</th><th>失败路径 · 个人回收</th><th>成功路径 · Hype 剩余</th></tr></thead><tbody id="position-list-rows"></tbody></table></div>
+        <details id="liquidity-evidence"><summary>最大压力情景仓位的退出证据</summary><div id="liquidity-evidence-body"></div></details>
         <section id="scale-details">
           <h2>同一比例的扩仓对照 <small class="history-label"></small></h2>
           <div class="scale-method"><h3>A · 固定杠杆</h3><p id="fixed-scale-caption"></p>

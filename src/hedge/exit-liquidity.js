@@ -1,12 +1,25 @@
-import { dec, out, fillEvidence } from './math.js';
+import { dec, out, fillEvidence, profitSplit } from './math.js';
 import { settlementBridge, sumPostings } from './settlement-ledger.js';
 import { executionDetail, validateMargin } from './solver.js';
 
 // Re-use only the observed levels. Nothing is extrapolated past their sizes.
 // An empty or partially covered exit cannot produce a terminal cash amount.
-function exitBook(leg, target, withdrawAll) {
+export function exitBook(leg, target, removedLevels) {
   const side = dec(target).gt(0) ? 'bids' : 'asks';
-  return {...leg,[side]:withdrawAll ? [] : leg[side]?.slice(1)};
+  const levels=leg[side];
+  if (!removedLevels || !levels) return leg;
+  const shortfall=removedLevels==='shortfall';
+  const quantity=dec(target).abs();
+  let remaining=shortfall ? dec(sumPostings(levels.map(level=>level[1]))) : null;
+  let i=0, n=0;
+  while (i<levels.length && (shortfall ? remaining.gte(quantity) : n<removedLevels)) {
+    const start=i;
+    const price=dec(levels[i++][0]);
+    while (i<levels.length && price.eq(levels[i][0])) i++;
+    n++;
+    if (shortfall) for (let k=start;k<i;k++) remaining=remaining.minus(levels[k][1]);
+  }
+  return {...leg,[side]:levels.slice(i)};
 }
 
 function reprice(leg, book, entry, shift, extraDebit) {
@@ -16,28 +29,43 @@ function reprice(leg, book, entry, shift, extraDebit) {
     sumPostings([entry.friction,extraDebit]),book);
 }
 
-export function exitLiquidity(ctx,row,end) {
+export function exitLiquidity(ctx,row,end,removedLevels=1) {
   const pair=row.paths?.[end], market=ctx.market;
   if (!pair || !market.pf.bids || !row.lines) return null;
-  const sides=['pf','hl'], books={}, removed={}, fills={}, empty={}, costs={};
+  const sides=['pf','hl'], books={}, removed={}, fills={}, empty={}, costs={}, fees={};
   for (const side of sides) {
     const leg=market[side], order=out(dec(row[side]).neg());
-    books[side]=exitBook(leg,row[side],false);
+    books[side]=exitBook(leg,row[side],removedLevels);
     const original=fillEvidence(order,leg);
-    removed[side]=original.topSize;
+    const levels=leg[original.side==='ask'?'asks':'bids'];
+    removed[side]=levels ? sumPostings(levels.slice(0,levels.length-books[side][original.side==='ask'?'asks':'bids'].length).map(level=>level[1])) : null;
     fills[side]=fillEvidence(order,books[side]);
-    empty[side]=fillEvidence(order,exitBook(leg,row[side],true));
-    costs[side]=null;
+    empty[side]=fillEvidence(order,exitBook(leg,row[side],Infinity));
+    costs[side]=null; fees[side]=null;
   }
-  const report={removed,depth:fills,withdrawn:empty,extraExitCost:costs,status:'unknown',settlement:null};
-  if (Object.values(fills).some(f=>!['covered','noTrade'].includes(f.status))) {
-    report.status=Object.values(fills).some(f=>f.status==='insufficient') ? 'insufficient' : 'unknown';
-    // If the PF trigger cannot be mapped, the top levels still establish
-    // quantity coverage, but the observed book cannot price a future exit.
-    for (const fill of Object.values(fills)) {
-      fill.vwap=null;
-      fill.slippage=null;
+  const report={removed,depth:fills,withdrawn:empty,extraExitCost:costs,exitFees:fees,status:'unknown',pathStatus:'unknown',settlement:null};
+  const complete=fill=>['covered','noTrade'].includes(fill.status);
+  function recordCoverage(side,shift,atEndpoint) {
+    const leg=market[side], order=dec(row[side]).neg();
+    const fill=fillEvidence(out(order),books[side],shift);
+    fills[side]=fill;
+    // A leg that runs out of depth can price its covered part only.
+    if (fill.covered!=null && dec(fill.covered).gt(0)) {
+      const part=complete(fill) ? fill : fillEvidence(out(dec(fill.covered).times(order.cmp(0))),books[side],shift);
+      if (part.status==='covered') {
+        const fee=out(dec(part.vwap).times(fill.covered).times(leg.multiplier).times(leg.fx).times(leg.rate));
+        fill.coveredExecution={atEndpoint,vwap:part.vwap,slippage:part.slippage,fee};
+        if (atEndpoint && complete(fill)) fees[side]=fee;
+      }
     }
+    if (!atEndpoint) { fill.vwap=null; fill.slippage=null; }
+    if (atEndpoint && fill.status==='noTrade') fees[side]='0';
+  }
+  const trigger=end==='fail' ? ctx.checks.failureTrigger : ctx.checks.passTrigger;
+  if (trigger!=='mark_equity' && !complete(fills.pf)) {
+    for(const side of sides) recordCoverage(side,'0',false);
+    report.status=fills.pf.status;
+    report.reason='PF 无法全量退出，净结算触线价及最终资金未知';
     return report;
   }
 
@@ -45,7 +73,6 @@ export function exitLiquidity(ctx,row,end) {
   // must still hit the rule. Moving the closing book changes its required mark.
   const pf=pair.pf, hl=pair.hl;
   let pfShift=dec(row.lines[end]);
-  const trigger=end==='fail' ? ctx.checks.failureTrigger : ctx.checks.passTrigger;
   if (trigger!=='mark_equity') {
     const oldVwap=dec(pf.exitPrice).minus(dec(pf.exitMark).minus(pf.mark));
     pfShift=pfShift.plus(oldVwap.minus(fills.pf.vwap).div(market.pf.factor));
@@ -55,13 +82,13 @@ export function exitLiquidity(ctx,row,end) {
     return report;
   }
   const afterLag=row.pathAudit?.[end]?.asyncExit;
-  const offset=dec(afterLag?.nativeOffset ?? row.stress?.priceShock ?? '0');
+  const offset=removedLevels===0 ? dec('0') : dec(afterLag?.nativeOffset ?? row.stress?.priceShock ?? '0');
   const hlShift=pfShift.plus(offset.div(market.hl.factor));
   const shifts={pf:out(pfShift),hl:out(hlShift)};
   for (const side of sides) {
     const leg=market[side], displacement=out(dec(shifts[side]).times(leg.factor));
-    fills[side]=fillEvidence(out(dec(row[side]).neg()),books[side],displacement);
-    if (!['covered','noTrade'].includes(fills[side].status) || dec(leg.mark).plus(displacement).lte(0)) {
+    recordCoverage(side,displacement,true);
+    if (dec(leg.mark).plus(displacement).lte(0)) {
       report.reason='移动后的退出价格无法核实';
       return report;
     }
@@ -72,26 +99,53 @@ export function exitLiquidity(ctx,row,end) {
         .times(order).times(leg.multiplier).times(leg.fx));
     }
   }
-  const debit=sumPostings([row.stress?.delayDebit ?? '0',row.stress?.fundingDebit ?? '0']);
+  if (!sides.every(side=>complete(fills[side]))) {
+    report.status=sides.some(side=>fills[side].status==='insufficient')?'insufficient':'unknown';
+    report.reason='可见盘口未能覆盖双边退出';
+    return report;
+  }
+  const before=removedLevels!==0 ? row.pathAudit?.[end]?.beforeFill : null;
+  const debit=removedLevels===0 ? '0' : sumPostings([row.stress?.delayDebit ?? '0',row.stress?.fundingDebit ?? '0']);
   const model={...market,hl:{...market.hl,leverage:String(row.lev ?? market.hl.leverage)}};
   const interim=out(offset.div(market.hl.factor));
   const walk=validateMargin(ctx.book,model,'hl',row.hl,['0',interim,shifts.hl],ctx.checks.catalog,debit,{openFree:row.free}).at(-1);
   const pfWalk=validateMargin(ctx.book,model,'pf',row.pf,['0',shifts.pf],ctx.checks.catalog,'0',{}).at(-1);
   report.path=walk;
+  report.pfPath=pfWalk;
   if (row.verification.initial!=='pass' || walk.status!=='pass' || pfWalk.status!=='pass' ||
-      !walk.proof?.continuous || !pfWalk.proof?.continuous || (row.pathAudit?.[end]?.beforeFill && row.pathAudit[end].beforeFill.status!=='pass')) {
-    report.status=[walk.status,pfWalk.status,row.verification.initial,row.pathAudit?.[end]?.beforeFill?.status].includes('fail')?'fail':'unknown';
+      !walk.proof?.continuous || !pfWalk.proof?.continuous || (before && before.status!=='pass')) {
+    report.status=[walk.status,pfWalk.status,row.verification.initial,before?.status].includes('fail')?'fail':'unknown';
+    report.pathStatus=report.status;
     report.reason='退出前的保证金或路径未通过核验';
     return report;
+  }
+  report.pathStatus='pass';
+  const cushion=dec(ctx.checks.minMaintenanceSurplus ?? '0');
+  const reserveMark=dec(ctx.checks.minPriceBuffer ?? '0');
+  if (!dec(row.hl).isZero()) {
+    const marginFloor=dec(walk.worst.surplus).gte(cushion);
+    const guarded=out(dec(shifts.hl).minus(reserveMark.times(dec(row.hl).cmp(0)).div(model.hl.factor)));
+    const guardPrice=dec(model.hl.mark).plus(dec(guarded).times(model.hl.factor));
+    const guard=end!=='pass' || reserveMark.isZero() ||
+      (guardPrice.gt(0) && validateMargin(ctx.book,model,'hl',row.hl,[shifts.hl,guarded],
+        ctx.checks.catalog,debit,{openFree:row.free}).at(-1).status==='pass');
+    if (!marginFloor || !guard) {
+      report.riskIssue=marginFloor?'成功端最低强平距离不足':'路径最低维持余量不足';
+    }
   }
   const pfEnd=reprice(market.pf,books.pf,pf,shifts.pf,'0');
   const hlEnd=reprice(market.hl,books.hl,hl,shifts.hl,debit);
   const personal=sumPostings([hlEnd.settled,ctx.book.external]);
   const covered=end==='pass' ? dec(hlEnd.settled).gte(ctx.params.R) :
     dec(personal).gte(dec(ctx.book.B).plus(ctx.params.recoveryBuffer ?? '0'));
-  report.status=covered ? 'pass' : 'fail';
-  report.reason=covered ? null : '撤档后未达该路径资金门槛';
+  fees.pf=pfEnd.exitFee; fees.hl=hlEnd.exitFee;
+  const b=ctx.book, params=ctx.params;
+  const payoutIfCredited=end==='pass' && b.stage==='funded' ? profitSplit(pfEnd.settled,b.baseline,b.share).user : '0';
+  const roundOK=end!=='pass' || b.stage!=='funded' || b.ref==null ||
+    dec(personal).plus(payoutIfCredited).minus(b.ref).minus(b.roundIn).plus(b.roundOut).gte(params.g ?? '0');
+  report.status=covered && roundOK && !report.riskIssue ? 'pass' : 'fail';
+  report.reason=report.riskIssue ?? (!roundOK?'出金后周期收益不足':covered ? null : '退出后未达该路径资金门槛');
   report.settlement={pfMark:pfEnd.exitMark,pfPrice:pfEnd.exitPrice,pfEquity:pfEnd.settled,
-    hlMark:hlEnd.exitMark,hlPrice:hlEnd.exitPrice,hype:hlEnd.settled,personal};
+    hlMark:hlEnd.exitMark,hlPrice:hlEnd.exitPrice,hype:hlEnd.settled,personal,payoutIfCredited};
   return report;
 }

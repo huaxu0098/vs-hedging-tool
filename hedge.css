@@ -686,3 +686,15 @@ main.live-desk {padding-block:14px}
   #scan-desk .book-table :is(td,th) {line-height:1.2}
   #scan-desk .scan-sets dt {line-height:1.25}
 }
+
+#liquidity-maximum:not([hidden]) {display:block; font-size:12px; line-height:1.25; margin:2px 0 4px}
+#current[data-historical="true"] #liquidity-maximum::before {content:'历史快照 · '}
+@media(min-width:781px) and (max-height:820px) {
+  #scan-results .plan-matrix :is(th,td) {padding-block:0;line-height:1.15}
+  #max-risk {margin:2px 0; padding-block:2px}
+}
+
+@media(max-width:520px) {
+  #scan-results #max-risk {margin:1px 0; padding:2px 6px; gap:0 4px; line-height:1.22}
+  #scan-results #liquidity-maximum {font-size:11px; line-height:1.18; margin-block:2px}
+}

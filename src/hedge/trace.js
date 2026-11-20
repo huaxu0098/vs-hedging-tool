@@ -28,12 +28,12 @@ export function bookIdentity(market) {
   })));
 }
 
-export const modelVersion = 'AUTO-0.21.5';
+export const modelVersion = 'AUTO-0.21.6';
 
 export function calculationTrace(rules, accounts, market, rates, at, settings = {}) {
   const model = modelVersion;
   const options = Object.fromEntries(
-    ['cashSearchBudget', 'priorTarget', 'seedTargets', 'searchBudget', 'scanRatios']
+    ['cashSearchBudget', 'priorTarget', 'seedTargets', 'searchBudget', 'scanRatios', 'baseObjectives']
       .filter((k) => settings[k] != null)
       .map((k) => [k, settings[k]])
   );

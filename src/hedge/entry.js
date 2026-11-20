@@ -493,9 +493,9 @@ function currentFrame(a, m, t) {
       running = null;
       // A superseded delivery cannot publish a snapshot or a failure for a newer book.
       if (wantedKey !== key) { render(); return; }
-      if (!result?.ratioScan) {
+      if (!result?.ratioScan || result.ratioScan.plans?.pressure?.status==='incomplete' && !result.ratioScan.plans.pending) {
         interruptedScope = scope;
-        const message = error ?? result?.issues?.join(' · ') ?? '本帧缺少完整计算结果';
+        const message = error || result?.ratioScan?.plans?.pressure?.reason || result?.issues?.join(' · ') || '本帧缺少完整计算结果';
         failure = { context, message, retryAt:performance.now()+2000 };
         wakeTimer = setTimeout(render, 2010);
       } else {

@@ -17,6 +17,7 @@ self.onmessage = ({ data }) => {
     const result = calculateCurrent(r, a, m, rates, t, {
       priorTarget: data.priorTarget,
       scanRatios: true,
+      baseObjectives: true,
       marketCache: cache,
       seedTargets: previousTargets
     });

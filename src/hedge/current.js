@@ -12,7 +12,8 @@ import {
 } from './math.js';
 import { remainingOrder } from './order-adjustment.js';
 export { remainingOrder } from './order-adjustment.js';
-import { buildPlanReport } from './position-plans.js';
+import { searchLiquidityMaximum } from './liquidity-search.js';
+import { buildPlanReport, planRecord, pointKey, recordFromInspection } from './position-plans.js';
 import { analyzeRatios } from './ratio-analysis.js';
 import { validLeverageCap } from './leverage.js';
 import { auditCross } from './cross-check.js';
@@ -375,6 +376,9 @@ export function splitReserves(saved = {}) {
   const { R, scanEndpoint: obsoletePath, fx: obsoleteRatio, fxAt: obsoleteRatioTime, ...rest } = saved;
   return { ...rest, R_success: rest.R_success ?? R ?? rules.R_success, R_free: rest.R_free ?? rules.R_free };
 }
+function baseContext(ctx) {
+  return {...ctx,checks:{...ctx.checks,stress:undefined,adverseBps:'0',basisBps:null,basisRate:null,fullStress:false}};
+}
 export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(), options = {}) {
   r = splitReserves(r);
   const result = computeCurrent(r, a, data, fxData, now, options);
@@ -386,11 +390,51 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
     }
   }
   if (result.ratioScan) {
-    attachRepresentative(result, r);
-    result.ratioScan.analysis = analyzeRatios(result, r);
-    result.ratioScan.plans = { ...buildPlanReport(result.ratioScan, result.autoStatus === 'AUTO_PAYOUT_PENDING'), pfQuote: result.currencies.pf.quoteAsset, hlQuote: result.currencies.hl.quoteAsset };
+    const scan=result.ratioScan, pending=result.autoStatus==='AUTO_PAYOUT_PENDING';
+    const makeReport=grid=>{
+      const view={...result,ratioScan:grid};
+      attachRepresentative(view,r);
+      grid.analysis=analyzeRatios(view,r);
+      grid.plans={...buildPlanReport(grid,pending),pfQuote:result.currencies.pf.quoteAsset,
+        hlQuote:result.currencies.hl.quoteAsset};
+    };
+    makeReport(scan);
+    const riskContext=result.pressureContext ?? scan.ctx;
+    const configuredRows=riskContext===scan.ctx ? new Map(scan.plans.rows.map(row=>[row.key,row])) : new Map();
+    // Every pressure candidate must also pass A. Its grid is a sufficient
+    // search domain even when the report publishes the three base objectives.
+    const pressure=searchLiquidityMaximum(scan,point=>configuredRows.get(pointKey(point)) ??
+      planRecord({ctx:riskContext},point),pending,riskContext);
+    scan.plans.pressure=pressure;
+    let ordinary=scan;
+    if (scan.ctx.checks.stress) {
+      const cache=options.marketCache;
+      ordinary=buildRatioScan(baseContext(scan.ctx),{cache:cache && {
+        reuse:(slot,key,fn)=>cache.reuse('base-'+slot,key,fn)
+      }});
+      makeReport(ordinary);
+      ordinary.plans.pressure=pressure;
+      result.baseScan=ordinary;
+    }
+    if (riskContext.checks.stress) {
+      for (const target of ordinary.plans.rows) {
+        const previous=configuredRows.get(target.key);
+        const audit=previous && previous.leverage===target.leverage ? previous :
+          recordFromInspection(riskContext,inspectRatio(riskContext,target,{
+            fixedLeverage:target.leverage==null?null:Number(target.leverage),includePathAudit:true}));
+        target.configuredPass=audit.configuredPass;
+        target.depthStatus=audit.depthStatus;
+        target.liquidity=audit.liquidity;
+        target.pathAudit=audit.pathAudit;
+        target.coverage=audit.coverage;
+        target.verification={...target.verification,stress:audit.verification.stress,
+          path:audit.verification.path,liquidation:audit.verification.liquidation};
+      }
+    }
+    delete result.pressureContext;
     if (result.autoStatus==='AUTO_FEASIBLE' &&
-        result.ratioScan.plans.rows.some(row=>result.ratioScan.plans.targetKeys.includes(row.key) && row.coverage!=='verified')) {
+        (pressure.status!=='feasible' || pressure.row?.coverage!=='verified' ||
+        ordinary.plans.rows.some(row=>ordinary.plans.targetKeys.includes(row.key) && row.coverage!=='verified'))) {
       result.autoStatus='AUTO_PARTIAL';
       result.unverified=[...(result.unverified??[]),'部分目标的退出深度、路径资金或全仓数据未通过完整核验'];
     }
@@ -1037,7 +1081,9 @@ function computeCurrent(r, a, data, fxData, now, options) {
     market.pf.tiers?.length
   ) {
     const ctx = scanContext(book, market, { ...params, recoveryBuffer: out(nonnegative(r.recoveryBuffer || '0')) }, checks);
-    const scan = (result.ratioScan = buildRatioScan(ctx, { cache: options.marketCache }));
+    const separateStress=options.baseObjectives && checks.stress;
+    if (separateStress) result.pressureContext=ctx;
+    const scan = (result.ratioScan = buildRatioScan(separateStress ? baseContext(ctx) : ctx, { cache: options.marketCache }));
     const feasible = scan.sets.both;
     checks.seeds = [feasible.largest, feasible.min, feasible.max].filter(Boolean).map((point) => ({
       vsTargetQuantity: out(dec(market.pf.step).times(point.i).times(point.sign)),

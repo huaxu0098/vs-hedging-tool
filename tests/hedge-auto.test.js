@@ -1,3 +1,4 @@
+import { searchLiquidityMaximum } from '../src/hedge/liquidity-search.js';
 import { unitContract, usdQuote } from '../fixtures/hedge-currency-contracts.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -743,7 +744,7 @@ test('OPT02 搜索范围记录双边方向、步长和数量上限，预算中�
   const partial = calculateCurrent(inputs, f.a, f.m, {}, t, { searchBudget: 1 });
   assert.equal(partial.search.complete, false);
   assert.ok(!partial.maximum?.complete);
-  assert.equal(full.trace.model, 'AUTO-0.21.5');
+  assert.equal(full.trace.model, 'AUTO-0.21.6');
 });
 test('OPT03 PF 虚拟保证金、目标 Hype 初始、其他占用及调仓后真实可用分别核验', () => {
   const f = fixture();
@@ -2526,6 +2527,8 @@ test('撤去退出最优档后可见数量不足，按实际覆盖量报告，�
     assert.equal(test.status,'insufficient'); assert.equal(test.settlement,null);
     assert.equal(leg.covered,'1'); assert.equal(leg.coverageRatio,'0.5'); assert.equal(leg.uncovered,'1');
     assert.equal(leg.vwap,null); assert.equal(leg.slippage,null);
+    assert.ok(leg.coveredExecution.vwap);
+    assert.ok(dec(leg.coveredExecution.fee).gte(0));
     assert.equal(test.withdrawn.hl.slippage,null); assert.equal(test.extraExitCost.hl,null);
   }
   assert.equal(plan.coverage,'conditional');
@@ -2545,4 +2548,145 @@ test('发布帧：仅同一盘口深度、账户、规则、版本和完成时�
   assert.equal(state(result,f.m,true),'paused');
   assert.equal(state({...result,frameState:'recovering'}),'recovering');
   assert.equal(state(),'ready');
+});
+
+
+function pressureFixture() {
+  const f=fixture();
+  f.m.pf.levels=[[['100','20'],['99.9','4'],['99.8','5'],['99.5','2']],
+    [['100','20'],['100.1','4'],['100.3','4'],['100.6','3']]];
+  f.m.hl.levels=[[['100','10'],['99.9','3'],['99.8','5'],['99.4','2']],
+    [['100','10'],['100.1','3'],['100.25','4'],['100.55','4']]];
+  return f;
+}
+
+test('LIQSEL01 前两档退出成为数量和现金硬约束，压力最大值与逐点独立穷举一致',()=>{
+  const initial={B:'157',R_success:'72',R_free:'0',pfFee:'0.0001',hlFee:'0.0005'};
+  for (const patch of [{},{adverseBps:'4',jumpBps:'8',delayBps:'2',fundingDebit:'0.1'},
+      {R_success:'71',recoveryBuffer:'2',minMaintenanceSurplus:'8'}]) {
+    const result=scanFixture({...initial,...patch},pressureFixture());
+    const scan=result.ratioScan,pressure=scan.plans.pressure;
+    const desktop=result.baseScan ?? scan;
+    assert.equal(desktop.plans.pressure,pressure);
+    assert.equal(desktop.plans.rows.find(p=>p.key===desktop.plans.targetKeys[0]).i,10);
+    const winners=[];
+    for (const sign of [1,-1]) for(let i=1;i<=10;i++) for(let j=0;j<=6;j++) {
+      if (!ratioSlice(scan,sign,i,'eligible').some(([a,b])=>a<=j && j<=b)) continue;
+      const row=planRecord(scan,{sign,i,j});
+      if (row.configuredPass) winners.push(row);
+    }
+    assert.ok(winners.length);
+    assert.equal(pressure.row.i,Math.max(...winners.map(row=>row.i)));
+    assert.ok(pressure.row.i<=7);
+    assert.ok(winners.some(row=>row.key===pressure.key));
+    const f=pressureFixture();
+    const desk=calculateCurrent({...inputs,...initial,...patch},f.a,f.m,f.rates??{},t,{scanRatios:true,baseObjectives:true}).ratioScan;
+    assert.equal(desk.plans.pressure.row.i,pressure.row.i);
+    assert.deepEqual(desk.plans.targetKeys,desktop.plans.targetKeys);
+    assert.equal(pressure.status,patch.jumpBps?'feasible':'conditional');
+    const row=pressure.row;
+    for(const end of ['fail','pass']) for(const scenario of [row.liquidity[end].full,row.liquidity[end],row.liquidity[end].two]){
+      assert.equal(scenario.status,'pass'); assert.equal(scenario.path.firstBreach,null);
+      assert.ok(scenario.path.worst && dec(scenario.path.worst.surplus).gt(0));
+      assert.ok(dec(scenario.settlement[end==='fail'?'personal':'hype']).gte(end==='fail'?dec(initial.B).plus(patch.recoveryBuffer??'0'):patch.R_success??initial.R_success));
+      for(const side of ['hl','pf']){
+        const leg=scan.ctx.market[side],fill=scenario.depth[side];
+        const fee=dec(fill.vwap).times(dec(row[side]).abs()).times(leg.multiplier).times(leg.fx).times(leg.rate);
+        assert.ok(fee.minus(scenario.exitFees[side]).abs().lt('1e-38'));
+        assert.ok(dec(fill.covered).eq(fill.target)); assert.equal(fill.uncovered,'0');
+      }
+    }
+    if(patch.jumpBps) assert.ok(row.pathAudit.pass.adverseJump.proof.continuous);
+  }
+});
+
+test('LIQSEL02 数量尚可开仓但不能全量退出时无压力候选，两账户及资金仍独立',()=>{
+  const f=pressureFixture();
+  f.m.hl.levels=f.m.hl.levels.map(s=>s.slice(0,2));
+  const x=scanFixture({B:'157',R_success:'72',R_free:'0'},f).ratioScan;
+  const p=x.plans.rows.find(row=>row.key===x.plans.targetKeys[0]);
+  assert.ok(p.both);
+  assert.equal(x.plans.pressure.status,'none'); assert.equal(x.plans.pressure.row,undefined);
+  const c=p.liquidity.fail.two;
+  assert.equal(c.status,'insufficient'); assert.equal(c.depth.hl.uncovered,c.depth.hl.target);
+  assert.equal(c.depth.hl.vwap,null); assert.equal(c.exitFees.hl,null); assert.equal(c.settlement,null);
+  assert.equal(p.configuredPass,false); assert.equal(p.coverage,'conditional');
+});
+
+test('LIQSEL03 0.1161 对 0.01785 BTC：基础 500.0027，撤一档 499.9634 时淘汰',()=>{
+  const {ctx}=scanFixture().ratioScan;
+  Object.assign(ctx.book,{pf:'10000',hl:'409',B:'500',challengeFloor:'9400',challengeTarget:'12000'});
+  Object.assign(ctx.params,{R:'100',target:'12000',recoveryBuffer:'0'});
+  for(const [side,rate] of [['pf','0.0001'],['hl','0.0005']]){
+    Object.assign(ctx.market[side],{mark:'60000',rate,step:'0.00001',minQty:'0.00001',minNotional:'0',free:ctx.book[side],
+      bids:[['59999.5','1'],['59998.5','1'],['59997','1']],asks:[['60000.5','1'],['60001.7','1'],['60002.5','1']]});
+  }
+  const point={sign:1,i:11610,j:1785},run=()=>planRecord({ctx},point);
+  // The reported historical book is unavailable. Anchor this regression's
+  // starting cash so its full-book ledger matches the supplied failure balance.
+  ctx.book.hl=out(dec(ctx.book.hl).plus('500.0027').minus(run().liquidity.fail.full.settlement.personal));
+  const row=run(), first=row.liquidity.fail;
+  assert.equal(dec(first.full.settlement.personal).toFixed(4),'500.0027');
+  assert.equal(dec(first.settlement.personal).toFixed(4),'499.9634');
+  assert.equal(first.pathStatus,'pass'); assert.equal(first.status,'fail');
+  assert.equal(row.configuredPass,false);
+  assert.ok(dec(first.two.settlement.personal).lt(first.settlement.personal));
+});
+
+test('LIQSEL04 基础最大仓位独立于压力设置，同一发布快照包含重新搜索后的压力结果',()=>{
+  const f=pressureFixture(), rule={B:'157',R_free:'0',R_success:'72'};
+  const plain=scanFixture(rule,f), stress=scanFixture({...rule,adverseBps:'500',jumpBps:'500',delayBps:'100',fundingDebit:'4'},f);
+  assert.equal(stress.ratioScan.plans.pressure.status,'none');
+  assert.deepEqual(stress.baseScan.plans.targetKeys,plain.ratioScan.plans.targetKeys);
+  for(const r of [plain,stress]){
+    r.calculationMarket=f.m;
+    const snap=createSolutionSnapshot(r),pressure=snap.ratioScan.plans.pressure;
+    assert.equal(snap.snapshotId,r.trace.id);
+    assert.equal(pressure.status,r.ratioScan.plans.pressure.status);
+    assert.equal(snap.targets[0].i,10);
+  }
+});
+
+
+test('LIQSEL05 D 保留真实尾档可成交的部分，余量的均价、总手续费与最终现金未知',()=>{
+  const f=pressureFixture();
+  const scan=scanFixture({B:'157',R_success:'72',R_free:'0'},f).ratioScan;
+  const row=planRecord(scan,{sign:1,i:10,j:5});
+  for(const end of ['fail','pass']){
+    const test=row.liquidity[end].shortfall;
+    assert.equal(test.status,'insufficient');assert.equal(test.settlement,null);
+    for(const side of ['pf','hl']){
+      const d=test.depth[side];
+      assert.ok(dec(d.uncovered).isPositive());assert.ok(dec(d.covered).isPositive());
+      assert.ok(dec(d.covered).plus(d.uncovered).eq(d.target));
+      assert.equal(d.vwap,null);assert.equal(test.exitFees[side],null);
+      assert.ok(d.coveredExecution && !d.coveredExecution.atEndpoint);
+      assert.ok(dec(d.coveredExecution.vwap).gt(0));
+    }
+  }
+});
+
+test('LIQSEL06 已配置基差压力缺少参考汇率时暂停发布，不把未完成的压力检验当作无解',()=>{
+  const scan=scanFixture({},pressureFixture()).ratioScan;
+  const ctx={...scan.ctx,checks:{...scan.ctx.checks,basisBps:'10',basisRate:null}};
+  const result=searchLiquidityMaximum(scan,()=>assert.fail('缺少参照时不得核准仓位'),false,ctx);
+  assert.equal(result.status,'incomplete');assert.match(result.reason,/参照汇率/);assert.equal(result.key,null);
+});
+
+test('LIQSEL07 现仓差额、手续费与延迟扣款进入撤档求解，最大手数与逐点验算一致',()=>{
+  const f=pressureFixture();
+  Object.assign(f.a.pf,{qty:'2',free:'980'});
+  Object.assign(f.a.hl,{qty:'-1',free:'100'});
+  const r={...inputs,B:'157',R_success:'71',R_free:'0',pfFee:'0.0003',hlFee:'0.0009',
+    adverseBps:'2',jumpBps:'3',delayBps:'4',fundingDebit:'0.08'};
+  const solve=baseObjectives=>calculateCurrent(r,f.a,f.m,f.rates??{},t,{scanRatios:true,baseObjectives}).ratioScan;
+  const configured=solve(false),worker=solve(true);
+  const sizes=[];
+  for(const sign of [1,-1]) for(let i=1;i<=10;i++) for(let j=0;j<=6;j++){
+    if (!ratioSlice(configured,sign,i,'eligible').some(([lo,hi])=>lo<=j && j<=hi)) continue;
+    if (planRecord(configured,{sign,i,j}).configuredPass) sizes.push(i);
+  }
+  assert.ok(sizes.length);
+  assert.equal(worker.plans.pressure.row.i,Math.max(...sizes));
+  assert.equal(configured.plans.pressure.row.i,Math.max(...sizes));
 });

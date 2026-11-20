@@ -191,15 +191,26 @@ export function recordFromInspection(ctx, row, pairs = {fail:reachableLedgers(ct
   const pathAudit={fail:pathEvidence(ctx,row,'fail'),pass:pathEvidence(ctx,row,'pass')};
   const profile = ctx.book.positions ? profileInputs(ctx.book,ctx.params,ctx.market) : null;
   const paths = {fail:endpoint(ctx,row,'fail',pairs.fail,profile),pass:endpoint(ctx,row,'pass',pairs.pass,profile)};
-  const liquidity={fail:exitLiquidity(ctx,row,'fail'),pass:exitLiquidity(ctx,row,'pass')};
-  const liquid=Object.values(liquidity).every(test=>test?.status==='pass');
+  const liquidity={};
+  for (const end of ['fail','pass']) {
+    const first=exitLiquidity(ctx,row,end,1);
+    liquidity[end]=first && {...first,full:exitLiquidity(ctx,row,end,0),two:exitLiquidity(ctx,row,end,2),
+      shortfall:exitLiquidity(ctx,row,end,'shortfall')};
+  }
+  const exits=Object.values(liquidity).flatMap(first=>[first?.full,first,first?.two]);
+  const liquid=exits.every(test=>test?.status==='pass');
+  const depthStatus=exits.some(test=>test?.status==='fail') ? 'fail' :
+    exits.some(test=>test?.status==='insufficient') ? 'insufficient' : liquid ? 'pass' : 'unknown';
   const settlementOK=Object.entries(pathAudit).every(([end,group])=>group &&
     Object.values(group).every(test=>test.shift==null || (test.settlement && (end==='fail'
       ? dec(test.settlement.personal).gte(dec(ctx.book.B).plus(ctx.params.recoveryBuffer??'0'))
       : dec(test.settlement.hype).gte(ctx.params.R)))));
-  const stress=row.verification?.stress;
-  const verification=row.verification && {...row.verification,stress:stress==='pass' && (!liquid || !settlementOK)
-    ? Object.values(liquidity).some(test=>test?.status==='unknown' || !test) ? 'unknown' : 'fail' : stress};
+  const verification=row.verification && {...row.verification};
+  if (verification?.stress==='pass') {
+    if (verification.path!=='pass') verification.stress=verification.path;
+    else if (!liquid || !settlementOK)
+      verification.stress=exits.some(test=>test?.status==='unknown' || !test) ? 'unknown' : 'fail';
+  }
   return {
     sign, i, j, key: pointKey(row), h: row.h,
     fraction: ctx.market.pf.factor ? exactRatio(ctx.market, row.pf, row.hl) : null,
@@ -214,7 +225,9 @@ export function recordFromInspection(ctx, row, pairs = {fail:reachableLedgers(ct
     successPersonal: row.passStop ? null : row.successPersonal,
     successDelta: row.passStop ? null : out(dec(row.successPersonal).minus(ctx.book.B)),
     failStop: row.failStop, passStop: row.passStop,
-    pathAudit, verification, liquidity,
+    pathAudit, verification, liquidity, depthStatus,
+    configuredPass:!!(row.both && liquid && settlementOK && row.verification?.initial==='pass' && row.verification?.path==='pass' &&
+      (!ctx.checks.fullStress || verification?.stress==='pass')),
     depth:{fail:orderEvidence(ctx,row,'fail'),pass:orderEvidence(ctx,row,'pass')},
     coverage: verification?.stress==='pass' && ctx.checks?.fullStress && row.crossChecked &&
       Object.values(pathAudit).every(group=>group?.basisWiden && group?.basisNarrow &&
@@ -286,9 +299,7 @@ export function buildPlanReport(scan, pending = false) {
     if (!points.has(key)) points.set(key, {sign:point.sign, i:point.i, j:point.j, labels:[]});
     points.get(key).labels.push(label);
   }
-  const chosen = scan.representative;
-  const primary = chosen && chosen.objective !== 'diagnostic' && chosen.row.i === eligible.largest?.i
-    ? chosen.row : eligible.largest;
+  const primary = eligible.largest;
   const targets = pending ? [null, null, null] : [
     primary, eligible.range?.witnesses.failure[1], eligible.range?.witnesses.successHype[1]
   ];
