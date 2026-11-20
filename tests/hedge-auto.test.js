@@ -8,7 +8,7 @@ import {
   ratioSlice,
   adjacentScale
 } from '../src/hedge/ratio-scan.js';
-import { displayHistory } from '../src/hedge/display-history.js';
+import { createSolutionSnapshot, displayHistory } from '../src/hedge/display-history.js';
 import { pagePoints, planRecord, pointKey, scaleComparison, segmentPage } from '../src/hedge/position-plans.js';
 import { ratioChanges } from '../src/hedge/ratio-analysis.js';
 import { exactRatio, ratioBin } from '../src/hedge/ratio-scan.js';
@@ -1879,18 +1879,59 @@ test('断线重载保留三目标与同规模对照的原始记录，资金来�
     getItem: k => data.get(k) ?? null,
     setItem: (k,v) => data.set(k,v)
   };
-  displayHistory(storage).record('plan:BTC',result);
+  displayHistory(storage).record('plan:BTC',createSolutionSnapshot(result));
   const retained = displayHistory(storage).read('plan:BTC').ratioScan;
   assert.deepEqual(retained.plans.rows,result.ratioScan.plans.rows);
   assert.equal(retained.plans.index,undefined);
   assert.equal(displayHistory(storage).read('account:BTC'),null);
   const [[key,raw]]=data.entries(), old=JSON.parse(raw);
+  const restored=displayHistory(storage).read('plan:BTC');
+  assert.deepEqual(restored.targets.map(row=>row.key),result.ratioScan.plans.targetKeys);
+  for (const row of restored.targets) assert.equal(row,restored.ratioScan.plans.rows.find(p=>p.key===row.key));
+  assert.equal(restored.quoteSnapshotId,result.trace.marketId);
+  delete old.view.ratioScan.plans.targetKeys;
+  delete old.view.trace.accountsId;
+  storage.setItem(key,JSON.stringify(old));
+  const migrated=displayHistory(storage).read('plan:BTC');
+  assert.deepEqual(migrated.targets.map(row=>row.key),result.ratioScan.plans.targetKeys);
+  assert.equal(migrated.accountSnapshotId,null);
   delete old.view.ratioScan.plans;
   storage.setItem(key,JSON.stringify(old));
   const legacy=displayHistory(storage).read('plan:BTC').ratioScan;
   assert.equal(legacy.plans.rows[0].fail, legacy.representative.row.fail);
   assert.equal(legacy.plans.rows[0].success, legacy.representative.row.success);
   assert.equal(legacy.plans.legacy,true);
+});
+
+test('发布快照引用同一批目标并冻结，修改资金规则后各版本可核对', () => {
+  const f = fixture();
+  function publish(patch) {
+    const result = scanFixture(patch,f);
+    result.calculationMarket = f.m;
+    result.finishedAt = new Date(t + 100).toISOString();
+    const snapshot=createSolutionSnapshot(result);
+    assert.deepEqual([snapshot.snapshotId, snapshot.quoteSnapshotId, snapshot.accountSnapshotId,
+      snapshot.rulesVersion, snapshot.solverVersion, snapshot.calculatedAt], [result.trace.id,
+      result.trace.marketId, result.trace.accountsId, result.trace.rulesId, result.trace.model, result.finishedAt]);
+    return snapshot;
+  }
+  const first=publish({}), next=publish({R_success:'21'});
+  assert.notEqual(first.snapshotId,next.snapshotId);
+  assert.notEqual(first.rulesVersion,next.rulesVersion);
+  assert.equal(first.quoteSnapshotId,next.quoteSnapshotId);
+  assert.equal(first.accountSnapshotId,next.accountSnapshotId);
+  const plans=first.ratioScan.plans;
+  assert.equal(first.targets.length,3);
+  for (const [i,row] of first.targets.entries()) {
+    assert.equal(row,plans.rows.find(r=>r.key===plans.targetKeys[i]));
+    assert.throws(()=>{row.fail='0'},TypeError);
+  }
+  for (const row of first.scale.automatic.rows)
+    assert.equal(row,plans.rows.find(r=>r.key===row.key));
+  const none=publish({recoveryBuffer:'1000'});
+  assert.deepEqual(none.targets,[null,null,null]);
+  assert.equal(none.ratioScan.plans.eligible,0);
+  assert.ok(Object.isFrozen(first) && Object.isFrozen(first.targets) && Object.isFrozen(first.scale.fixed.rows));
 });
 
 test('比例分段的分页、全量交集及三种优先目标与逐仓复算一致', () => {
@@ -2039,6 +2080,15 @@ test('固定杠杆与自动杠杆对照使用同一对大小仓，并独立核�
     if (account==='flat') assert.ok(fixed.rows);
     const auto=[comparison.small,comparison.large].map(key=>rows.find(r=>r.key===key));
     const grids=auto.map(row=>inspectRatio(scan.ctx,row,{includeLeverageGrid:true}).leverageGrid);
+    for (const [i,row] of auto.entries()) {
+      const passing=grids[i].filter(level=>level.status==='pass');
+      if (!passing.length) { assert.equal(row.physical,false); continue; }
+      assert.equal(Number(row.leverage),Math.min(...passing.map(level=>level.leverage)));
+      const level=passing.find(level=>String(level.leverage)===row.leverage);
+      assert.equal(row.initial,level.initial);
+      assert.equal(row.maintenance,level.maintenance);
+      assert.equal(row.free,level.freeAfter);
+    }
     const common=grids[0].filter(l=>l.status==='pass' && l.leverage &&
       grids[1].some(other=>other.status==='pass' && other.leverage===l.leverage));
     if (!common.length) {
@@ -2053,6 +2103,13 @@ test('固定杠杆与自动杠杆对照使用同一对大小仓，并独立核�
       assert.equal(row.key,auto[index].key);
       assert.equal(row.initial,level.initial);
       assert.equal(row.free,level.freeAfter);
+      const direct=inspectRatio(scan.ctx,{sign:row.sign,i:row.i,j:row.j},{fixedLeverage:Number(fixed.leverage),includeLeverageGrid:true});
+      assert.deepEqual(direct.leverageGrid.map(l=>l.leverage),[Number(fixed.leverage)]);
+      assert.equal(row.maintenance,direct.maintenance);
+      assert.equal(row.liquidation,direct.liquidation);
+      assert.equal(row.distance,direct.buffer);
+      assert.equal(row.fail,direct.fail);
+      assert.equal(row.success,direct.success);
       assert.ok(dec(row.marginRate).eq(dec(row.initial).div(equity)));
       for(const key of ['h','pf','hl','fail','success','liquidation','distance']) assert.equal(row[key],auto[index][key]);
       assert.equal(row.leverage,fixed.leverage);

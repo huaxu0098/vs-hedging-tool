@@ -11,7 +11,7 @@ import {
 } from './current.js';
 import { scanKeys, refreshDelay } from './scan-refresh.js';
 import { ratioChanges } from './ratio-analysis.js';
-import { displayHistory } from './display-history.js';
+import { createSolutionSnapshot, displayHistory } from './display-history.js';
 import { applyVestConfirmation, confirmVestSpec, riskFields } from './vest-confirmation.js';
 import { renderScan, setupScan } from './ratio-ui.js';
 import { ledgerLabels, presentLedger } from './settlement-ledger.js';
@@ -501,8 +501,8 @@ function currentFrame(a, m, t) {
         failure = { context, message, retryAt:performance.now()+2000 };
         wakeTimer = setTimeout(render, 2010);
       } else {
-        completed = { context, key, scope, result: {
-          ...result, stateVersion:revision, calculatedAt:new Date(t).toISOString(), calculationMarket:m,
+        const publication = { context, key, scope, result: {
+          ...result, stateVersion:revision, calculatedAt:result.finishedAt, calculationMarket:m,
           calculationRates:frameRates, trigger, frameState:'ready'
         } };
         // Recheck the original clocks, account and eligibility before publication.
@@ -513,10 +513,18 @@ function currentFrame(a, m, t) {
         const latest = calculateCurrent(r, {pf:account('pf'), hl:account('hl')}, live, rates, now, {deferAuto:true});
         if (scope === scanScope() && fresh.needsSearch && latest.needsSearch &&
             !(latest.timing.quoteSkew > latest.timing.quoteLimit)) {
-          interruptedScope = null;
-          completed.result.ratioScan.analysis.change = ratioChanges(lastGood?.result, completed.result);
-          lastGood = completed;
-          history.record(scope, completed.result);
+          try {
+            publication.result.ratioScan.analysis.change = ratioChanges(lastGood?.result, publication.result);
+            publication.result.solutionSnapshot = createSolutionSnapshot(publication.result);
+            completed = lastGood = publication;
+            interruptedScope = null;
+            history.record(scope, publication.result.solutionSnapshot);
+          } catch (e) {
+            completed = null;
+            interruptedScope = scope;
+            failure = {context, message:e.message, retryAt:performance.now()+2000};
+            wakeTimer = setTimeout(render, 2010);
+          }
         }
         else { completed = null; interruptedScope = scope; }
       }
@@ -910,6 +918,58 @@ function renderConditions(result, a, m, plan) {
   }
   updateDeadline();
 }
+let traceViewId;
+function renderTrace(snapshot, result) {
+  const trace = snapshot?.trace ?? result.trace;
+  const raw = [result, result.retained].find(frame => frame?.trace?.id === trace?.id && frame?.trace?.inputs);
+  const viewId = [trace?.id,raw?.trace?.id].join('/');
+  if (viewId === traceViewId) return;
+  traceViewId = viewId;
+  const source = raw && JSON.parse(raw.trace.inputs);
+  put('trace-id', trace ? trace.model + ' / ' + trace.id : '等待计算');
+  put(
+    'trace-sources',
+    trace
+      ? [
+          '计算于 ' + trace.at,
+          '规则 ' + (trace.rulesId ?? '旧快照未记录'),
+          '账户 ' + (trace.accountsId ?? '旧快照未记录'),
+          '行情 ' + (trace.marketId ?? '旧快照未记录'),
+          snapshot && '计算完成于 ' + snapshot.calculatedAt,
+          snapshot?.prices && 'VS 盘口 ' + snapshot.prices.pf.bookAt + ' / Hype 盘口 ' + snapshot.prices.hl.bookAt,
+          ...['pf','hl'].map(side => {
+            const account = source?.accounts?.[side];
+            const at = account && fieldTime(account,'equity');
+            return account && (side === 'pf' ? 'VS' : 'Hype') + ' 资金 ' + (account.source ?? '未确认') + (at ? ' ' + at : '');
+          })
+        ].filter(Boolean).join(' · ')
+      : ''
+  );
+  $('trace-download').disabled = !raw;
+  $('trace-download').onclick = () => {
+    if (!raw) return;
+    const { inputs, ...identity } = raw.trace;
+    const { trace: _, solutionSnapshot, calculationRates, calculationMarket, retained, observed, ...outputs } = raw;
+    const payload = JSON.stringify(
+      { ...identity, ...(snapshot && {snapshotId:snapshot.snapshotId, quoteSnapshotId:snapshot.quoteSnapshotId,
+        accountSnapshotId:snapshot.accountSnapshotId, rulesVersion:snapshot.rulesVersion,
+        solverVersion:snapshot.solverVersion, calculatedAt:snapshot.calculatedAt}), inputs: JSON.parse(inputs), outputs },
+      (_, v) => (typeof v === 'bigint' ? String(v) : v),
+      2
+    );
+    const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'hedge-' + trace.id + '.json';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  const detail = $('trace-inputs').parentElement;
+  const showInputs = () =>
+    put('trace-inputs', source && detail.open ? JSON.stringify(source, null, 2) : '');
+  detail.ontoggle = showInputs;
+  showInputs();
+}
 let lastAdvancedFrame;
 function render() {
   const live = market();
@@ -947,10 +1007,10 @@ function render() {
           : '已验算所设保证金条件')
       : result.issues[0] || result.notices.at(-1) || '等待当前快照';
   const plan = planning();
-  const retained = result.retained ?? (!result.ratioScan && history.read(scanScope()));
-  renderScan(retained ? {...result, retained} : result, live, r, plan, status);
+  const solutionSnapshot = result.solutionSnapshot ?? result.retained?.solutionSnapshot ?? history.read(scanScope());
+  renderScan(result, live, r, plan, status, solutionSnapshot);
   if ($('vest-spec-details').open) showVestSpec(live);
-  if (result.refreshPending && !result.ratioScan) $('trace-download').disabled = true;
+  renderTrace(solutionSnapshot, result);
   if (!$('desk-details').open) return;
   if (result.retained && result.frameState === 'updating' &&
       (!result.ratioScan || lastAdvancedFrame === result.trace?.id)) return;
@@ -1363,49 +1423,6 @@ function render() {
             : '')
       ])
     );
-  const trace = result.trace;
-  put('trace-id', trace ? trace.model + ' / ' + trace.id : '等待计算');
-  put(
-    'trace-sources',
-    trace
-      ? [
-          '计算于 ' + trace.at,
-          '规则 ' + trace.rulesId,
-          '账户 ' + trace.accountsId,
-          (m.source ?? '行情') + ' ' + trace.marketId,
-          'VS ' + (m.pf?.asOf ?? '无时间'),
-          'Hype ' + (m.hl?.asOf ?? '无时间'),
-          'VS 资金 ' +
-            (a.pf.source ?? '未确认') +
-            (fieldTime(a.pf, 'equity') ? ' ' + fieldTime(a.pf, 'equity') : ''),
-          'Hype 资金 ' +
-            (a.hl.source ?? '未确认') +
-            (fieldTime(a.hl, 'equity') ? ' ' + fieldTime(a.hl, 'equity') : '')
-        ].join(' · ')
-      : ''
-  );
-  $('trace-download').disabled = !trace;
-  $('trace-download').onclick = () => {
-    if (!trace) return;
-    const { inputs, ...identity } = trace;
-    const { trace: _, calculationRates, calculationMarket, retained, observed, ...outputs } = result;
-    const payload = JSON.stringify(
-      { ...identity, inputs: JSON.parse(inputs), outputs },
-      (_, v) => (typeof v === 'bigint' ? String(v) : v),
-      2
-    );
-    const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'hedge-' + trace.id + '.json';
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  };
-  const detail = $('trace-inputs').parentElement;
-  const showInputs = () =>
-    put('trace-inputs', trace && detail.open ? JSON.stringify(JSON.parse(trace.inputs), null, 2) : '');
-  detail.ontoggle = showInputs;
-  showInputs();
   const maximum = result.maximum,
     runner = result.top?.[1];
   put(

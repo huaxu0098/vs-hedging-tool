@@ -9,7 +9,7 @@ export function validLeverageCap(value) {
   return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 
-export function evaluateLeverageGrid(book, market, profile, pf, hl, checks) {
+export function evaluateLeverageGrid(book, market, profile, pf, hl, checks, fixedLeverage = null) {
   const leg = market.hl;
   const unit = dec(leg.multiplier).times(leg.fx).times(leg.mark);
   const target = dec(hl);
@@ -20,7 +20,9 @@ export function evaluateLeverageGrid(book, market, profile, pf, hl, checks) {
     validLeverageCap(tier?.maxLeverage) ?? 0
   );
   if (!upper || leg.marginMode !== 'cross') throw Error('LEVERAGE_UNVERIFIED');
-  const cap = String(upper);
+  if (fixedLeverage != null && (!Number.isInteger(fixedLeverage) || fixedLeverage < 1 ||
+      fixedLeverage > upper || target.isZero())) throw Error('LEVERAGE_UNVERIFIED');
+  const cap = String(fixedLeverage ?? upper);
   const base = evaluateCandidate(
     book,
     { ...market, hl: { ...leg, leverage: cap, capacity: null } },
@@ -95,7 +97,9 @@ export function evaluateLeverageGrid(book, market, profile, pf, hl, checks) {
   const rows = [];
   let best = null;
   // Zero target closes the position and needs no leverage setting.
-  for (let n = target.isZero() ? 0 : 1; n <= (target.isZero() ? 0 : upper); n++) {
+  const first = fixedLeverage ?? (target.isZero() ? 0 : 1);
+  const last = fixedLeverage ?? (target.isZero() ? 0 : upper);
+  for (let n = first; n <= last; n++) {
     const lev = String(n || upper);
     const margin = target.isZero() ? dec('0') : notional.div(lev);
     const total = margin.plus(other);

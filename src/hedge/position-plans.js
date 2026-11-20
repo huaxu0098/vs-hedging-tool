@@ -1,5 +1,5 @@
 import { sumPostings } from './settlement-ledger.js';
-import { executionDetail, profileInputs } from './solver.js';
+import { executionDetail } from './solver.js';
 import { dec, out } from './math.js';
 import { exactRatio, adjacentScale, inspectRatio, ratioSlice, scalesPerBlock, lastLotAtRatio } from './ratio-scan.js';
 
@@ -156,6 +156,12 @@ function scalePair(scan, index, featured) {
   return [];
 }
 
+export const planObjectives = [
+  ['最大 PF 仓位', '最大 PF 目标仓位'],
+  ['失败回收优先', '失败端回收缓冲优先'],
+  ['成功留存优先', '成功端现金留存优先']
+];
+
 export function buildPlanReport(scan, pending = false) {
   const eligible = scan.sets.eligible ?? scan.sets.both;
   const points = new Map();
@@ -168,11 +174,13 @@ export function buildPlanReport(scan, pending = false) {
   const chosen = scan.representative;
   const primary = chosen && chosen.objective !== 'diagnostic' && chosen.row.i === eligible.largest?.i
     ? chosen.row : eligible.largest;
-  if (!pending) {
-    add(primary, '最大 PF 仓位');
-    add(eligible.range?.witnesses.failure[1], '失败回收优先');
-    add(eligible.range?.witnesses.successHype[1], '成功留存优先');
-  }
+  const targets = pending ? [null, null, null] : [
+    primary, eligible.range?.witnesses.failure[1], eligible.range?.witnesses.successHype[1]
+  ];
+  const targetKeys = targets.map((point, i) => {
+    add(point, planObjectives[i][0]);
+    return point ? pointKey(point) : null;
+  });
   const index = scaleIndex(scan);
   const featured = [...points.values()];
   // Prefer a genuine smaller target at the maximum's exact exposure ratio.
@@ -208,22 +216,20 @@ export function buildPlanReport(scan, pending = false) {
     fractions.set(row.fraction, group);
   }
   const comparison = scaleComparison(rows);
-  const fixed = comparison ? fixedScaleComparison(rows, comparison, levelsByPoint, profileInputs(scan.ctx.book, scan.ctx.params, scan.ctx.market).C_hl) : null;
-  return { index, rows: [...fractions.values()].flat(), comparison, fixed, pending, eligible: pending ? 0 : eligible.count };
+  const fixed = comparison ? fixedScaleComparison(scan.ctx, rows, comparison, levelsByPoint) : null;
+  return { index, targetKeys, rows: [...fractions.values()].flat(), comparison, fixed, pending, eligible: pending ? 0 : eligible.count };
 }
 
-// Cross margin shares the same settlement ledger and maintenance path at a given
-// target. Read each target's own fixed-setting funding row, including switch constraints.
-function fixedScaleComparison(rows, pair, levelsByPoint, equity) {
+// Select a mutually admissible setting, then price both complete positions at that setting.
+function fixedScaleComparison(ctx, rows, pair, levelsByPoint) {
   const keys = [pair.small, pair.large];
   const grids = keys.map(key => levelsByPoint.get(key).filter(row => row.status === 'pass' && row.leverage));
   const small = grids[0].find(row => grids[1].some(other => other.leverage === row.leverage));
   if (!small) return { reason:'两种规模没有同时通过保证金及清算校验的共同杠杆档位' };
-  const large = grids[1].find(row => row.leverage === small.leverage);
-  const fixed = [small,large].map((level, index) => {
-    const plan = rows.find(row => row.key === keys[index]);
-    return { ...plan, leverage:String(level.leverage), initial:level.initial, free:level.freeAfter,
-      marginRate:dec(equity).gt(0) ? out(dec(level.initial).div(equity)) : null };
+  const fixed = keys.map(key => {
+    const { sign, i, j, labels } = rows.find(row => row.key === key);
+    const evaluated = inspectRatio(ctx, {sign, i, j}, {fixedLeverage:small.leverage});
+    return { ...recordFromInspection(ctx, evaluated), labels };
   });
   return { leverage:String(small.leverage), rows:fixed, comparison:scaleComparison(fixed) };
 }

@@ -1,4 +1,4 @@
-import { scaleComparison } from './position-plans.js';
+import { planObjectives as objectives } from './position-plans.js';
 import { dec } from './math.js';
 import { inspectRatio, ratioSlice } from './ratio-scan.js';
 import { capitalGroups, reportGroups, subsetGroups, recoveryCushion } from './range-report.js';
@@ -91,7 +91,7 @@ function auditText() {
   const { row, scan } = audit;
   const lines = [
     ...executionComparison(scan, row),
-    '源快照 ' + frameKey + ' · 分成到账前计入 Hype 权益 0 U',
+    '源快照 ' + audit.snapshotId + ' · 分成到账前计入 Hype 权益 0 U',
     '建议档位 ' + (row.lev ?? '空仓') + ' · 初始占用 ' + usd(row.initial) + ' · 开仓后可用 ' + usd(row.free),
     'Hype 压力后维持余量 ' + (row.stress ? usd(row.surplus) : '未配置，基础情景 ' + usd(row.surplus)),
     '若实际到账则个人分成 ' +
@@ -138,13 +138,13 @@ function auditText() {
     );
   write('scan-audit', lines.join('\n'));
 }
-function showRepresentative(scan, result) {
+function showRepresentative(snapshot, auditScan) {
+  const { ratioScan:scan, targets:[maximum], stress } = snapshot;
   const { row, objective, group, buffer, complete } = scan.representative;
   const { book, params } = scan.ctx;
   // The overview always describes one of the three displayed targets (the
   // maximum when available). Advanced diagnostics can retain a different
   // preference-selected witness and its own cash ledger.
-  const maximum = scan.plans?.rows.find(plan => plan.labels?.includes('最大 PF 仓位'));
   const target = maximum ?? row;
   const diagnostic = !maximum && objective === 'diagnostic';
   write('scan-representative', maximum ? '最大 PF 目标仓位 · ' + pct(target.h) :
@@ -159,7 +159,7 @@ function showRepresentative(scan, result) {
     B = dec(book.B);
   const bufferRate = row.cushion.rate == null ? '无保护基准' : pct(row.cushion.rate, 6);
   const thin = row.cushion.thin;
-  const stressIncomplete = result.stress?.missing.length || result.stress?.zero.length;
+  const stressIncomplete = stress?.missing.length || stress?.zero.length;
   $('scan-fail-net').classList.toggle('thin-buffer', thin);
   const focusExcess = maximum?.failDelta != null ? dec(maximum.failDelta) : excess;
   const focusThin = target.fail != null && recoveryCushion(target.fail,book.B).thin;
@@ -178,7 +178,7 @@ function showRepresentative(scan, result) {
           '）' +
           (thin ? ' · 极薄缓冲（几乎零缓冲）' : '') +
           (thin && stressIncomplete
-            ? result.stress.positive.length
+            ? stress.positive.length
               ? '，已配置情景刚好覆盖，完整压力未验证'
               : '，仅基础情景刚好覆盖，完整压力未验证'
             : '') +
@@ -262,7 +262,7 @@ function showRepresentative(scan, result) {
       ' · 强平距离 / 当前标记价 ' +
       (row.bufferRate == null ? '无正价交点或空仓' : pct(row.bufferRate))
   );
-  audit = { row, scan };
+  audit = { row, scan:auditScan ?? scan, snapshotId:snapshot.snapshotId };
   auditText();
 }
 const columns = [
@@ -502,13 +502,6 @@ function binLabel(bin) {
   return '全部合法比例';
 }
 
-// Names kept in saved solver records are mapped to the three user-facing objectives.
-const objectives = [
-  ['最大 PF 仓位', '最大 PF 目标仓位'],
-  ['失败回收优先', '失败端回收缓冲优先'],
-  ['成功留存优先', '成功端现金留存优先']
-];
-
 function formatRatios(records) {
   // Resolve rounding collisions between different executable fractions. Equal
   // fractions keep the same label at every position size on this page.
@@ -571,8 +564,8 @@ function initComparison() {
   }
 }
 
-function renderComparison(scan, stress) {
-  const winners = objectives.map(([label]) => scan?.plans?.rows.find(row => row.labels.includes(label)));
+function renderComparison(snapshot) {
+  const { ratioScan:scan, targets:winners, stress } = snapshot ?? {targets:objectives.map(() => null)};
   const max = winners[0];
   const baseOnly = stress && !stress.positive.length;
   const partial = stress && (stress.missing.length > 0 || stress.zero.length > 0);
@@ -596,7 +589,7 @@ function renderComparison(scan, stress) {
   if (!max) return;
   const scope = scan.complete ? '' : '已扫描范围内的';
   const thin = max.fail != null && recoveryCushion(max.fail, scan.ctx.book.B).thin;
-  const warning = baseOnly && thin ? '基础情景可行，但缓冲极薄，压力风险未验证' :
+  const warning = baseOnly && thin ? '基础情景可行，安全缓冲极薄，压力风险未验证' :
     baseOnly ? '最大基础情景可行仓位，压力安全性未验证' :
     !stress || partial ? '最大条件目标仓位，压力安全性未验证' : '最大条件目标仓位，按已配置压力估算';
   write('max-risk-title', scope + warning);
@@ -608,11 +601,15 @@ function renderComparison(scan, stress) {
   $('scale-link').hidden = !scan.plans.comparison;
 }
 
-function renderScaleComparison(scan, comparison, small, large, fixed = false) {
+function renderScaleComparison(snapshot, fixed = false) {
+  const scan = snapshot?.ratioScan;
+  const pair = fixed ? snapshot?.scale.fixed : snapshot?.scale.automatic;
+  const [small, large] = pair?.rows ?? [];
+  const comparison = pair?.comparison;
   const prefix = fixed ? 'fixed-scale' : 'scale';
   const valid = !!(small && large && comparison);
   $(prefix + '-table').hidden = !valid;
-  let caption = fixed && scan?.plans?.fixed?.reason || '没有可核对的同方向、同一精确比例规模对照。';
+  let caption = pair?.reason || '没有可核对的同方向、同一精确比例规模对照。';
   if (valid) {
     const method = fixed ? '两仓固定使用共同通过校验的最低档 ' + small.leverage + '×' :
       '独立择档，小仓 ' + small.leverage + '×，大仓 ' + large.leverage + '×';
@@ -634,7 +631,8 @@ function renderScaleComparison(scan, comparison, small, large, fixed = false) {
       ['失败回收减保护本金','failDelta',settlementAmount], ['成功后 Hype 剩余','success',settlementAmount],
       ['成功线至 Hype 强平距离','distance',v => fmt(v,2)+' '+scan.plans.hlQuote],
       [fixed ? '固定杠杆' : '自动杠杆','leverage',v => v+' 倍'], ['开仓后可用抵押品','free',usd],
-      ['失败后个人回收','fail',settlementAmount]
+      ['失败后个人回收','fail',settlementAmount], ['目标维持保证金','maintenance',usd],
+      ['Hype 强平标记价','liquidation',v => fmt(v,2)+' '+scan.plans.hlQuote]
     ];
     for (const [label,key,format] of metrics) {
       const row = body.insertRow();
@@ -655,12 +653,13 @@ function renderScaleComparison(scan, comparison, small, large, fixed = false) {
   patchRows($(prefix + '-rows'),body);
 }
 
-function renderPlans(scan) {
+function renderPlans(snapshot) {
+  const scan = snapshot?.ratioScan;
   const report = scan?.plans;
   const riskBody = document.createElement('tbody');
   const positionRows = document.createElement('tbody');
-  for (const [label,name] of objectives) {
-    const r = report?.rows.find(row => row.labels.includes(label));
+  for (const [i, r] of (snapshot?.targets ?? []).entries()) {
+    const name = objectives[i][1];
     if (!r) continue;
     const tr = positionRows.insertRow();
     tr.dataset.point = r.key;
@@ -668,14 +667,15 @@ function renderPlans(scan) {
       targetQty(r.hl,scan.ctx.market.hl) + ' / ' + usd(r.hypeValue), settlementAmount(r.fail),settlementAmount(r.success)])
       tr.insertCell().textContent = value;
   }
-  $('position-list').hidden = !positionRows.rows.length;
-  $('positions-empty').hidden = !!positionRows.rows.length;
+  const hasTargets = snapshot?.targets.some(Boolean) ?? false;
   patchRows($('position-list-rows'),positionRows);
-  const marks = new Map((report?.rows ?? []).map(r => [r.key,r]));
-  const comparison = report?.comparison ?? (report && scaleComparison(report.rows));
-  renderScaleComparison(scan,comparison,marks.get(comparison?.small),marks.get(comparison?.large));
-  const fixed = report?.fixed;
-  renderScaleComparison(scan,fixed?.comparison,fixed?.rows?.[0],fixed?.rows?.[1],true);
+  $('position-list').hidden = !hasTargets;
+  $('positions-empty').hidden = hasTargets;
+  write('positions-empty', hasTargets ? '' : !snapshot ? '等待首份计算快照' :
+    report?.legacy ? '该历史快照未保存三项优化目标' :
+    report?.pending ? '分成待到账，目标建议已暂停' : '本次计算没有合格目标方案');
+  renderScaleComparison(snapshot);
+  renderScaleComparison(snapshot,true);
   write('plan-caption', !report ? '' : report.pending ? '分成待到账' :
     report.legacy ? '历史条件目标' : !report.eligible ? '当前门槛下无合格方案' :
     scan.complete ? '按两端现金约束筛选' : '限已扫描规模');
@@ -692,14 +692,13 @@ function renderPlans(scan) {
   patchRows($('plan-risk-rows'), riskBody);
 }
 
-function draw(result) {
-  frame = result.ratioScan ?? null;
-  frameKey = result.trace?.id ?? '';
+function draw(snapshot, auditScan) {
+  frame = snapshot?.ratioScan ?? null;
   audit = null;
   const scan = frame,
     rep = scan?.representative;
-  renderComparison(scan, result.stress);
-  renderPlans(scan);
+  renderComparison(snapshot);
+  renderPlans(snapshot);
   renderAnalysis(scan);
   $('bands-empty').hidden = !!scan?.sets.legal.count || !scan;
   if (scan && !scan.sets.legal.count) write('bands-empty','当前扫描范围没有合法仓位');
@@ -780,7 +779,7 @@ function draw(result) {
           '。个人净盈利另按两端平仓后的个人现金与累计投入比较。'
       : ''
   );
-  if (rep) showRepresentative(scan, result);
+  if (rep) showRepresentative(snapshot, auditScan);
   else {
     auditText();
     for (const field of [
@@ -802,7 +801,7 @@ function draw(result) {
     if (scan) write('scan-representative', '当前条件下无可推荐仓位');
   }
 }
-export function renderScan(result, m, r, plan, status) {
+export function renderScan(result, m, r, plan, status, snapshot) {
   const observed = result.observed ?? result;
   const networkError = m.errors?.pf || m.errors?.hl;
   const waitingForMarket = !networkError && !m.errors?.spec && m.source !== '手工确认盘口' &&
@@ -815,7 +814,7 @@ export function renderScan(result, m, r, plan, status) {
     ['hl', 'Hype']
   ]) {
     const q = m[key];
-    const old = !q?.mark && result.retained?.prices?.[key];
+    const old = !q?.mark && snapshot?.prices?.[key];
     const c = observed.currencies?.[key] ?? (old && {baseAsset:old.base, quoteAsset:old.quote});
     write('scan-' + key + '-product', (key === 'pf' ? 'Vest ' : 'Hyperliquid ') + (m.asset ?? '') + ' Perp');
     write(
@@ -839,7 +838,7 @@ export function renderScan(result, m, r, plan, status) {
       : m.errors?.[key] || title + ' 正在连接盘口');
   }
   const displayed = result.ratioScan ? result : result.retained;
-  const tr = displayed?.trace;
+  const tr = snapshot?.trace;
   const f = result.funding;
   write('scan-source', plan ? (r.planCrossFlat === true ? '预设资金规划 · 规划空仓' : '预设资金规划 · 仓位待确认') : f?.C_H == null || f?.E == null ? '当前账户快照 · 待读取' : '当前账户快照');
   write(
@@ -878,16 +877,15 @@ export function renderScan(result, m, r, plan, status) {
         ' · 已计入' +
         (result.receipt.source === 'hl' ? ' Hype 权益' : '外部资金')
     );
-  else if (!displayed?.ratioScan?.representative?.row?.funded)
+  else if (!snapshot?.ratioScan?.representative?.row?.funded)
     write('scan-funded', 'Funded 分成 · 等待有效快照，到账状态待核实');
   const timing = observed.timing;
   const quoteBreak = timing?.quoteSkew > timing?.quoteLimit;
   const state = quoteBreak ? 'paused' : waitingForMarket ? 'loading' : result.frameState ?? 'paused',
-    id = tr?.id ?? '';
+    id = snapshot?.snapshotId ?? '';
   const stamp = tr ? '结果时间 ' + new Date(tr.at).toLocaleDateString('zh-CN') + ' ' + time(tr.at) : '';
   const desk = $('scan-desk');
   if (desk.dataset.state !== state) desk.dataset.state = state;
-  if (desk.dataset.resultId !== id) desk.dataset.resultId = id;
   const currentInputs = state === 'ready';
   const reason = quoteBreak ? '行情熔断 · 双边盘口或标记时差 ' + timing.quoteSkew +
     ' ms，阈值 ' + timing.quoteLimit + ' ms' : networkError || observed.currencies?.error || specError || result.issues?.[0] || status;
@@ -907,7 +905,7 @@ export function renderScan(result, m, r, plan, status) {
     validity = (state === 'failed' ? '计算失败' : '计算暂停') + ' · ' + (reason || '数据待核实');
     if (tr) validity += '（仅供历史参考）';
   }
-  const completedAt = displayed?.finishedAt ?? tr?.at;
+  const completedAt = snapshot?.calculatedAt;
   const lastTime = completedAt ? new Date(completedAt).toLocaleString('zh-CN',{hour12:false}) : '—';
   const historical = !!tr && (quoteBreak || !['ready','updating'].includes(state) || !result.ratioScan);
   const main = $('current');
@@ -930,10 +928,16 @@ export function renderScan(result, m, r, plan, status) {
       .filter(Boolean)
       .join(' · ')
   );
-  const liveGridRestored = displayed?.ratioScan?.cells && !frame?.cells;
-  if ((displayed && (frameKey !== id || liveGridRestored)) || (!displayed && (frame || frameKey !== 'empty'))) {
-    draw(displayed ?? {});
-    if (!displayed) frameKey = 'empty';
+  if (frameKey !== (id || 'empty')) {
+    const auditScan = displayed?.trace?.id === id ? displayed.ratioScan : null;
+    draw(snapshot, auditScan);
+    // All panels are patched synchronously from one publication before exposing its version.
+    frameKey = id || 'empty';
+    for (const panel of ['live-view','positions-view','scale-details','desk-details'])
+      $(panel).dataset.snapshotId = id;
+    for (const key of ['quoteSnapshotId','accountSnapshotId','rulesVersion','solverVersion','calculatedAt'])
+      desk.dataset[key] = snapshot?.[key] ?? '';
+    desk.dataset.resultId = id;
   }
 
 }

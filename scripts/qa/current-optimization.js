@@ -97,6 +97,17 @@ try {
   await input('R_success','5000');
   await wait("document.querySelector('#plan-caption').textContent.includes('无合格方案')",45000);
   assert.ok(await run("document.querySelector('#max-risk').hidden && document.querySelector('#plan-comparison').hidden"));
+  const empty = await run(`(() => {
+    const el = id=>document.getElementById(id);
+    return {hidden:el('position-list').hidden, rows:el('position-list-rows').rows.length,
+      reason:el('positions-empty').textContent, noteHidden:el('positions-empty').hidden,
+      versions:['live-view','positions-view','scale-details'].map(k=>el(k).dataset.snapshotId),
+      published:el('scan-desk').dataset.resultId};
+  })()`);
+  assert.equal(empty.rows,0);
+  assert.ok(empty.hidden && !empty.noteHidden);
+  assert.match(empty.reason,/没有合格/);
+  assert.deepEqual(empty.versions,Array(3).fill(empty.published));
   await input('R_success','98');
   await wait(ready,45000);
   await input('quoteSkewMs', '0');

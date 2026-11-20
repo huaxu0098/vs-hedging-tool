@@ -377,12 +377,12 @@ function stoppedBeforeExit(ctx, c, key) {
   }
   return null;
 }
-export function inspectRatio(ctx, point, { includeLeverageGrid = false } = {}) {
+export function inspectRatio(ctx, point, { includeLeverageGrid = false, fixedLeverage = null } = {}) {
   const { market, book, checks, params } = ctx,
     p = profileInputs(book, params, market);
   const pf = out(decimal(market.pf.step).times(point.i).times(point.sign)),
     hl = out(decimal(market.hl.step).times(point.j).times(-point.sign));
-  const c = evaluateLeverageGrid(book, market, p, pf, hl, { ...checks, scanRiskOnly: true });
+  const c = evaluateLeverageGrid(book, market, p, pf, hl, { ...checks, scanRiskOnly: true }, fixedLeverage);
   const path = c.endpointStress,
     fail = decimal(path?.failureCash ?? c.failureCash),
     success = decimal(path?.successHypeCash ?? c.hlBeforePayout);

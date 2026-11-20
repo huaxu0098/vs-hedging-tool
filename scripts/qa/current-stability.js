@@ -22,7 +22,7 @@ const install = `(() => {
       this.addEventListener('message',({data})=>{if(data.result?.ratioScan) {
         const r=data.result, s=r.ratioScan, rep=s.representative?.row;
         const key=r.trace.id;
-        test.results[key]={id:key, started:r.startedAt,finished:r.finishedAt,ms:r.solveMs,
+        test.results[key]={id:key, traceVersions:[r.trace.marketId,r.trace.accountsId,r.trace.rulesId,r.trace.model,r.finishedAt], started:r.startedAt,finished:r.finishedAt,ms:r.solveMs,
           pfMark:s.ctx.market.pf.mark,hlMark:s.ctx.market.hl.mark, count:s.sets.legal.count,
           revaluation:r.revaluation, sequence:data.version, protect:s.ctx.book.B, reserve:s.ctx.params.R,
           plans:['最大 PF 仓位','失败回收优先','成功留存优先'].map(label=>s.plans.rows.find(row=>row.labels.includes(label))).filter(Boolean),
@@ -43,6 +43,19 @@ const install = `(() => {
     if(test.hold) {const handler=this.onmessage.bind(this);test.held.push({job,send:()=>post.call(this,job,...args),handler});return}
     return post.call(this,job,...args);
   };
+  test.readPanels=()=>{
+    const e=id=>document.getElementById(id), desk=e('scan-desk');
+    const fields=['snapshotId','quoteSnapshotId','accountSnapshotId','rulesVersion','solverVersion','calculatedAt'];
+    const ids=['live-view','positions-view','scale-details','desk-details'].map(k=>e(k).dataset.snapshotId);
+    const version=Object.fromEntries(fields.map(k=>[k,k==='snapshotId'?desk.dataset.resultId:desk.dataset[k]]));
+    const matrix=Object.fromEntries([...e('plan-rows').rows].map(row=>[row.dataset.metric,[...row.cells].slice(1).map(c=>c.textContent)]));
+    const cols=[...e('plan-columns').rows[0].cells].slice(1);
+    const live=cols.flatMap((th,i)=>th.dataset.point ? [[th.dataset.point,th.firstChild.textContent,
+      matrix.pf[i]+' / '+matrix.pfValue[i],matrix.hl[i]+' / '+matrix.hypeValue[i],matrix.fail[i],matrix.success[i]]] : []);
+    const positions=[...e('position-list-rows').rows].map(row=>[row.dataset.point,...[...row.cells].map(c=>c.textContent)]);
+    return {version,ids,live,positions,empty:e('positions-empty').textContent,visible:!e('position-list').hidden,
+      emptyVisible:!e('positions-empty').hidden,liveVisible:!e('plan-comparison').hidden};
+  };
   let lastId, firstRow, main, root, region, firstCell, previousQuote, neighborBody, neighborCell;
   function frame() {
     const e=id=>document.getElementById(id),desk=e('scan-desk');
@@ -53,6 +66,11 @@ const install = `(() => {
       const quote=['pf','hl'].flatMap(k=>['bid','ask'].map(side=>e('scan-'+k+'-'+side).textContent)).join('|');
       if(quote!==previousQuote){test.quoteChanges=(test.quoteChanges||0)+1;previousQuote=quote}
       test.paints++;
+      const panels=test.readPanels();
+      if (!panels.ids.every(id=>id===panels.version.snapshotId) ||
+          JSON.stringify(panels.live)!==JSON.stringify(panels.positions) ||
+          panels.visible!==!!panels.live.length || panels.liveVisible!==panels.visible ||
+          panels.emptyVisible===panels.visible || (panels.visible && panels.empty)) test.panelMismatches=(test.panelMismatches||0)+1;
       if(desk.dataset.state==='updating') {
         test.pendingPaints++;
         if(!/重算/.test(e('scan-status').textContent) || e('scan-status').textContent.includes('当前数据有效')) test.conflict=true;
@@ -73,7 +91,7 @@ const install = `(() => {
     if(id && id!==lastId && test.results[id]){
       if(!root){test.started=performance.now();main=document.querySelector('main');root=desk;region=e('scan-results');neighborBody=e('ratio-neighbors');neighborCell=neighborBody.rows[0]?.cells[0];firstCell=e('plan-rows').rows[0]?.cells[1]}
       firstRow??=e('plan-rows').rows[0];lastId=id;
-      test.commits.push({ ...test.results[id], prices:[e('scan-pf-price').textContent,e('scan-hl-price').textContent],
+      test.commits.push({ ...test.results[id], panels:test.readPanels(), prices:[e('scan-pf-price').textContent,e('scan-hl-price').textContent],
         cash:[e('scan-fail-cash').textContent,e('scan-pass-cash').textContent], position:e('scan-position').textContent,
         shown:[...e('plan-columns').rows[0].cells].slice(1).map((th,i)=>({
           key:th.dataset.point, scenario:th.lastElementChild.textContent,
@@ -135,7 +153,7 @@ try {
         leverage:plan.leverage+'×',initial:money(plan.initial),marginRate:pct(plan.marginRate,2),free:money(plan.free),distance
       })) assert.equal(cells[field],expected,field+' / '+key);
       if(i===0) {
-        assert.match(f.warning,dec(plan.failDelta).lte('0.01') ? /基础情景可行，但缓冲极薄，压力风险未验证/ : /最大基础情景可行仓位，压力安全性未验证/);
+        assert.match(f.warning,dec(plan.failDelta).lte('0.01') ? /基础情景可行，安全缓冲极薄，压力风险未验证/ : /最大基础情景可行仓位，压力安全性未验证/);
         for(const field of ['marginRate','free','distance']) assert.ok(f.warning.includes(cells[field]));
       }
       if(plan.both) assert.ok(dec(plan.fail).gte(f.protect) && dec(plan.success).gte(f.reserve));
@@ -169,7 +187,7 @@ try {
   assert.ok(new Set(frames.map(f => JSON.stringify(f.shown))).size > 1);
   evidence.live = frames.map(({ rows, bins, ...f }) => ({ ...f, bands: bins.length }));
   evidence.observation = await run(
-    '(({paints,pendingPaints,blanks,neighborBlanks=0,neighborRemounts=0,replacedFirstRow=false,remounts=0,unreadable=false,posted,elapsedMs,quoteChanges})=>({paints,pendingPaints,blanks,neighborBlanks,neighborRemounts,replacedFirstRow,remounts,unreadable,posted,elapsedMs,quoteChanges}))(window.scanTest)'
+    '(({paints,pendingPaints,blanks,neighborBlanks=0,neighborRemounts=0,replacedFirstRow=false,remounts=0,unreadable=false,posted,elapsedMs,quoteChanges,panelMismatches=0})=>({panelMismatches,paints,pendingPaints,blanks,neighborBlanks,neighborRemounts,replacedFirstRow,remounts,unreadable,posted,elapsedMs,quoteChanges}))(window.scanTest)'
   );
   evidence.viewports = [];
   for (const [width,height] of [[1280,720],[390,844],[1440,900]]) {
@@ -186,6 +204,9 @@ try {
   }
   assert.ok(await run("!document.getElementById('positions-view').open && !document.querySelector('#desk-details').open && document.getElementById('plan-columns').rows[0].cells.length===4 && !document.body.innerText.includes('全部目标仓位')"));
   for (const f of frames) {
+    assert.deepEqual(Object.values(f.panels.version),[f.id,...f.traceVersions]);
+    assert.deepEqual(f.panels.positions,f.panels.live);
+    assert.equal(f.panels.live.length,3);
     assert.equal(f.joint.counts.find(([key]) => key === 'joint')[1],f.joint.count);
     assert.ok(f.joint.counts.every(([key,n]) => key==='joint' || n===0));
     assert.ok(f.joint.minCount>0 && f.joint.maxCount>0);
@@ -204,8 +225,8 @@ try {
     [comparison.fixed?.comparison,comparison.fixed?.rows,comparison.fixedCells]]) {
     if(!pair) {assert.equal(cells.length,0);continue;}
     const small=plans.find(p=>p.key===pair.small), large=plans.find(p=>p.key===pair.large);
-    assert.equal(cells.length,12);
-    for (const [index,key] of ['pf','pfValue','hl','hypeValue','initial','marginRate','failDelta','success','distance','leverage','free','fail'].entries()) {
+    assert.equal(cells.length,14);
+    for (const [index,key] of ['pf','pfValue','hl','hypeValue','initial','marginRate','failDelta','success','distance','leverage','free','fail','maintenance','liquidation'].entries()) {
       const val=row=>['pf','hl'].includes(key)?dec(row[key]).abs():dec(row[key]);
       if (small[key]==null || large[key]==null) { assert.equal(cells[index][3],'未验证'); continue; }
       const delta=val(large).minus(val(small));
@@ -231,8 +252,13 @@ try {
   await run('window.scanTest.hold=true');
   await set('#R_success', '98', 'input');
   await wait('window.scanTest.held.length===1');
+  const previousPanels=await run('window.scanTest.readPanels()');
   await set('#R_success', '97', 'input');
   await wait('window.scanTest.held.length>=2');
+  await b.click('#desk-views button[aria-controls="positions-view"]');
+  assert.deepEqual(await run('window.scanTest.readPanels()'),previousPanels);
+  assert.ok(await run("document.getElementById('position-list').checkVisibility() && !document.getElementById('positions-empty').checkVisibility()"));
+  await b.click('#desk-views button[aria-controls="live-view"]');
   const stableId = await run("document.getElementById('scan-desk').dataset.resultId");
   assert.ok(
     await run(
@@ -281,6 +307,27 @@ try {
   const restored=await readState();
   assert.equal(restored.historical,'false');assert.equal(restored.note,'');assert.match(restored.status,/当前数据有效/);
   evidence.breaker={blocked,recovering,restored};
+  // Reload with a real accepted cache and withhold fresh worker jobs until the historical tables have been inspected.
+  const saved = await run("JSON.parse(localStorage.getItem(Object.keys(localStorage).find(k=>k.startsWith('vs-hype:display-history:')))).view");
+  await send('Page.addScriptToEvaluateOnNewDocument',{source:'window.scanTest.hold=true'});
+  await send('Page.reload',{ignoreCache:true});
+  await wait("window.scanTest?.held.length && document.getElementById('scan-desk').dataset.resultId",35000);
+  await b.click('#desk-views button[aria-controls="positions-view"]');
+  const cached=await run('window.scanTest.readPanels()');
+  assert.deepEqual(cached.ids,Array(4).fill(cached.version.snapshotId));
+  assert.deepEqual(cached.live,cached.positions);
+  assert.equal(cached.live.length,3);
+  assert.equal(cached.empty,'');
+  assert.ok(await run("document.getElementById('current').dataset.historical==='true' && document.getElementById('position-list').checkVisibility()"));
+  assert.equal(cached.version.rulesVersion,saved.rulesVersion);
+  assert.equal(cached.version.accountSnapshotId,saved.accountSnapshotId);
+  await run('window.scanTest.hold=false;window.scanTest.held.at(-1).send()');
+  await wait(ready+" && document.getElementById('scan-desk').dataset.resultId!=="+JSON.stringify(cached.version.snapshotId),50000);
+  const renewed=await run('window.scanTest.readPanels()');
+  assert.deepEqual(renewed.ids,Array(4).fill(renewed.version.snapshotId));
+  assert.deepEqual(renewed.positions,renewed.live);
+  evidence.reload={historical:cached.version.snapshotId,renewed:renewed.version.snapshotId,targets:renewed.live.length};
+  assert.equal(evidence.observation.panelMismatches,0);
   assert.ok(evidence.observation.elapsedMs >= 60000 && evidence.observation.quoteChanges > 1);
   assert.equal(evidence.observation.neighborBlanks, 0);
   assert.equal(evidence.observation.neighborRemounts, 0);
