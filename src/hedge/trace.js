@@ -24,16 +24,17 @@ function fingerprint(json) {
 export function bookIdentity(market) {
   return fingerprint(canonical(['pf','hl'].map(side=>{
     const q=market?.[side];
-    return q ? [q.mark,q.markAt??q.asOf,q.bookAt??q.asOf,q.levels] : null;
+    return q ? [q.bid??null,q.ask??null,q.mark,q.markAt??q.asOf,q.bookAt??q.asOf,q.levels] : null;
   })));
 }
 
-export const modelVersion = 'AUTO-0.21.8';
+export const modelVersion = 'AUTO-0.21.28';
 
+export function quoteSnapshotId(market,rates) { return fingerprint(canonical([market,rates])); }
 export function calculationTrace(rules, accounts, market, rates, at, settings = {}) {
   const model = modelVersion;
   const options = Object.fromEntries(
-    ['cashSearchBudget', 'priorTarget', 'seedTargets', 'searchBudget', 'scanRatios', 'baseObjectives']
+    ['openingCapacity','decision','cashSeed', 'cashSearchBudget', 'scanPercentages', 'priorTarget', 'seedTargets', 'searchBudget', 'scanRatios', 'baseObjectives']
       .filter((k) => settings[k] != null)
       .map((k) => [k, settings[k]])
   );
@@ -43,7 +44,7 @@ export function calculationTrace(rules, accounts, market, rates, at, settings = 
     id: fingerprint(at + inputs),
     rulesId: fingerprint(canonical(rules)),
     accountsId: fingerprint(canonical(accounts)),
-    marketId: fingerprint(canonical([market, rates])),
+    marketId: quoteSnapshotId(market,rates),
     at: new Date(at).toISOString(),
     inputs
   };

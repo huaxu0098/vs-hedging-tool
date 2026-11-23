@@ -36,10 +36,32 @@ export function ratio(value) {
   return n;
 }
 
-export function profitSplit(e, baseline, share) {
-  const gross = max(0, dec(e).minus(positive(baseline))),
-    user = gross.times(ratio(share));
-  return { gross: out(gross), user: out(user), platform: out(gross.minus(user)) };
+export function profitSplit(e, baseline, share, policy = {}) {
+  const equity = dec(e);
+  const gross = max(0, equity.minus(positive(baseline)));
+  const minimum = nonnegative(policy.minimum ?? '0');
+  const fee = nonnegative(policy.fee ?? '0');
+  const qualified = gross.gte(minimum) ? max(0, gross.minus(fee)) : dec('0');
+  const personalRate = ratio(share);
+  const platformRate = ratio(policy.platformShare ?? out(dec('1').minus(personalRate)));
+  if (!personalRate.plus(platformRate).eq(1)) throw Error('个人和平台分成比例之和必须为 100%');
+  return {gross:out(gross), qualified:out(qualified), net:out(qualified),
+    user:out(qualified.times(personalRate)), platform:out(qualified.times(platformRate))};
+}
+
+// Solving for an exact net-equity boundary can leave a division residue.
+// Never apply this adjustment to a marked boundary or a real claim receipt.
+export function canClaimOnSuccess(p) {
+  return p.stage === 'funded';
+}
+export function projectedSplit(settled, profile, target, trigger) {
+  if (!canClaimOnSuccess(profile)) return {gross:'0',qualified:'0',net:'0',user:'0',platform:'0'};
+  const equity = trigger !== 'mark_equity' && target != null && dec(settled).minus(target).abs().lt('1e-32')
+    ? target : settled;
+  return profitSplit(equity, profile.baseline, profile.share, profile.withdrawal);
+}
+export function projectedShare(settled, profile, target, trigger) {
+  return projectedSplit(settled,profile,target,trigger).user;
 }
 export function ruleState(p) {
   if (!['challenge', 'funded'].includes(p.stage)) throw Error('未知阶段');
@@ -60,7 +82,7 @@ function amounts(p) {
     hl,
     protect,
     total,
-    payout: dec(p.stage === 'funded' ? profitSplit(p.target, p.baseline, p.share).user : '0')
+    payout: dec(canClaimOnSuccess(p) ? profitSplit(p.target, p.baseline, p.share, p.withdrawal).user : '0')
   };
 }
 export function endpointCash(p, h, failureUnit, successUnit, k = '0') {

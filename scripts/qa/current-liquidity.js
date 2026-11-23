@@ -26,9 +26,9 @@ try {
           framesById[r.trace.id]={id:r.trace.id,time:r.finishedAt,ms:r.solveMs,model:r.trace.model,
             clocks:JSON.parse(r.trace.inputs).market,account:r.trace.accountsId,rules:r.trace.rulesId,book:r.trace.marketId,
             tested:r.stress.positive,funding:JSON.parse(r.trace.inputs).rules.fundingDebit,scope:p.scope,allSpecified:p.allSpecified,liveSafety:p.liveSafety,status:p.status,reason:p.reason,B:s.ctx.book.B,R:s.ctx.params.R,
-            columns:[plans.targetKeys[0],null,...plans.targetKeys.slice(1)].map((key,i)=>row(i===1?p.row:plans.rows.find(r=>r.key===key))),
+            columns:[plans.targetKeys[0],null,...plans.targetKeys.slice(1),null].map((key,i)=>row(i===4?plans.cashPriority.row:i===1?p.row:plans.rows.find(r=>r.key===key))),
             base:row(plans.rows.find(x=>x.key===plans.targetKeys[0])), pressure:row(p.row),
-            keys:[plans.targetKeys[0],p.key,...plans.targetKeys.slice(1)],
+            keys:[plans.targetKeys[0],p.key,...plans.targetKeys.slice(1),plans.cashPriority.key],
             fees:Object.fromEntries(['pf','hl'].map(k=>[k,[s.ctx.market[k].rate,s.ctx.market[k].multiplier,s.ctx.market[k].fx]]))};
           solverEvents.push([r.solveMs,r.trace.id,p.status]);
         });
@@ -36,11 +36,23 @@ try {
       return post.call(this,job,...other);
     };
   })()`});
+  if(process.env.QA_CONTROLLED_FX==='1') {
+    console.log('QA 使用受控 USD 现货盘口，永续盘口仍取自 4181');
+    await send('Page.addScriptToEvaluateOnNewDocument',{source:`
+      const fxFetch=window.fetch;
+      window.fetch=(url,...args)=>String(url).includes('/api/usd-rates')?
+        Promise.resolve(Response.json({rates:Object.fromEntries(['USDC','USDT'].map(currency=>
+          [currency,{currency,quote:'USD',bid:'0.9999',ask:'1.0001',asOf:new Date().toISOString(),source:'QA controlled FX'}]))})):
+        fxFetch(url,...args);`});
+  }
   await send('Page.navigate',{url:process.env.CURRENT_URL??'http://127.0.0.1:4181/'});
+  await wait("!!document.getElementById('dailyUpPct')",15000);
+  for(const [key,value] of Object.entries({dailyUpPct:'600',dailyDownPct:'100',twoDayUpPct:'600',twoDayDownPct:'100'}))
+    await b.set('#'+key,value,'input');
   for (const budget of ['', '0.00001', '500']) {
     const full=Boolean(budget);
     if(full) await run(`(()=>{
-      for(const [key,value] of Object.entries({adverseBps:'0.01',asyncBps:'0.02',jumpBps:'0.03',delayBps:'0.01',fundingRatesBps:'0.01,0.02',fundingDebit:${JSON.stringify(budget)}})){
+      for(const [key,value] of Object.entries({widenBps:'0.01',narrowBps:'0.01',vestJumpBps:'0.02',hypeJumpBps:'0.02',vestFirstBps:'0.02',hypeFirstBps:'0.01',exitDelaySeconds:'2',adverseBps:'0.01',asyncBps:'0.02',jumpBps:'0.03',delayBps:'0.01',fundingRatesBps:'0.01,0.02',fundingDebit:${JSON.stringify(budget)}})){
         const input=document.getElementById(key);input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));
       }
     })()`);
@@ -68,7 +80,7 @@ try {
       if (!plan) continue;
       const summary=plan.summary, known=summary.cases.filter(c=>c.verified);
       assert.equal(summary.key,f.keys[i]);
-      assert.equal(f.coverageDisplay[i],known.length+' / '+(summary.cases.length-known.length));
+      assert.equal(f.coverageDisplay[i],[summary.coverage.passed,summary.coverage.failed,summary.cases.length-known.length].join(' / '));
       assert.equal(summary.coverage.passed,known.filter(c=>c.status==='pass').length);
       // Reconcile signed headroom with independently priced failure and success ledgers.
       const endpoints=summary.cases.filter(c=>c.configured);
@@ -79,7 +91,8 @@ try {
       assert.ok(dec(summary.cashBuffers.fail).eq(fail) && dec(summary.cashBuffers.success).eq(success));
       assert.ok(dec(summary.cashBuffers.minimum).eq(worst));
       const shown=f.cashDisplay[i].match(/[+-]?[0-9]+(?:\.[0-9]+)?/);
-      assert.ok(shown && dec(shown[0]).eq(worst.toDecimalPlaces(4)),f.cashDisplay[i]);
+      const displayValue=worst.abs().lt('0.0001')?worst.toSignificantDigits(4):worst.toDecimalPlaces(4);
+      assert.ok(shown && dec(shown[0]).eq(displayValue),f.cashDisplay[i]);
       for (const [field,maximize] of [['maxMarginUsed',true],['minSurplus',false],
         ['minFreeCollateral',false],['maxCollateralDeficit',true],['minLiquidationDistance',false]]) {
         const values=endpoints.flatMap(c=>[c.fail[field],c.success[field]]).filter(x=>x!=null).map(dec);
@@ -90,12 +103,13 @@ try {
         assert.ok(expected.eq(witness[summary[field].endpoint][field]));
       }
     }
+    if(budget!=='500') assert.ok(f.pressure,'本帧应产生已配置压力候选');
     if(f.pressure){
       assert.equal(f.pressure.key,f.publishedKey);
       assert.equal(f.status,'conditional');
       assert.equal(f.scope,full?'configured':'bookOnly');
       assert.equal(f.allSpecified.status,'unverified');assert.equal(f.allSpecified.key,null);
-      assert.equal(f.pressure.summary.coverage.unverified,full?1:6);
+      assert.equal(f.pressure.summary.coverage.unverified,full?1:12);
       const summary=f.pressure.summary;
       assert.equal(summary.key,f.pressure.key);
       assert.equal(summary.status,'pass');
@@ -112,7 +126,8 @@ try {
         assert.ok(amounts.every(v=>v.gte(summary[field].value)));
         assert.equal(summary.cases.find(c=>c.id===summary[field].id)[end].cash,summary[field].value);
       }
-      assert.deepEqual(f.headline,[summary.minFailure,summary.minSuccess].map(x=>dec(x.value).toFixed(4)+' U'));
+      const cashSummary=f.columns[4].summary;
+      assert.deepEqual(f.headline,[cashSummary.failComponent,cashSummary.successFinal].map(x=>dec(x.value).toFixed(4)+' U'));
       const endpoints=active.flatMap(c=>[c.fail,c.success]);
       for(const item of endpoints){
         assert.ok(dec(item.maxMarginUsed).lte(summary.maxMarginUsed.value));
@@ -121,7 +136,7 @@ try {
       const d=summary.cases.find(c=>c.id==='D');
       assert.equal(d.status,'unknown');assert.equal(d.success.cash,null);assert.equal(d.fail.cash,null);
       for(const c of summary.cases) assert.ok(f.detail.some(([id,cells])=>id===c.id && cells[0]===c.label));
-      for(const id of ['basis','async','delay','jump','funding']){
+      for(const id of ['basis','async','delay','jump','funding','premiumWider','premiumCloser','vestJump','hypeJump','vestFirst','hypeFirst']){
         const c=summary.cases.find(c=>c.id===id);
         assert.equal(c.status,full?'pass':'unknown');
         assert.equal(c.configured,full);

@@ -161,7 +161,7 @@ function pathEvidence(ctx,row,key) {
     const fill=fillEvidence(out(dec(hl.target).neg()),leg,nativeMove);
     if (!['covered','noTrade'].includes(fill.status)) return [name,{...test,settlementIssue:'平仓深度未验证'}];
     const ledger=settleHypeAt(leg,hl,test.shift,test.debit??'0');
-    return [name,{...test, settlement:{pfMark:pf.exitMark,hlMark:ledger.exitMark,pfFill:pf.exitPrice,hlFill:ledger.exitPrice,
+    return [name,{...test, settlement:{pfFees:sumPostings([pf.entryFee,pf.exitFee]),hlFees:sumPostings([ledger.entryFee,ledger.exitFee]),pfEquity:pf.settled,pfMark:pf.exitMark,hlMark:ledger.exitMark,pfFill:pf.exitPrice,hlFill:ledger.exitPrice,
       pfNet:out(dec(pf.settled).minus(pf.start)),hlNet:out(dec(ledger.settled).minus(ledger.start)),
       hype:ledger.settled,personal:sumPostings([ledger.settled,ctx.book.external]),exitDepth:fill}}];
   }));
@@ -230,8 +230,11 @@ export function recordFromInspection(ctx, row, pairs = {fail:reachableLedgers(ct
   }
   return {
     sign, i, j, key: pointKey(row), h: row.h,
+    constraintIssue:row.reason ? {code:row.reason.code??null,actual:row.reason.actual??null,required:row.reason.required??null,
+      unit:row.reason.unit??null,status:row.reason.status??null,shortfall:row.reason.shortfall??null} : null,
     fraction: ctx.market.pf.factor ? exactRatio(ctx.market, row.pf, row.hl) : null,
     pf: row.pf, hl: row.hl, pfValue: row.pfValue, hypeValue: row.hypeValue,
+    notionalRatio:out(dec(row.hypeValue).div(row.pfValue)),
     pfFill: execution(row.paths?.fail.pf), hlFill: execution(row.paths?.fail.hl),
     fail: row.failStop ? null : row.fail,
     failHype: row.failStop ? null : ctx.book.external != null
@@ -241,7 +244,7 @@ export function recordFromInspection(ctx, row, pairs = {fail:reachableLedgers(ct
     success: row.passStop ? null : row.success,
     successPersonal: row.passStop ? null : row.successPersonal,
     successDelta: row.passStop ? null : out(dec(row.successPersonal).minus(ctx.book.B)),
-    failStop: row.failStop, passStop: row.passStop,
+    failStop: row.failStop, passStop: row.passStop, deadline:row.deadline,
     pathAudit, verification, liquidity, depthStatus, pressureSummary:pressure,
     configuredPass:!!(row.both && pressure?.status==='pass'),
     depth:{fail:orderEvidence(ctx,row,'fail'),pass:orderEvidence(ctx,row,'pass')},
@@ -263,7 +266,7 @@ export function recordFromInspection(ctx, row, pairs = {fail:reachableLedgers(ct
     successHeadroom: row.passStop ? null : row.reserveHeadroom,
     initial: row.initial, marginRate: row.imRate, liquidation: row.liquidation, distance: row.buffer, distanceRate: row.bufferRate,
     surplus: row.surplus, physical: row.physical, covers: row.covers, coversWithBuffer: row.coversWithBuffer, survives: row.survives,
-    both: row.both, profitable: ctx.params.externalPriced !== false && row.profitable,
+    both: row.both, profitable: row.profitable,
     reason: row.physical ? null : (row.reason?.label ?? row.reason?.code ?? '途经保证金约束')
   };
 }

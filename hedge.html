@@ -3,7 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>VS × Hyperliquid 实时双平台动态对冲计算系统</title>
+    <title>PF × Hype 实时仓位计算器</title>
+    <script>document.documentElement.dataset.view = new URLSearchParams(location.search).get('view') === 'analysis' ? 'analysis' : 'calculator';</script>
     <link rel="stylesheet" href="/hedge.css" />
     <script type="importmap">
       { "imports": { "decimal.js": "/vendor/decimal.mjs" } }
@@ -12,21 +13,63 @@
   </head>
   <body>
     <header class="desk-header">
-      <div class="desk-bar"><b>VS <em>×</em> Hyperliquid</b><span>只读工作台</span></div>
+      <div class="desk-bar"><b>VS <em>×</em> Hyperliquid</b><a class="analysis-link" href="/?view=analysis">规则与分析</a><a class="calculator-link" href="/">返回计算器</a></div>
     </header>
     <main id="current" class="live-desk">
       <div class="desk-title">
-        <h1>对冲比例与目标仓位</h1>
-        <span id="scan-source"></span><small id="desk-state" role="status"><span id="scan-status">连接行情</span></small>
+        <h1>实时仓位计算器</h1>
+        <span id="scan-source"></span>
+        <div class="calc-status-box" role="status" aria-live="polite">
+          <span id="calc-conn-pill" class="conn-pill" data-state="calculating">正在计算</span>
+          <small id="calc-time-meta">连接后台行情…</small>
+        </div>
+        <small id="desk-state" role="status"><span id="scan-status">连接行情</span></small>
       </div>
       <nav id="desk-views" aria-label="工作台视图">
         <button type="button" aria-controls="live-view" aria-expanded="true">实时结果</button>
-        <button type="button" aria-controls="positions-view" aria-expanded="false">仓位明细</button>
+        <button type="button" aria-controls="positions-view" aria-expanded="false">比例与方案详情</button>
         <button type="button" id="scan-config" aria-controls="desk-details" aria-expanded="false">高级设置</button>
       </nav>
+      <p id="phase-status" role="status"></p>
+      <p id="storage-note" role="status" hidden></p>
       <p id="snapshot-note" hidden></p>
-      <details id="live-view" name="workbench-view" open><summary hidden>实时结果</summary>
+      <details id="live-view" class="workbench-view" open><summary>实时结果</summary>
       <div id="scan-desk">
+        <section id="calculator-funds">
+          <div class="calc-top-bar">
+            <div class="calc-ticker-wrap"><span id="home-ticker">连接实时行情…</span><span id="home-fund-summary"></span></div>
+            <div id="home-controls"></div>
+          </div>
+          <div id="home-fund-fields"></div>
+          <details id="calc-rules-fold">
+            <summary id="calc-rules-summary">规则参数设置</summary>
+            <div id="home-more-fields"></div>
+          </details>
+          <details id="hype-api-fold">
+            <summary id="hype-api-summary">Hype API 状态：加载中…</summary>
+            <div class="hype-api-grid">
+              <label>本地凭证文件路径（服务端读取，不进浏览器）<input id="hype-cred-path" type="text" autocomplete="off" spellcheck="false" placeholder="/Users/.../Desktop/hype api.txt" /></label>
+              <label>资金账户公开地址（主账户 tradingAccountAddress）<input id="hype-trading-addr" type="text" autocomplete="off" spellcheck="false" placeholder="0x…" /></label>
+              <label>子账户公开地址（选填 subAccountAddress）<input id="hype-sub-addr" type="text" autocomplete="off" spellcheck="false" placeholder="无子账户留空" /></label>
+              <div class="hype-api-actions">
+                <button type="button" id="hype-api-save">保存并核对凭证与授权</button>
+                <button type="button" id="hype-api-use-account">切换为 Hype API 账户快照</button>
+              </div>
+            </div>
+            <p id="hype-api-detail" class="hype-api-detail"></p>
+          </details>
+        </section>
+        <section id="candidate-grid" class="live-targets">
+          <div id="collection-status" class="collection-bar">等待双边有效报价</div>
+          <div id="candidate-rows" class="scheme-card-list" aria-label="主要仓位方案">
+            <div class="scheme-empty">等待计算</div>
+          </div>
+          <details id="more-candidates-fold" hidden>
+            <summary id="more-candidates-summary">其余方案明细</summary>
+            <div id="more-candidate-rows" class="scheme-card-list" aria-label="其余方案明细"></div>
+          </details>
+          <small id="collection-copy-status" role="status"></small>
+        </section>
         <section class="scan-quotes" aria-labelledby="book-heading">
           <h2 id="book-heading">实时盘口</h2>
           <table class="book-table">
@@ -38,27 +81,72 @@
                 <td id="scan-hl-bid">—</td><td id="scan-hl-ask">—</td><td id="scan-hl-price">—</td></tr>
             </tbody>
           </table>
+          <details><summary>行情健康详情</summary><p>Vest · <span id="scan-pf-connection"></span><br>Hyperliquid · <span id="scan-hl-connection"></span></p></details>
+        </section>
+        <details class="single-inspection live-targets"><summary>单组仓位、资金与路径核对</summary>
+        <section class="live-targets" id="order-panel"><h2>单组仓位核对 <small class="history-label"></small></h2>
+          <div class="order-legs">
+            <article><h3>PF（Vest） <span id="order-pf-direction">—</span></h3><strong id="order-pf-qty">—</strong><p>名义金额 <b id="order-pf-value">—</b></p>
+              <small id="adjust-pf"></small><button type="button" id="copy-pf" disabled>复制 PF 下单参数</button></article>
+            <article><h3>Hype（Hyperliquid） <span id="order-hl-direction">—</span></h3><strong id="order-hl-qty">—</strong><p>名义金额 <b id="order-hl-value">—</b></p>
+              <small id="adjust-hl"></small><button type="button" id="copy-hl" disabled>复制 Hype 下单参数</button></article>
+          </div><p id="live-targets" class="sr-only">—</p><small id="copy-status" role="status"></small>
+          <p class="order-ratio">动态名义比例 <b id="live-ratio">等待求解</b></p>
         </section>
         <section id="scan-focus" aria-labelledby="cash-heading">
           <h2 id="cash-heading"><span id="cash-source">资金结果</span> <small class="history-label"></small> <time id="cash-calculated-at"></time></h2>
-          <div id="scan-cash" class="scan-paths">
-            <div><h3>失败后 · 个人回收</h3><strong id="scan-fail-cash">—</strong><small id="scan-fail-summary"></small></div>
-            <div><h3 id="scan-pass-title">通过后 · Hype 剩余</h3><strong id="scan-pass-cash">—</strong><small id="scan-pass-summary"></small></div>
-          </div>
-          <p class="scan-rep"><b id="scan-representative"></b> <span id="scan-position"></span></p>
+          <div class="table-wrap"><table id="scan-cash"><tbody>
+            <tr><th>考核失败 · 个人回收</th><td><strong id="scan-fail-cash">—</strong></td></tr>
+            <tr><th><span id="scan-pass-title">考核通过</span> · Hype 剩余</th><td><strong id="scan-pass-cash">—</strong></td></tr>
+          </tbody></table></div>
+          <p id="exam-status"></p><p id="branch-summary"></p><p id="unhit-expiry"></p>
+          <details><summary>两条路径的结算、触线价格与压力明细</summary>
+            <p>失败路径 PF 权益 <span id="fail-pf">—</span>，Hype 平仓资金 <span id="fail-before">—</span>。通过路径 PF 权益 <span id="pass-pf">—</span>，Hype 平仓资金 <span id="pass-before">—</span>。两条考核路径 PF 提现均为 0 U。</p>
+            <p id="required-moves" hidden></p><small id="scan-fail-summary"></small><small id="scan-pass-summary"></small><p id="scan-withdrawal"></p>
+            <p id="path-profit"></p><p id="stress-count"></p><p>触线价由 PF 资金规则反推，不是行情预测。模型按该情景的双边价格联动、退出深度、费用及已配置冲击结算。净盈亏是走完该路径的条件值，成交以实盘回执为准。</p><p id="scan-final-worst"></p><p id="trigger-paths" style="white-space:pre-line"></p><p id="reach-windows" style="white-space:pre-line"></p></details>
+          <p hidden class="scan-rep"><b id="scan-representative"></b> <span id="scan-position"></span></p>
         </section>
+        <section class="live-margin"><h2>保证金与最差现金缓冲 <small class="history-label"></small></h2><p id="live-margin">—</p></section>
+        </details>
+        <section id="size-report"><details><summary>资金缓冲与求解记录 <small class="history-label"></small></summary>
+          <details><summary>资金缓冲优先方案</summary><p id="buffer-alternative">等待求解</p></details>
+          <p id="solve-change"></p><details id="solve-details"><summary>求解记录</summary><pre id="solve-log"></pre></details></details>
+        </section>
+        <section id="evaluation-record" hidden><h2>Evaluation 结算</h2><p id="closed-funds"></p>
+          <div id="plan-exit-entry" hidden><label>本次模拟平仓后的 Hype 权益（U） <input id="plan-exit-cash" inputmode="decimal"></label>
+          <button type="button" id="record-plan-exit">记录模拟退出资金</button><small id="plan-exit-error" role="status"></small></div></section>
+        <section id="funded-summary" hidden><h2>Funded 资金</h2>
+          <p id="funded-origin"></p><p id="funded-values"></p><p id="funded-total"></p><p id="funded-risk"></p>
+          <label>本轮 Funded 已平仓权益（U） <input id="funded-observation" inputmode="decimal"></label>
+          <button type="button" id="record-funded">更新本轮权益</button>
+          <button type="button" id="settle-funded">按规则结算本轮</button>
+          <button type="button" id="enter-funded-solver" class="primary">进入 Funded 联合求解</button><small id="funded-error" role="status"></small>
+          <details><summary>历轮分成</summary><p id="funded-rounds" style="white-space:pre-line"></p></details>
+        </section>
+      </div>
+      </details>
+      <details id="positions-view" class="workbench-view"><summary>理论比例与方案比较</summary>
+        <section><h2>理论资金比例区间</h2><p id="theory-only">—</p></section>
         <section id="ratio-intervals" aria-labelledby="range-heading">
-          <h2 id="range-heading">自动比例区间 <small class="history-label"></small></h2>
+          <h2 id="range-heading">可执行比例交集 <small class="history-label"></small></h2>
           <dl class="scan-sets">
-            <div><dt>失败端本金回收<span id="capital-threshold"></span></dt><dd id="scan-protect">—</dd></div>
-            <div><dt>成功端最低留存<span id="reserve-threshold"></span></dt><dd id="scan-survive">—</dd></div>
             <div><dt>双路径保护交集<span id="joint-threshold"></span></dt><dd id="scan-both">—</dd></div>
-            <div id="profit-panel"><dt>双路径净盈利</dt><dd id="scan-profit">—</dd></div>
           </dl>
         </section>
         <section id="scan-results" aria-labelledby="bands-heading">
-          <div class="bands-heading"><h2 id="bands-heading">四种条件目标方案 <small class="history-label"></small></h2><small><span id="plan-stress"></span><span id="plan-caption"></span></small></div>
-          <p id="pressure-scope-note" hidden><strong id="pressure-all-specified"></strong> · <span id="pressure-live-safety">完整实盘安全性未验证</span></p>
+          <div class="primary-plans">
+            <article><h2>基础最大目标仓位 <small class="history-label"></small></h2><p id="home-base"></p><small id="home-base-risk"></small></article>
+            <article><h2 id="home-pressure-name">A-C 压力最大仓位</h2><p id="home-pressure"></p><small id="home-pressure-risk"></small></article>
+            <article><h2>最差现金缓冲优先 <small class="history-label"></small></h2><p id="home-cash"></p><small id="home-cash-risk"></small></article>
+          </div>
+          <details id="comparison-detail"><summary>比较五种方案与压力条件</summary>
+          <dl class="scan-sets">
+            <div><dt>失败端本金回收<span id="capital-threshold"></span></dt><dd id="scan-protect">—</dd></div>
+            <div><dt>成功端最低留存<span id="reserve-threshold"></span></dt><dd id="scan-survive">—</dd></div>
+            <div id="profit-panel"><dt>提现前双路径净盈利区间</dt><dd id="scan-profit">—</dd></div>
+          </dl>
+          <div class="bands-heading"><h2 id="bands-heading">五种条件目标方案 <small class="history-label"></small></h2><small><span id="plan-stress"></span><span id="plan-caption"></span></small></div>
+          <p id="pressure-scope-note" hidden><strong id="pressure-all-specified"></strong> · <span id="pressure-live-safety">完整实盘风险未验证</span></p>
           <div id="max-risk" hidden>
             <strong id="max-risk-title"></strong>
             <span id="max-risk-values"></span>
@@ -71,11 +159,10 @@
             </table>
           </div>
           <p id="bands-empty" hidden></p>
+          </details>
         </section>
-      </div>
-      </details>
-      <details id="positions-view" name="workbench-view"><summary hidden>仓位明细</summary>
-        <h2>四个方案的目标仓位 <small class="history-label"></small></h2>
+        <details id="position-breakdown"><summary>仓位、路径和深度明细</summary>
+        <h2>五个方案的目标仓位 <small class="history-label"></small></h2>
         <p class="position-assumptions">PF 与 Hype 按各自原生盘口估价。压力情景按当前可见深度推算条件平仓，实际退出深度待核实。</p>
         <p id="positions-empty">等待首份计算快照</p>
         <div class="table-wrap"><table id="position-list" hidden><thead><tr><th>方案</th><th>PF 数量 / 名义额</th><th>Hype 数量 / 名义额</th><th>失败路径 · 个人回收</th><th>成功路径 · Hype 剩余</th></tr></thead><tbody id="position-list-rows"></tbody></table></div>
@@ -92,7 +179,8 @@
           </div>
         </section>
       </details>
-      <details id="desk-details" name="workbench-view"><summary hidden>高级设置</summary>
+      </details>
+      <details id="desk-details" class="workbench-view"><summary>高级设置</summary>
       <details class="desk-group" id="account-details"><summary>账户与持仓</summary>
         <div class="selectors">
           <label
@@ -229,9 +317,10 @@
           <p id="field-sources"></p>
         </details>
       </details>
+      <details class="desk-group" id="pf-rules"><summary>Funded 提现与风险规则</summary><div class="form" id="withdrawal-fields"></div></details>
       <details class="desk-group" id="funds-details"><summary>资金规则</summary>
       <section class="card" id="plan-settings">
-        <h2 id="plan-heading">开考前资金规划</h2>
+        <button type="button" id="restart-eval" hidden>开始新一轮模拟考核</button><h2 id="plan-heading">开考前资金规划</h2>
         <div class="form plan-form" id="plan-fields"></div>
         <p id="plan-basis"></p>
         <label><input type="checkbox" id="plan-cross-flat" /> 本次规划采用双边全仓、空仓且无挂单</label>
@@ -241,9 +330,9 @@
           <div>
             <h3>计算条件</h3>
             <label
-              >按此阶段规则计算<select id="stage">
-                <option value="challenge">考核 · 固定失败线</option>
-                <option value="funded">出金 · 首次分成</option>
+              >资金阶段<select id="stage">
+                <option value="challenge">考核阶段（Evaluation）</option>
+                <option value="funded">Funded 阶段（出金分成）</option>
               </select></label
             ><label>保护本金 B（含已付报名费，U）<input id="B" inputmode="decimal" /></label
             ><label>成功平仓后 Hype 最低权益 R_success（U）<input id="R_success" inputmode="decimal" /></label><label>开仓后最低可用抵押品 R_free（U）<input id="R_free" inputmode="decimal" /></label>
@@ -251,16 +340,7 @@
 
         <p>以下为用户规则，可按当前账户修改。所有资金按 USDC 等值（U）核算。</p>
         <p id="profile-source"></p>
-        <label
-          >已到账外部资金币种<select id="externalCurrency">
-            <option>USDC</option>
-            <option>USD</option>
-            <option>USDT</option>
-            <option value="OTHER">其他（手工估值）</option>
-          </select></label
-        >
-        <p id="external-value"></p>
-        <div class="form" id="rule-fields"><label hidden>分成收款账户<select id="receiptSource"><option value="external">已到账外部资金</option><option value="hl">Hype 权益</option></select></label></div>
+        <p id="deadline-clock"></p><div class="form" id="rule-fields"></div>
         <p>
           现金范围按当前权益计算。条件仓位按双边盘口、差额成交费及数量步长核算，假设到达边界期间标的同步变动；未来基差、滑点变化和资金费待核实。
         </p>
@@ -280,7 +360,7 @@
           <strong id="fail-summary">—</strong><span id="cash-bridge"></span><span id="fail-parts"></span><span id="fail-change"></span>
         </article>
         <article>
-          <h2 id="pass-heading">成功路径预计 Hype 账户权益（双边平仓、分成到账前）</h2>
+          <h2 id="pass-heading">成功路径预计 Hype 账户权益（双边平仓、按规则提现前）</h2>
           <strong id="pass-summary">—</strong><span id="pass-bridge"></span><span id="pass-change"></span>
         </article>
         <article>
@@ -296,7 +376,7 @@
           <strong id="success-hl">—</strong><span id="summary-margin"></span>
         </article>
         <article>
-          <h2>两日考核 · 截止与可达性</h2><span id="deadline-clock"></span>
+          <h2>两日考核 · 截止与可达性</h2>
           <strong id="reach-label">未验证</strong><span id="summary-buffer"></span>
         </article>
         <div class="desk-ratios">
@@ -472,12 +552,13 @@
       <footer><a href="/dev/replay">开发测试 · 行情回放</a></footer>
       </details>
       </details>
-        <details class="desk-group" id="stress-guide"><summary>压力假设</summary>
+        <details class="desk-group" id="stress-guide"><summary>风险压力与平仓深度</summary>
           <p>分别配置不利基差、双边报价不同步、单边调仓延迟、不利跳价和持有期间累计资金费。组合情景在完整盘口、撤一档、撤两档下叠加已配的不利价格偏移，按实际调仓差额计延迟成本。资金费可填持有期总支出（U）或用逗号分隔的逐期不利费率（基点）。逐期测算沿用同一目标仓位，按路径内最高原生名义额计提。两种预算同时填写时取较大值，每条路径只扣一次。空白表示未配置，手工填 0 表示采用零压力假设。</p>
+        <p>平仓深度依次检验完整盘口（A）、撤去第一档（B）、撤去前两档（C）。</p><label>平仓深度不足（D）<select id="hardDepthD"><option value="">仅观察可见退出深度不足</option><option value="required">硬性约束，要求双边全量退出证明</option></select></label>
           <div class="form" id="stress-fields"></div>
+          <details><summary>独立基差与先后成交</summary><p id="venue-report" style="white-space:pre-line"></p></details>
         </details>
-      <details class="desk-group" id="connection-details"><summary>合约规格与行情连接</summary>
-      <details id="vest-spec-details"><summary>Vest 合约规格与手工确认</summary>
+      <details class="desk-group" id="vest-spec-details"><summary>合约参数</summary>
         <p id="vest-spec-source"></p>
         <p><a href="https://api-gateway.hz.vestmarkets.com/v3/exchangeInfo" target="_blank" rel="noreferrer">Vest 合约接口</a> · <a href="https://docs.vestmarkets.com/platform/perpetual-contract-specifications" target="_blank" rel="noreferrer">Vest 官方永续规格</a></p>
         <form id="vest-spec-form">
@@ -501,6 +582,7 @@
         </form>
       </details>
 
+      <details class="desk-group" id="connection-details"><summary>行情接口</summary>
       <section class="card" id="connections">
         <h2>实时行情与快照来源</h2>
         <p id="quotes"></p><p id="clock-skew"></p>

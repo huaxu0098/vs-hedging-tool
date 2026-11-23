@@ -24,7 +24,7 @@ const market = {
     maintMarginRatio: '0.01'
   }
 };
-const r = { ...rules, mode: 'keepPF' };
+const r = { ...rules,challengeStart:at,twoDayUpPct:'10000',twoDayDownPct:'100', mode: 'keepPF' };
 const calc = (profile = r, a = accounts, m = market, time = t) => calculateCurrent(profile, a, m, {}, time);
 test('当前权益独立给出区间，仓位留空与显式零有不同语义', () => {
   const x = calc(r, { pf: { at, equity: '10000' }, hl: { at, equity: '409' } }, {});

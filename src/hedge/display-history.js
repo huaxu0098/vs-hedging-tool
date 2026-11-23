@@ -24,19 +24,36 @@ function verifyPressureSummary(row,scan) {
   function buffer(minimum,threshold,endpoint) {
     if (minimum==null) return null;
     const witness=cases.find(c=>c.id===minimum.id);
-    if (!witness?.configured || witness[endpoint]?.cash!==minimum.value)
+    if (!witness?.verified || witness[endpoint]?.cash!==minimum.value)
       throw Error('本帧最低现金缺少可对账的情景');
     return out(dec(minimum.value).minus(threshold));
   }
-  const fail=buffer(summary.minFailure,scan.ctx.book.B,'fail');
-  const success=buffer(summary.minSuccess,scan.ctx.params.R,'success');
+  const successAmounts=known.flatMap(c=>c.success.personalFunds?[c.success.personalFunds.final]:[]).filter(v=>v!=null);
+  const witness=summary.successFinal;
+  if (successAmounts.length ? !witness || !min(...successAmounts).eq(witness.value) ||
+      known.find(c=>c.id===witness.id)?.success.personalFunds?.final!==witness.value : witness!=null)
+    throw Error('成功提现后资金与最低情景不一致');
+  for (const [name,field] of [['worstFinal','final'],['worstAvailable','before']]) {
+    const amounts=known.flatMap(c=>[c.fail,c.success]).map(e=>e.personalFunds?.[field]).filter(v=>v!=null);
+    const witness=summary[name];
+    const endpoint=known.find(c=>c.id===witness?.id)?.[witness?.endpoint];
+    const bothPaths=['fail','success'].every(end=>known.some(c=>c[end].personalFunds?.[field]!=null));
+    if (bothPaths ? !witness || endpoint?.personalFunds?.[field]!==witness.value ||
+        !min(...amounts).eq(witness.value) : witness!=null) throw Error('个人资金极值与已核价压力情景不一致');
+  }
+  const fail=buffer(summary.minFailure,scan.ctx.params.baseRecovery ?? scan.ctx.book.B,'fail');
+  const success=buffer(summary.minSuccess,scan.ctx.params.baseReserve ?? scan.ctx.params.R,'success');
   const both=fail==null || success==null ? null : out(min(fail,success));
-  if (!cashBuffers || cashBuffers.fail!==fail || cashBuffers.success!==success || cashBuffers.minimum!==both)
+  if (scan.ctx.stage==='challenge' && (summary.M_eval!==both || known.some(c=>[c.fail,c.success].some(e=>
+      e.personalFunds && (e.personalFunds.projectedPayout!=='0' || e.personalFunds.final!==e.personalFunds.hype)))))
+    throw Error('考核资金混入了 Funded 提现或缓冲不一致');
+  if (summary.M_verified!==both || summary.M_full!==(cases.every(c=>c.verified && c.fail.cash!=null && c.success.cash!=null)?both:null) || !cashBuffers || cashBuffers.fail!==fail || cashBuffers.success!==success || cashBuffers.minimum!==both)
     throw Error('目标仓位的最差现金缓冲与本帧资金门槛不一致');
 }
 
 function finalizeSnapshot(view) {
   const { trace, ratioScan: { plans } } = view;
+  if(plans?.collection && plans.collection.snapshotId!==trace.id) throw Error('方案集合与报价、参数版本不一致');
   const byKey = new Map(plans?.rows.map(row => [row.key, row]));
   // Only older on-disk reports need to resolve named objectives.
   const keys = plans?.targetKeys ?? planObjectives.map(([label]) =>
@@ -48,12 +65,23 @@ function finalizeSnapshot(view) {
   const pressure=plans?.pressure;
   if (pressure?.row && (pressure.key!==pressure.row.key || !pressure.row.configuredPass ||
       !['feasible','conditional'].includes(pressure.status))) throw Error('流动性压力最大仓位与结算证据不一致');
-  const targets=[baseTargets[0],pressure?.row ?? null,baseTargets[1],baseTargets[2]];
-  if (trace.model===modelVersion && pressure?.row) {
-    const summary=pressure.row.pressureSummary, scan=view.ratioScan;
+  const targets=[baseTargets[0],pressure?.row ?? null,baseTargets[1],baseTargets[2],plans?.cashPriority?.row??null];
+  const action=plans?.decision?.action;
+  if(action) {
+    const d=plans.decision, dir=d.directions.find(v=>v.sign===d.adopted);
+    const level=dir?.levels.find(v=>v.percent===d.percent);
+    if(action.sign!==d.adopted || (d.mode==='move'
+      ? !level?.complete || level.requiredPosition.qty!==action.pf || level.choice?.hl!==action.hl
+      : dir?.maxFeasiblePosition?.qty!==action.pf || dir?.maxFeasiblePosition?.hl!==action.hl))
+      throw Error('采用目标与本帧方向、规模证明不一致');
+  }
+  for(const search of [pressure,plans?.cashPriority,action && {key:action.key,row:action}]) {
+    if(trace.model!==modelVersion || !search?.row) continue;
+    if(search.key!==search.row.key || !search.row.configuredPass) throw Error('压力目标与候选证据不一致');
+    const summary=search.row.pressureSummary, scan=view.ratioScan;
     const active=summary?.cases?.filter(item=>item.configured) ?? [];
     const capital=dec(scan.ctx.book.B).plus(scan.ctx.params.recoveryBuffer??'0');
-    if (summary?.status!=='pass' || !['A','B','C'].every(id=>active.some(c=>c.id===id)) ||
+    if (summary?.status!=='pass' || !(scan.ctx.hardDepthD?['A','B','C','D']:['A','B','C']).every(id=>active.some(c=>c.id===id)) ||
         active.some(c=>c.status!=='pass' || c.fail.cash==null || dec(c.fail.cash).lt(capital) ||
           c.success.cash==null || dec(c.success.cash).lt(scan.ctx.params.R)))
       throw Error('压力最大仓位未通过本帧资金门槛');
@@ -69,7 +97,7 @@ function finalizeSnapshot(view) {
     if (all?.key!=null && (!pressure.row?.pressureSummary?.coverage?.allSpecifiedPassed || all.key!==pressure.key))
       throw Error('全部指定压力最大值缺少对应候选的完整核验');
   }
-  for (const row of new Set(targets.filter(Boolean))) {
+  for (const row of new Set([...targets,action].filter(Boolean))) {
     if (trace.model===modelVersion && row.pressureSummary) verifyPressureSummary(row,view.ratioScan);
     if (row.pressureSummary && (row.pressureSummary.key!==row.key || row.pressureSummary.leverage!==row.leverage)) throw Error('压力结果与本帧目标仓位不一致');
     if (dec(row.pf).cmp(0) !== row.sign || (dec(row.hl).cmp(0) && dec(row.hl).cmp(0) !== -row.sign))
@@ -129,7 +157,7 @@ export function publicationState(result,snapshot,market,blocked=false) {
   return 'ready';
 }
 
-export function createSolutionSnapshot(result) {
+export function createSolutionSnapshot(result, previous) {
   const scan = result.baseScan ?? result.ratioScan;
   const { inputs, ...trace } = result.trace;
   if (trace.model!==modelVersion) throw Error('求解器版本已变更，本帧仅可作为历史记录');
@@ -137,7 +165,12 @@ export function createSolutionSnapshot(result) {
     throw Error('计算快照缺少行情、账户或规则版本');
   const { sets, buckets, representative, analysis, complete } = scan;
   const { book, params, market } = scan.ctx;
+  const prior=previous?.ratioScan.plans?.decision?previous.ratioScan.plans.decision.action:previous?.targets?.[1];
   const view = {
+    solverRunId:result.solverRunId ?? trace.id,
+    solveCause:result.solveCause,
+    previousSolve:previous?{id:previous.snapshotId,at:previous.trace.at,balance:previous.ratioScan?.plans?.pressure?.continuousBalance,
+      best:prior?.pressureSummary?.M_verified!=null?{h:prior.notionalRatio??out(dec(prior.hypeValue).div(prior.pfValue)),pf:prior.pf,hl:prior.hl,pfValue:prior.pfValue,hypeValue:prior.hypeValue,leverage:prior.leverage,M:prior.pressureSummary.M_verified}:null}:null,
     bookIdentity: bookIdentity(result.calculationMarket),
     prices: Object.fromEntries(
       ['pf', 'hl'].map((side) => {
@@ -169,17 +202,17 @@ export function createSolutionSnapshot(result) {
       buckets,
       representative,
       analysis,
-      plans: scan.plans && { pressure:scan.plans.pressure, focus:scan.plans.focus, targetKeys: scan.plans.targetKeys, rows: scan.plans.rows, comparison:scan.plans.comparison, fixed:scan.plans.fixed, eligible: scan.plans.eligible, pending: scan.plans.pending, pfQuote: scan.plans.pfQuote, hlQuote: scan.plans.hlQuote },
+      plans: scan.plans && { collection:scan.plans.collection,decision:scan.plans.decision,checkpoints:scan.plans.checkpoints, ratioCheckpoints:scan.plans.ratioCheckpoints, cashPriority:scan.plans.cashPriority, pressure:scan.plans.pressure, focus:scan.plans.focus, targetKeys: scan.plans.targetKeys, rows: scan.plans.rows, comparison:scan.plans.comparison, fixed:scan.plans.fixed, eligible: scan.plans.eligible, pending: scan.plans.pending, pfQuote: scan.plans.pfQuote, hlQuote: scan.plans.hlQuote },
       complete,
       ctx: {
-        book: { B: book.B },
+        stage:book.stage, deriveMoves:scan.ctx.checks?.exam?.deriveMoves===true, hardDepthD: scan.ctx.checks?.hardDepthD===true,
+        book: { B: book.B, share:book.share, platformShare:book.withdrawal?.platformShare },
         params: {
-          R: params.R, recoveryBuffer: params.recoveryBuffer,
-          target: params.target,
-          profitBasis: params.profitBasis,
-          externalPriced: params.externalPriced
+          R: params.R, baseReserve: params.baseReserve, baseRecovery:params.baseRecovery, successBuffer: params.successBuffer, recoveryBuffer: params.recoveryBuffer,
+          target: params.target,horizon:params.horizon,deadline:params.deadline,
+          profitBasis: params.profitBasis
         },
-        market: { pf: { unit: market.pf.unit }, hl: { unit: market.hl.unit } }
+        market: { pf: { unit: market.pf.unit, step:market.pf.step }, hl: { unit: market.hl.unit, step:market.hl.step } }
       }
     }
   };
@@ -200,7 +233,7 @@ export function displayHistory(storage) {
       previousKey = scope;
       previous = null;
       try {
-        const versions=[modelVersion,'AUTO-0.21.7','AUTO-0.21.6','AUTO-0.21.5','AUTO-0.21.4','AUTO-0.21.3','AUTO-0.21.2','AUTO-0.21.1'];
+        const versions=[modelVersion,'AUTO-0.21.27','AUTO-0.21.26','AUTO-0.21.25','AUTO-0.21.24','AUTO-0.21.23','AUTO-0.21.22','AUTO-0.21.21','AUTO-0.21.20','AUTO-0.21.19','AUTO-0.21.18','AUTO-0.21.16','AUTO-0.21.15','AUTO-0.21.14','AUTO-0.21.13','AUTO-0.21.12','AUTO-0.21.11','AUTO-0.21.10','AUTO-0.21.9','AUTO-0.21.8','AUTO-0.21.7','AUTO-0.21.6','AUTO-0.21.5','AUTO-0.21.4','AUTO-0.21.3','AUTO-0.21.2','AUTO-0.21.1'];
         let stored;
         for (const version of versions) {
           stored=storage.getItem(key(scope,version));

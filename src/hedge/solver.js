@@ -1,3 +1,4 @@
+import {examMove} from './reachability.js';
 import {
   D,
   dec,
@@ -11,7 +12,7 @@ import {
   estimateFill,
   solveBudgetBounds,
   solveExactBounds,
-  profitSplit
+  profitSplit, projectedShare, canClaimOnSuccess
 } from './math.js';
 import { verifyFundingPair } from './funding-formula.js';
 import { settlementBridge, sumPostings, checkPFBoundary } from './settlement-ledger.js';
@@ -525,6 +526,19 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
           hlDeltaQuantity: out(h.minus(qty(pos(s, m, 'hl'))))
         })
       : null;
+  if(options.exam) for(const [end,shift] of Object.entries(lines)) {
+    const price=out(dec(m.pf.mark).plus(dec(shift).times(m.pf.factor)));
+    const proof=examMove(options.exam,m.pf.mark,price);
+    if (proof.status!=='unknown' || !options.exam.deriveMoves)
+      constraints.push({...constraint('EXAM_TIME_'+end,proof.limit,out(dec(proof.percent).abs()),'%'),status:proof.status});
+    if(options.examEquityFloor!=null && paths) {
+      const ledger=paths[end].pf;
+      const start=dec(ledger.start).plus(ledger.entryFill).minus(ledger.entryFee);
+      const low=min(start,start.plus(ledger.move));
+      constraints.push({...constraint('EXAM_EQUITY_'+end,out(low),options.examEquityFloor,'U'),
+        status:low.gt(options.examEquityFloor)?'pass':'fail'});
+    }
+  }
   if (paths) {
     checkPFBoundary(paths.fail.pf,pfQty,'fail',p.floor,options.failureTrigger);
     checkPFBoundary(paths.pass.pf,pfQty,'pass',p.target,options.passTrigger);
@@ -535,12 +549,9 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
   }
   const personal = balances(s, { [m.id]: m.hl.mark });
   const payout =
-    p.stage === 'funded'
-      ? profitSplit(
-          out(projectSettlementEquity(s, m, 'pf', pfQty, lines.pass, 'net_settlement', options.catalog)),
-          p.baseline,
-          p.share
-        ).user
+    canClaimOnSuccess(p)
+      ? projectedShare(out(projectSettlementEquity(s, m, 'pf', pfQty, lines.pass, 'net_settlement', options.catalog)),
+          p, p.target, options.passTrigger)
       : '0';
   const extra = options.currentSnapshot ? nonnegative(p.k) : new D(0);
   const failureHypeCash =
@@ -768,7 +779,7 @@ export function evaluateCandidate(s, m, p, pfQty, hlQty, options = {}) {
     worstAvailableCash: out(min(protect, dec(successHypeCash).plus(s.external), ...scenarioCash)),
     paths,
     failureHypeCash,
-    externalReceived: out(dec(s.external)),
+    ...(!options.currentSnapshot && {externalReceived:out(dec(s.external))}),
     hlBeforePayout: successHypeCash,
     modelLiq,
     liqMark: liq,
@@ -814,7 +825,7 @@ export function profileInputs(s, params, m) {
     floor: s.stage === 'challenge' ? s.challengeFloor : s.fundedFloor,
     target: s.stage === 'challenge' ? s.challengeTarget : params.target,
     baseline: s.baseline,
-    share: s.share,
+    share: s.share, withdrawal:s.withdrawal,
     R: params.R,
     g: params.g,
     k: params.k,
@@ -858,7 +869,7 @@ function currentPFSizes(s, m, p, mode, theory, options) {
           .minus(s.roundOut)
           .minus(s.external)
           .minus(p.inTransit)
-          .minus(profitSplit(p.target, p.baseline, p.share).user),
+          .minus(profitSplit(p.target, p.baseline, p.share, p.withdrawal).user),
         p.target
       ]);
     for (const [cash, equity] of bounds) shifts.push([cash.minus(base).div(slope), equity]);
@@ -1150,7 +1161,7 @@ export function solve(s, m, params, options = {}) {
                           dec(s.ref)
                             .plus(options.currentSnapshot ? p.k : 0)
                             .plus(p.g)
-                            .minus(pp.stage === 'funded' ? profitSplit(target, p.baseline, p.share).user : 0)
+                            .minus(pp.stage === 'funded' ? profitSplit(target, p.baseline, p.share, p.withdrawal).user : 0)
                             .minus(s.external)
                             .minus(p.inTransit)
                             .plus(s.roundIn)

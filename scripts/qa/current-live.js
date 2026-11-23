@@ -35,9 +35,10 @@ const candidate = "document.querySelector('#legs').rows[1]?.cells[2].textContent
 const row = () => run("Array.from(document.querySelector('#legs').rows[1].cells, c=>c.textContent)");
 try {
   await send('Page.navigate', { url: desk + '/' });
-  await wait("!!document.getElementById('desk-details')");
+  await wait("!!document.getElementById('dailyUpPct')");
+  for(const [key,value] of Object.entries({dailyUpPct:'600',dailyDownPct:'100',twoDayUpPct:'600',twoDayDownPct:'100'})) await set(key,value);
   await run("document.getElementById('desk-details').open=true");
-  await wait("document.querySelector('#calc-status')?.textContent");
+  await wait("document.getElementById('resetBaseline') && document.getElementById('plan-cross-flat')?.checked");
   assert.equal(await val('funding-view'), 'plan');
   assert.equal(await run("document.querySelectorAll('#planLeverage,#hl-leverage').length"), 0);
   assert.equal(await run("document.getElementById('plan-cross-flat').checked"), true);
@@ -50,7 +51,7 @@ try {
     if(!raw || !desk.dataset.resultId || !el('trace-id').textContent.endsWith(desk.dataset.resultId)) return false;
     const rules=JSON.parse(raw).rules;
     return ['ready','updating'].includes(desk.dataset.state) &&
-      ['mode','stage','R_success','jumpBps','asyncBps','delayBps','adverseBps','fundingDebit','external','movePct','hlUtil']
+      ['mode','stage','R_success','jumpBps','asyncBps','delayBps','adverseBps','fundingDebit','movePct','hlUtil']
         .every(id=>String(rules[id]??'')===el(id).value);
   })()`;
   const hasPlan = freshFrame + " && document.querySelector('#best-two').textContent.includes('第二优 PF')";
@@ -61,7 +62,7 @@ try {
   assert.match(await text('#summary-status'), /AUTO_PARTIAL · 条件方案/);
   assert.match(await text('#plan-columns'), /失败端回收缓冲优先/);
   assert.match(await text('#plan-columns'), /成功端现金留存优先/);
-  assert.match(await text('#success-hl'), /考核利润不可分/);
+  assert.equal(await text('#success-hl'), '1600.00 U');
   assert.match(await text('#trace-id'), /AUTO-0.21/);
   const leverageCheck = await run(`(() => {
     const rows = Array.from(document.querySelector('#leverage-grid').rows, r => Array.from(r.cells, c => c.textContent));
@@ -152,6 +153,8 @@ try {
     await text('#pass-summary')
   );
   await b.set('#funding-view', 'account');
+  for(const [key,value] of Object.entries({dailyUpPct:'600',dailyDownPct:'100',twoDayUpPct:'600',twoDayDownPct:'100'}))
+    await set(key,value);
   assert.equal(await val('pf-equity'), '');
   assert.equal(await val('hl-qty'), '');
   assert.equal(await val('mode'), 'auto');
@@ -313,15 +316,13 @@ try {
   assert.match(await text('#rule-events'), /到期/);
   await set('stage', 'funded');
   await set('pf-equity', '10110');
-  await set('receivable', '80');
-  assert.match(await text('#rule-events'), /有分成待到账/);
+  assert.equal(await run("!!document.getElementById('receivable')"), false);
   await wait("document.querySelector('#rule-events').textContent.includes('参考点')", 15000);
   assert.equal(await val('hl-equity'), '409');
   assert.equal(await val('pf-equity'), '10110');
   done('R10', await text('#rule-events'));
   await set('stage', 'challenge');
   await set('deadline', '');
-  await set('receivable', '');
   await set('pf-equity', '10000');
   await b.set('#hl-source', 'api');
   await set('wallet', user);
@@ -408,11 +409,7 @@ try {
     await writeFile(process.env.DESK_SCREENSHOT, Buffer.from(image.data, 'base64'));
   }
   const free = await text('#margin-funds');
-  await set('external', '100');
-  await wait(recommended, 25000);
-  assert.equal(await text('#margin-funds'), free);
-  assert.match(await text('#protect-funds'), /509.00/);
-  assert.match(await text('#fail-parts'), /Hype 结算现金.*外部已到账 100.00 U/);
+  assert.equal(await run("document.getElementById('external')"),null);
   await set('movePct', '3');
   await wait("document.querySelector('#two-day').textContent.includes('五档') && " + recommended, 25000);
   console.log('AUTO both / 两日', await text('#protect-funds'), free, await text('#two-day'));
@@ -479,6 +476,8 @@ try {
     "document.querySelector('#bridge-pair')?.onclick && document.querySelector('#order-detail').textContent"
   );
   await b.set('#funding-view', 'account');
+  for(const [key,value] of Object.entries({dailyUpPct:'600',dailyDownPct:'100',twoDayUpPct:'600',twoDayDownPct:'100'}))
+    await set(key,value);
   await click('#bridge-pair');
   await wait("document.querySelector('#bridge-script').value.length > 0");
   const script = await val('bridge-script');

@@ -1,3 +1,4 @@
+import { venueFields } from './venue-scenarios.js';
 import { dec, out, positive, nonnegative } from './math.js';
 
 const known = new Set(['USD', 'USDC', 'USDT']);
@@ -46,16 +47,34 @@ export function requiredSpotAssets(pf, hl, rules) {
     convert(c?.settleAsset, 'USDC');
     if (c?.settlement === 'linear') convert(c.quoteAsset, 'USDC');
   }
-  if (hl?.settlement === 'linear') convert(pf?.quoteAsset, hl.quoteAsset);
-  if (Number(rules.external) > 0) convert(rules.externalCurrency, 'USDC');
+  const priceStress = Number(rules.adverseBps)>0 || venueFields.some(key => Number(rules[key]) > 0);
+  if (hl?.settlement === 'linear' || priceStress) convert(pf?.quoteAsset, hl?.quoteAsset);
   return assets;
 }
 
 function verifiedLeg(side, c, data, rates, now, ttl) {
   const venue = side === 'pf' ? 'VS' : 'Hype';
   if (c?.metadataConflict) throw Error('CONTRACT_METADATA_UNVERIFIED · ' + venue + ' 官方规格字段相互冲突');
-  if (!c || !known.has(c.quoteAsset) || !known.has(c.settleAsset))
-    throw Error('QUOTE_CURRENCY_UNVERIFIED · ' + venue + ' 报价币或结算币未核实');
+  if (!c || !known.has(c.quoteAsset) || !known.has(c.settleAsset)) {
+    const missing = [];
+    if (!c) {
+      if (side === 'pf' && data?.errors?.spec) missing.push(data.errors.spec);
+      else if (side === 'pf' && data?.specStatus === 'loading') missing.push('正在读取 Vest exchangeInfo 合约规格');
+      else missing.push('缺少合约规格响应');
+    } else {
+      if (!known.has(c.quoteAsset)) missing.push('quote(报价币)');
+      if (!known.has(c.settleAsset)) missing.push('settlement(结算/保证金币)');
+      if (Array.isArray(c.missingApiFields)) {
+        for (const f of c.missingApiFields) if (!missing.includes(f)) missing.push(f);
+      }
+    }
+    throw Error(
+      'QUOTE_CURRENCY_UNVERIFIED · ' +
+        venue +
+        ' 报价币或结算币未核实' +
+        (missing.length ? '（缺失或异常：' + missing.join('、') + '）' : '')
+    );
+  }
   if (
     (c.productType && c.productType !== 'perpetual') ||
     (c.payoffType && c.payoffType !== 'linear') ||

@@ -126,6 +126,9 @@ async function edit(id, value) {
 }
 try {
   await send('Page.navigate', { url: (process.env.CURRENT_URL ?? browser.url) + '/' });
+  await wait("!!document.getElementById('dailyUpPct')");
+  for(const [key,value] of Object.entries({dailyUpPct:'600',dailyDownPct:'100',twoDayUpPct:'600',twoDayDownPct:'100'}))
+    await set('#'+key,value,'input');
   await wait("!!document.getElementById('desk-details')");
   await run("document.getElementById('desk-details').open=true");
   await wait("typeof document.querySelector('#plan-cross-flat')?.onchange === 'function'");
@@ -154,6 +157,8 @@ try {
   await edit('R_success', '180');
   await readFrame('仅改留存101→180，无交集', "txt('formula-bounds').includes('180.00')", false);
   await set('#funding-view', 'account');
+  for(const [key,value] of Object.entries({dailyUpPct:'600',dailyDownPct:'100',twoDayUpPct:'600',twoDayDownPct:'100'}))
+    await set('#'+key,value,'input');
   assert.equal(await run("document.querySelector('#hl-equity').value"), '');
   assert.match(await browser.text('#auto-search'), /AUTO_DATA_BLOCKED/);
   // Isolate the cash-rule regression from the time needed to search much larger
@@ -177,10 +182,7 @@ try {
   assert.notEqual(newPrincipal.funding.lower, manual.funding.lower);
   assert.equal(newPrincipal.funding.upper, manual.funding.upper);
   await set('#quoteSkewMs', '5000', 'input');
-  await edit('external', '10');
-  const external = await readFrame('已到账外部资金0→10', "txt('formula-inputs').includes('已到账 10.00 U')");
-  assert.equal(external.funding.C_H, newPrincipal.funding.C_H);
-  assert.notEqual(external.funding.lower, newPrincipal.funding.lower);
+  assert.equal(await run("!!document.getElementById('external')"),false);
   await edit('pf-equity', '10050');
   const eq = await readFrame('仅改当前PF权益10000→10050', "txt('formula-inputs').includes('10050.00')");
   assert.equal(eq.funding.loss, '650');

@@ -1,5 +1,5 @@
 import { auditCross } from './cross-check.js';
-import { dec, out, max, profitSplit, normalizeExposure } from './math.js';
+import { dec, out, max, canClaimOnSuccess, profitSplit, normalizeExposure } from './math.js';
 import { legalSegments, position, unit } from './ratio-domain.js';
 import {
   pathMetrics,
@@ -107,16 +107,34 @@ function pfBoundary(ctx, pf, p) {
     h = ctx.market.hl,
     denominator = pf.slope.abs(),
     direction = pf.slope.cmp(0);
-  const shifts = [p.floor, p.target].map((target) => [
-    decimal(target).minus(pf.settled[0]).times(direction),
-    pf.settled[1].times(-direction)
-  ]);
+  // pf.slope = sign * step * unit * factor * (1 - sign * rate) = markSlope * kNet.
+  // Scaling mark_equity shifts by kNet keeps the exact common denominator across both triggers.
+  const kNet = decimal('1').minus(decimal(l.rate).times(pf.sign));
+  const shifts = [
+    [p.floor, ctx.checks.failureTrigger ?? 'net_settlement'],
+    [p.target, ctx.checks.passTrigger ?? 'net_settlement']
+  ].map(([target, trigger]) =>
+    trigger === 'mark_equity'
+      ? [
+          decimal(target).minus(pf.marked[0]).times(direction).times(kNet),
+          pf.marked[1].times(-direction).times(kNet)
+        ]
+      : [
+          decimal(target).minus(pf.settled[0]).times(direction),
+          pf.settled[1].times(-direction)
+        ]
+  );
   const valid = [],
     risk = [];
   const one = (a, b, strict = false) => plane([a, b, 0, 0], strict);
   for (const [k, [a, b]] of shifts.entries()) {
     const direction = pf.sign * (k === 0 ? -1 : 1);
     valid.push(one(a.times(direction), b.times(direction), true));
+    const limit=direction>0?ctx.checks.exam?.up:ctx.checks.exam?.down;
+    if (limit!=null) {
+      const maxShift=decimal(l.mark).times(limit).div(100);
+      risk.push(one(a.times(l.factor).times(-direction),denominator.times(maxShift).minus(b.times(l.factor).times(direction))));
+    }
     for (const leg of [l, h])
       valid.push(one(a.times(leg.factor), denominator.times(leg.mark).plus(b.times(leg.factor)), true));
     const notional = lotValue(l),
@@ -131,7 +149,10 @@ function pfBoundary(ctx, pf, p) {
     for (const [sa, sb] of [
       [decimal(0), decimal(0)],
       [a, b]
-    ])
+    ]) {
+      if(ctx.checks.examEquityFloor!=null)
+        risk.push(one(denominator.times(pf.marked[0].minus(ctx.checks.examEquityFloor)).plus(change.times(pf.sign).times(sa)),
+          denominator.times(pf.marked[1]).plus(change.times(pf.sign).times(sb)),true));
       for (const tier of l.tiers) {
         const x = change.times(decimal(pf.sign).minus(tier.mmr));
         risk.push(
@@ -144,6 +165,7 @@ function pfBoundary(ctx, pf, p) {
           )
         );
       }
+    }
   }
   return { denominator, shifts, valid, risk };
 }
@@ -188,11 +210,11 @@ function cell(ctx, p, pfSegment, hypeSegment, common) {
     afterCreditProfit = [],
     loss = [];
   const feesLine = hypeSegment.settled.map((v, k) => v.minus(k === 0 ? extra : 0));
-  const payout = p.stage === 'funded' ? profitSplit(p.target, p.baseline, p.share).user : null;
+  const payout = canClaimOnSuccess(p) ? profitSplit(p.target, p.baseline, p.share, p.withdrawal).user : null;
   const threshold = decimal(p.B).minus(book.external);
   const extraBuffer = decimal(ctx.params.recoveryBuffer ?? 0);
   const buffered = [], fundedGuard = [];
-  const roundFloor = payout != null && p.C_ref != null
+  const roundFloor = p.stage === 'funded' && payout != null && p.C_ref != null
     ? decimal(p.C_ref).plus(p.contributions).minus(p.withdrawals).plus(p.g).minus(payout).minus(book.external)
     : null;
   const costBasis =
@@ -382,6 +404,8 @@ function stoppedBeforeExit(ctx, c, key, audit, initial) {
     if (test.status !== 'pass' || !test.proof?.continuous ||
         (test.pfStatus && test.pfStatus !== 'pass')) return '路径风险未充分验证';
   }
+  if (c.constraints.some(x=>x.code==='EXAM_TIME_'+key && x.status!=='pass')) return '期限内触线幅度超出假设或未知';
+  if (c.constraints.some(x=>x.code==='EXAM_EQUITY_'+key && x.status!=='pass')) return '先触及额外考核权益限制';
   if (c.code === 'FEASIBLE') return null;
   if (c.constraints.some(x => (x.code === 'hl_INTRAPATH_' + key || x.name === 'Hype 成交延迟（原仓）') && x.status === 'fail'))
     return 'Hype 途中压力路径触线或价格越界';
@@ -496,12 +520,15 @@ function auditHypePaths(ctx,c) {
   }
   return result;
 }
-export function inspectRatio(ctx, point, { includeLeverageGrid = false, includePathAudit = false, fixedLeverage = null } = {}) {
+export function inspectRatio(ctx, point, { includeLeverageGrid = false, includePathAudit = false, includeConstraints=false, fixedLeverage = null, minimizeMargin = false, fastProbe = false } = {}) {
   const { market, book, checks, params } = ctx,
     p = profileInputs(book, params, market);
   const pf = out(decimal(market.pf.step).times(point.i).times(point.sign)),
     hl = out(decimal(market.hl.step).times(point.j).times(-point.sign));
-  const c = evaluateLeverageGrid(book, market, p, pf, hl, { ...checks, scanRiskOnly: true }, fixedLeverage);
+  const c = evaluateLeverageGrid(book, market, p, pf, hl, { ...checks, scanRiskOnly: true, minimizeMargin, leverageEarlyExit: !includeLeverageGrid && fixedLeverage == null }, fixedLeverage);
+  if (fastProbe && c.code !== 'FEASIBLE') {
+    return { ...point, pf, hl, physical: false, fail: null, success: null };
+  }
   const path = c.endpointStress,
     fail = decimal(path?.failureCash ?? c.failureCash),
     success = decimal(path?.successHypeCash ?? c.hlBeforePayout);
@@ -519,13 +546,11 @@ export function inspectRatio(ctx, point, { includeLeverageGrid = false, includeP
   const coversWithBuffer = fail.gte(decimal(p.B).plus(params.recoveryBuffer ?? 0));
   const successPersonal = success.plus(book.external);
   const funded =
-    p.stage === 'funded'
+    canClaimOnSuccess(p)
       ? {
           eligible: c.expectedUserPayout,
           ifCredited: out(successPersonal.plus(c.expectedUserPayout)),
           ifCreditedNet: successNet == null ? null : out(successNet.plus(c.expectedUserPayout)),
-          pending: params.pendingPayout ?? null,
-          received: params.receivedPayout ?? null
         }
       : null;
   const entry = c.constraints.filter(x => /_(INITIAL_MARGIN|FREE_RESERVE|AVAILABLE|UTILIZATION|SWITCH_MARGIN|SWITCH_TIER|ORDER_LEVERAGE|TIER_LEVERAGE)$/.test(x.code));
@@ -558,6 +583,7 @@ export function inspectRatio(ctx, point, { includeLeverageGrid = false, includeP
         ...Object.values(audit??{}).flatMap(group=>Object.values(group))
       ]) : 'unknown'
     },
+    ...(includeConstraints && {constraints:c.constraints}),
     pfValue: c.vsNotional,
     hypeValue: c.hlNotional,
     failStop, passStop,
@@ -604,14 +630,15 @@ export function inspectRatio(ctx, point, { includeLeverageGrid = false, includeP
     failProfitable: physical && failNet != null && failNet.gt(0),
     passProfitable: physical && successNet != null && successNet.gt(0),
     profitable: physical && failNet != null && failNet.gt(0) && successNet.gt(0),
-    reason: c.constraints.find((x) => x.status !== 'pass'),
+    reason: c.constraints.find(x=>x.status==='fail') ?? c.constraints.find(x=>x.status==='unknown'),
     lines: c.lines,
     paths: c.paths,
     stress: path
   };
 }
 function scanSegments(ctx, venue, sign) {
-  const segments = legalSegments(ctx, venue, sign);
+  let segments = legalSegments(ctx, venue, sign);
+  if(ctx.params.openingCapacity && venue==='hl') segments=segments.filter(s=>s.hi>=1).map(s=>({...s,lo:Math.max(1,s.lo)}));
   if (ctx.params.mode !== (venue === 'pf' ? 'keepPF' : 'keepHL')) return segments;
   const index = position(ctx.book, venue).times(sign).div(ctx.market[venue].step);
   if (!index.isInteger() || index.lt(0) || !Number.isSafeInteger(index.toNumber())) return [];
@@ -619,7 +646,7 @@ function scanSegments(ctx, venue, sign) {
   return segments.filter((s) => s.lo <= lot && lot <= s.hi).map((s) => ({ ...s, lo: lot, hi: lot }));
 }
 
-export function buildRatioScan(ctx, { maxVisits = 3500000, cache } = {}) {
+export function buildRatioScan(ctx, { maxVisits = 3500000, cache, fixedLot, searchDirection } = {}) {
   const legs = {};
   for (const venue of ['pf', 'hl']) {
     const calc = () => [1, -1].map((sign) => scanSegments(ctx, venue, sign));
@@ -629,7 +656,7 @@ export function buildRatioScan(ctx, { maxVisits = 3500000, cache } = {}) {
           'lots-' + venue,
           [
             ctx.market.id,
-            ctx.params.mode,
+            ctx.params.mode, ctx.params.openingCapacity,
             leg,
             ctx.book[venue],
             Object.values(ctx.book.positions).filter((p) => p.venue === venue)
@@ -638,7 +665,13 @@ export function buildRatioScan(ctx, { maxVisits = 3500000, cache } = {}) {
         )
       : calc();
   }
-  const scan = () => scanLotRanges(ctx, maxVisits, legs, cache);
+  // A one-size parameter trial needs only its own PF slice. Keep every
+  // executable Hype lot and every leverage setting at this size.
+  if(fixedLot) {
+    legs.pf=legs.pf.map(segments=>segments.filter(v=>v.sign===fixedLot.sign && v.lo<=fixedLot.i && v.hi>=fixedLot.i)
+      .map(v=>({...v,lo:fixedLot.i,hi:fixedLot.i})));
+  }
+  const scan = () => scanLotRanges(ctx, maxVisits, legs, cache, searchDirection);
   if (!cache) return scan();
   // Quantity changes deeper than the executable frontier leave all affine
   // segments unchanged. Reuse the exact subdivision and its subset reports.
@@ -650,7 +683,7 @@ export function buildRatioScan(ctx, { maxVisits = 3500000, cache } = {}) {
   const previous = cache.reuse('ranges', [ctx.book, ctx.params, checks, terms, legs, maxVisits], scan);
   return { ...previous, ctx };
 }
-function scanLotRanges(ctx, maxVisits, legs, cache) {
+function scanLotRanges(ctx, maxVisits, legs, cache, searchDirection) {
   if (!['pf','hl'].every(v=>continuousTiers(ctx.market[v].tiers)))
     throw Error('路径风险未充分验证：保证金档位不连续或斜率无法核实');
   const p = profileInputs(ctx.book, ctx.params, ctx.market);
@@ -661,6 +694,7 @@ function scanLotRanges(ctx, maxVisits, legs, cache) {
   const groups = guarded ? [...keys, 'eligible'] : keys;
   const sets = Object.fromEntries([...groups, 'high'].map((k) => [k, empty()])),
     cells = [];
+  const termSegments=[];
   let visits = 0,
     complete = true;
   const old = position(ctx.book, 'hl');
@@ -671,10 +705,17 @@ function scanLotRanges(ctx, maxVisits, legs, cache) {
   const oldPath = ctx.checks.stress
     ? validateMargin(ctx.book, ctx.market, 'hl', out(old), ['0', out(delay), out(delay.neg())],undefined,'0',{openFree:ctx.market.hl.free}).at(-1)
     : null;
-  for (const sign of [1, -1]) {
+  for (const sign of searchDirection?[searchDirection]:[1,-1]) {
     const hypeSegment = legs.hl[sign > 0 ? 1 : 0];
     for (const pfSegment of legs.pf[sign > 0 ? 0 : 1]) {
       const common = pfBoundary(ctx, pfSegment, p);
+      if(ctx.params.openingCapacity) {
+        // Within one PF depth segment the native trigger change in percent
+        // is a / lots + b. Hype quantity does not enter the PF trigger.
+        const scale=decimal(ctx.market.pf.factor).times(100).div(decimal(ctx.market.pf.mark).times(common.denominator));
+        const [fail,pass]=common.shifts.map(pair=>pair.map(x=>out(x.times(scale))));
+        termSegments.push({sign,lo:pfSegment.lo,hi:pfSegment.hi,fail,pass});
+      }
       for (const h of hypeSegment) {
         const c = cell(ctx, p, pfSegment, h, common);
         if (
@@ -710,6 +751,7 @@ function scanLotRanges(ctx, maxVisits, legs, cache) {
     for (const side of ['min', 'max'])
       if (set[side]) set[side].h = out(constant.times(set[side].j).div(set[side].i));
   }
+  if(searchDirection || ctx.params.openingCapacity) return {ctx,sets,cells,complete,visits,buckets:[],termSegments};
   const { buckets, pageIndex } = reportBuckets(ctx, p, sets, cells, cache);
   return {
     buckets, pageIndex,

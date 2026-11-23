@@ -27,8 +27,8 @@ const amountSum = (values) => values.reduce((a, v) => a.plus(dec(v)), new D(0));
 export function createBook({
   id,
   time,
-  B = '500',
-  purchaseFee = '91',
+  B = '1000',
+  purchaseFee = '142.50',
   pf = '10000',
   hl,
   external = '0',
@@ -40,9 +40,10 @@ export function createBook({
   profileVersion = 1,
   baseline = '10000',
   share = '0.8',
-  challengeTarget = '12000',
+  withdrawal,
+  challengeTarget = '11000',
   challengeFloor = '9400',
-  fundedFloor = '8000',
+  fundedFloor = '9400',
   currency = 'U',
   passTrigger = 'net_settlement',
   failureTrigger = 'net_settlement',
@@ -80,6 +81,9 @@ export function createBook({
     currency,
     baseline: out(positive(baseline)),
     share: out(ratio(share)),
+    ...(withdrawal && {withdrawal:{
+      reset:out(positive(withdrawal.reset ?? baseline)),platformShare:withdrawal.platformShare,
+      minimum:out(nonnegative(withdrawal.minimum ?? '0')),fee:out(nonnegative(withdrawal.fee ?? '0'))}}),
     challengeTarget: out(positive(challengeTarget)),
     challengeFloor: out(nonnegative(challengeFloor)),
     fundedFloor: out(nonnegative(fundedFloor)),
@@ -291,7 +295,8 @@ export function applyLedgerEvent(book, e) {
     requireThat(dec(s.hl).gte(cost), 'INSUFFICIENT_PURCHASE_CASH');
     s.hl = out(dec(s.hl).minus(cost));
     s.fees.registration = out(dec(s.fees.registration).plus(cost));
-    s.pf = s.baseline;
+    s.pf = '10000';
+    delete s.evaluationPassEquity;
     s.attemptId = p.attemptId;
     s.challengeStartedAt = iso(e.occurredAt);
     s.challengeDeadlineAt = iso(p.deadline);
@@ -305,9 +310,9 @@ export function applyLedgerEvent(book, e) {
     const key = validId(p.payoutId);
     if (Object.hasOwn(s.payouts, key)) return book;
     requireThat(s.status === 'FUNDED_ACTIVE' && !Object.keys(s.positions).length, 'SETTLEMENT_REQUIRED');
-    const split = profitSplit(s.pf, s.baseline, s.share);
-    requireThat(dec(split.gross).gt(0), 'NO_ELIGIBLE_PROFIT');
-    s.pf = out(dec(s.pf).minus(split.gross));
+    const split = profitSplit(s.pf, s.baseline, s.share, s.withdrawal);
+    requireThat(dec(split.net).gt(0), 'NO_ELIGIBLE_PROFIT');
+    s.pf = s.withdrawal?.reset ?? s.baseline;
     s.payouts[key] = { ...split, destination: null };
     s.status = 'PAYOUT_PENDING';
     s.pendingPayout = key;
@@ -375,6 +380,7 @@ export function applyLedgerEvent(book, e) {
         Date.parse(e.occurredAt) <= Date.parse(s.challengeDeadlineAt),
       'PASS_NOT_VERIFIED'
     );
+    s.evaluationPassEquity = out(dec(p.equity));
     s.status = 'CHALLENGE_PASS_PENDING_SETTLEMENT';
   } else if (e.type === 'challenge_reset') {
     requireThat(
@@ -382,7 +388,7 @@ export function applyLedgerEvent(book, e) {
       'SETTLEMENT_REQUIRED'
     );
     s.stage = 'funded';
-    s.pf = s.baseline;
+    s.pf = '10000';
     s.status = 'FUNDED_ACTIVE';
     beginRound(s, e.id);
   } else if (e.type === 'failure') {

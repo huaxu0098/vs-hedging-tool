@@ -53,7 +53,7 @@ const run = (m, fx = quotes, overrides = {}) => {
   const fields = { sourceKind: 'plan', qty: '0', orders: [], otherHold: '0', marginMode: 'cross' };
   return calculateCurrent(
     {
-      ...rules,
+      ...rules,challengeStart:at,twoDayUpPct:'10000',twoDayDownPct:'100',
       B: '160',
       investedCapital: '160',
       R_success: '20',
@@ -273,10 +273,29 @@ test('UI12 同价格不同盘口源时间废弃旧结果；盘口数量或规则
   assert.notEqual(key(next, fx).key, key(m).key);
   assert.equal(key(next, fx).context, key(m).context);
   assert.notEqual(key(next, fx, { B: '501' }).context, key(m).context);
-  assert.equal(refreshDelay(m, next, 100), 1700);
+  assert.equal(refreshDelay(m, m, 100), 900);
+  assert.equal(refreshDelay(m, next, 100), 0);
   assert.equal(refreshDelay(m, next, 1800), 0);
   next.hl.levels[1][0][0] = '103';
-  assert.equal(refreshDelay(m, next, 100), 300);
+  assert.equal(refreshDelay(m, next, 100), 0);
   next.hl.mark = '120';
-  assert.equal(refreshDelay(m, next, 100), 300);
+  assert.equal(refreshDelay(m, next, 100), 0);
+});
+
+test('同一源时刻的双边 Bid、Ask、Mark、深度及适用 FX 各自改变重算键',()=>{
+  const original=market('USDT');
+  const key=(m=original,r={},fx=quotes,a={})=>scanKeys(r,a,m,fx,'BTC').key;
+  for(const side of ['pf','hl']) {
+    for(const update of [
+      q=>q.levels[0][0][0]='98.8',q=>q.levels[1][0][0]='103.2',
+      q=>q.mark='99.8',q=>q.levels[1][0][1]='249',q=>q.levels[0].push(['98','8'])
+    ]) {
+      const m=structuredClone(original);
+      update(m[side]);assert.notEqual(key(m),key());
+    }
+  }
+  for (const patch of [{pfFee:'0.003'},{hlFee:'0.007'},{R_free:'7'}])
+    assert.notEqual(key(original,patch),key());
+  assert.notEqual(key(original,{},quotes,{hl:{leverage:'3'}}),key());
+  assert.notEqual(key(original,{},{...quotes,USDT:{...quotes.USDT,bid:'0.98'}}),key());
 });

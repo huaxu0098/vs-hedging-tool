@@ -281,15 +281,17 @@ export async function collectHype({ symbol, user = '', now = Date.now(), request
   }
   return result;
 }
-export function subscribeHype(scope, receive, onStatus, refresh) {
+export function subscribeHype(scope, receive, onStatus, refresh, onHealth=()=>{}) {
   let closed = false,
     ws,
     retry,
     tries = 0;
   function connect() {
     if (closed) return;
+    onHealth({connected:false,subscription:'connecting'});
     ws = new WebSocket(WS);
     ws.onopen = () => {
+      onHealth({connected:true,subscription:'subscribing'});
       tries = 0;
       onStatus('connected');
       refresh();
@@ -305,6 +307,7 @@ export function subscribeHype(scope, receive, onStatus, refresh) {
     };
     ws.onmessage = ({ data }) => {
       if (closed) return;
+      onHealth({lastMessageAt:date(Date.now())});
       try {
         const raw = JSON.parse(data),
           msg = decodeWS(raw, { ...scope, receivedAt: date(Date.now()) });
@@ -331,6 +334,89 @@ export function subscribeHype(scope, receive, onStatus, refresh) {
     }
   };
 }
+// A fresh socket gives each resubscription its own generation. Frames from
+// a retired connection cannot satisfy either channel of the new pair.
+export function subscribeHypeMarket(symbol,receive,onHealth) {
+  const types=['l2Book','activeAssetCtx'];
+  let socket,retry,watchdog,closed=false,attempt=0,backoff=500;
+  function retire(reason) {
+    const old=socket;
+    socket=null;
+    clearInterval(watchdog);
+    onHealth({connected:false,subscription:reason,heartbeat:false,continuous:false});
+    retry=setTimeout(connect,backoff);
+    backoff=Math.min(8000,backoff*2);
+    old?.close();
+  }
+  function connect() {
+    if(closed) return;
+    onHealth({connected:false,subscription:'connecting',heartbeat:false,continuous:false,
+      reconnectCount:attempt++,lastBookAt:null,lastMarkAt:null,lastPongAt:null,lastMessageAt:null});
+    try { socket=new WebSocket(WS); } catch {retire('disconnected');return;}
+    const ws=socket, started=Date.now(), ack=new Set(), counts=[0,0], stamps=[0,0];
+    let opened=0,pingAt=0,pongAt=0,streaming=false;
+    const active=()=>!closed && socket===ws;
+    function send(body) {
+      if(!active()) return;
+      try {ws.send(JSON.stringify(body));} catch {retire('disconnected');}
+    }
+    function ping() {pingAt=Date.now();send({method:'ping'});}
+    ws.onopen=()=>{
+      if(!active()) return;
+      opened=Date.now();
+      onHealth({connected:true,subscription:'subscribing'});
+      for(const type of types) send({method:'subscribe',subscription:type==='l2Book'
+        ? {type,coin:symbol,fast:true} : {type,coin:symbol}});
+      ping();
+    };
+    ws.onmessage=({data})=>{
+      if(!active()) return;
+      const now=Date.now();
+      onHealth({lastMessageAt:date(now)});
+      try {
+        const raw=JSON.parse(data);
+        if(raw.channel==='error') {retire('rejected');return;}
+        if(raw.channel==='pong') {
+          pongAt=now;
+          onHealth({heartbeat:true,lastPongAt:date(now)});
+        } else if(raw.channel==='subscriptionResponse') {
+          const sub=raw.data?.subscription;
+          if(raw.data.method==='subscribe' && sub?.coin===symbol && types.includes(sub.type)) ack.add(sub.type);
+        } else {
+          const index=types.indexOf(raw.channel);
+          if(index<0 || raw.data?.coin!==symbol) return;
+          const item=decodeWS(raw,{symbol,receivedAt:date(now)});
+          if(index===0 && (!item.levels.every(side=>side.length && side.every(([p,q])=>Number(p)>0 && Number(q)>0)) ||
+              Number(item.levels[0][0][0])>Number(item.levels[1][0][0]))) return;
+          const stamp=index===0?Date.parse(item.occurredAt):now;
+          if(stamp<=stamps[index] || now-stamp>3000 || stamp>now+1000) return;
+          if(stamps[index] && stamp-stamps[index]>3000) {retire('stale');return;}
+          counts[index]++;
+          stamps[index]=stamp;
+          receive(raw.channel,item);
+          onHealth(index===0?{lastBookAt:date(stamp)}:{lastMarkAt:date(stamp)});
+        }
+        if(!streaming && ack.size===2 && pongAt && counts.every(n=>n>=2) && now-Math.min(...stamps)<=3000) {
+          streaming=true;
+          backoff=500;
+          onHealth({subscription:'streaming',continuous:true});
+        }
+      } catch { /* Malformed frames cannot renew a channel clock. */ }
+    };
+    ws.onerror=ws.onclose=()=>{if(active()) retire('disconnected');};
+    watchdog=setInterval(()=>{
+      if(!active()) return;
+      const now=Date.now();
+      if(!opened) {if(now-started>8000) retire('disconnected');return;}
+      if((now-opened>6000 && !streaming) || stamps.some(t=>t && now-t>3000) ||
+          (pingAt>pongAt && now-pingAt>3000)) {retire('stale');return;}
+      if(now-pingAt>=8000) ping();
+    },200);
+  }
+  connect();
+  return ()=>{closed=true;clearTimeout(retry);clearInterval(watchdog);socket?.close();};
+}
+
 export function manualVs(text, currency, receivedAt) {
   check(['U', 'USD', 'USDC', 'USDT', 'EUR'].includes(currency), 'UNKNOWN_CURRENCY');
   check(!/(?:\d,\d{1,2}(?![\d,])|\d{4,},\d{3})/.test(text), 'AMBIGUOUS_NUMERIC_FORMAT');

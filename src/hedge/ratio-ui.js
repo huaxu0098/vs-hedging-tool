@@ -1,5 +1,9 @@
+import {drawCandidateSet,setupCandidateSet} from './candidate-ui.js';
+import {reachability} from './reachability.js';
+import {venueCases} from './venue-scenarios.js';
 import { publicationState } from './display-history.js';
-import { dec } from './math.js';
+import { exitDepthLabel } from './exit-liquidity.js';
+import { dec, out } from './math.js';
 import { inspectRatio, ratioSlice } from './ratio-scan.js';
 import { capitalGroups, reportGroups, subsetGroups, recoveryCushion } from './range-report.js';
 import { ledgerLabels, presentLedger } from './settlement-ledger.js';
@@ -39,11 +43,11 @@ const names = {
   protect: '失败端本金回收',
   survive: '成功端最低留存',
   both: '双路径交集合格',
-  profit: '双路径均净盈利',
+  profit: '提现前双路径均净盈利',
   legal: '全部合法候选（条件终点估值）',
   risk: '通过保证金检查',
   failProfit: '失败路径净盈利',
-  passProfit: '成功路径净盈利'
+  passProfit: '成功提现前净盈利'
 };
 // The existing scan already prices both directions. Inspect its legal lots on
 // demand at the representative size, using the same settlement ledgers.
@@ -91,10 +95,10 @@ function auditText() {
   const { row, scan } = audit;
   const lines = [
     ...executionComparison(scan, row),
-    'PF 有符号目标 ' + row.pf + ' / Hype ' + row.hl + ' · 源快照 ' + audit.snapshotId + ' · 分成到账前计入 Hype 权益 0 U',
+    'PF 有符号目标 ' + row.pf + ' / Hype ' + row.hl + ' · 源快照 ' + audit.snapshotId + ' · PF 提现与 Hype 权益分列',
     '建议档位 ' + (row.lev ?? '空仓') + ' · 初始占用 ' + usd(row.initial) + ' · 开仓后可用 ' + usd(row.free),
     'Hype 压力后维持余量 ' + (row.stress ? usd(row.surplus) : '未配置，基础情景 ' + usd(row.surplus)),
-    '若实际到账则个人分成 ' +
+    '成功路径按规则提现 ' +
       usd(row.payout) +
       '；净收益基准含报名费和待收回历史成本 ' +
       usd(scan.ctx.params.profitBasis)
@@ -142,13 +146,14 @@ const objectives = [
   ['base','基础情景最大仓位'],
   ['pressure','已配置压力下最大仓位'],
   ['failure','失败端回收缓冲优先'],
-  ['success','成功端现金留存优先']
+  ['success','成功端现金留存优先'],
+  ['cashPriority','最差现金缓冲优先']
 ];
 
 function objectiveName(index, scan) {
   if (index !== 1) return objectives[index][1];
   const scope = scan?.plans?.pressure?.scope;
-  if (scope === 'bookOnly') return 'A–C 已配置盘口压力下的最大候选';
+  if (scope === 'bookOnly') return 'A-C已配置盘口压力下的最大候选';
   if (scope === 'allSpecified') return '全部指定压力下最大仓位';
   return objectives[index][1];
 }
@@ -161,31 +166,233 @@ const fullCash = (plan, end) => {
 
 // The two pressure figures can be reached under different shocks. Keep each
 // cash amount paired with its scenario; a recorded A–C result may predate this audit.
-function showHeadline(snapshot,diagnostic) {
-  const [base,pressure]=snapshot.targets, scan=snapshot.ratioScan;
-  const stress=pressure?.pressureSummary;
+let orderSnapshot=null;
+function windowText(x) {
+  if(!x) return '缺少触线价格';
+  const amount=dec(x.percent);
+  return (amount.lt(0)?'跌 ':'涨 ')+amount.abs().toFixed(2)+'%'+(x.mark==null?'':' 至 '+fmt(x.mark,2))+' · '+
+    (x.reason??(x.status==='pass'?'在情景范围内':x.status==='fail'?'超出情景范围':'未配置'+(amount.lt(0)?'下跌':'上涨')+'波动情景'));
+}
+function expiryText(cutoff) {
+  if(cutoff?.status==='scenario') return '假设期间未触线，按截止价 '+fmt(cutoff.mark,2)+' 平仓，个人回收 '+settlementAmount(cutoff.cash)+'，考核提现 0 U';
+  if(cutoff?.status==='firstBoundary') return '指定截止价已达到或越过'+(cutoff.key==='pass'?'通过':'失败')+'线，未触线前提不成立';
+  if(cutoff?.status==='risk') return '无法估值 · 仓位或退出路径未通过核验';
+  return cutoff?.status==='notApplicable'?'当前阶段不适用':'缺少与本次考核截止时间匹配的 PF 退出价';
+}
+function actionRow(view) {
+  const d=view?.ratioScan.plans?.decision;
+  return d?d.action:view?.targets?.[1];
+}
+function orderParameters(side) {
+  const view=orderSnapshot, row=actionRow(view), desk=$('scan-desk');
+  if(!row || desk.dataset.state!=='ready' || desk.dataset.resultId!==view.snapshotId ||
+      $('current').dataset.stageClosed==='true') return null;
+  const delta=row.adjustments?.[side]?.remaining;
+  if(delta==null || dec(delta).isZero()) return null;
+  const venue=side==='pf'?'PF（Vest）':'Hype（Hyperliquid）';
+  const unit=view.ratioScan.ctx.market[side].unit;
+  return [venue+' '+view.prices[side].base+' 永续', '目标仓位 '+targetQty(row[side],{unit}),
+    '目标名义金额 '+settlementAmount(side==='pf'?row.pfValue:row.hypeValue),
+    '调整方向 '+(dec(delta).gt(0)?'买入':'卖出')+' · 下单数量 '+dec(delta).abs()+' '+(unit==='contract'?'张':unit),
+    ...(side==='hl' && row.leverage?['杠杆 '+row.leverage+'×']:[]),'行情快照 '+view.quoteSnapshotId,'结果版本 '+view.snapshotId].join('\n');
+}
+function showOptimum(snapshot) {
+  const row=actionRow(snapshot), prior=snapshot?.previousSolve, scan=snapshot?.ratioScan;
+  const proof=row?.pressureSummary, search=scan?.plans?.pressure;
+  const nominal=r=>r.notionalRatio??out(dec(r.hypeValue).div(r.pfValue));
+  const decision=scan?.plans?.decision;
+  const allowance=decision?.directions.find(v=>v.sign===decision.adopted)?.maxFeasiblePosition;
+  const alt=snapshot?.targets[4];
+  write('buffer-alternative',alt?'PF '+targetQty(alt.pf,scan.ctx.market.pf)+' / '+settlementAmount(alt.pfValue)+
+    ' · Hype '+targetQty(alt.hl,scan.ctx.market.hl)+' / '+settlementAmount(alt.hypeValue)+' · 比例 '+pct(nominal(alt),6)+
+    ' · 失败回收 '+settlementAmount(alt.pressureSummary.minFailure?.value)+' · 通过留存 '+settlementAmount(alt.pressureSummary.minSuccess?.value)+
+    ' · Hype 峰值保证金 '+settlementAmount(alt.pressureSummary.maxMarginUsed?.value)+' · 最低维持余量 '+settlementAmount(alt.pressureSummary.minSurplus?.value)+
+    ' · M_eval '+signedCash(alt.pressureSummary.M_eval)+' · 通过线 '+windowText(alt.pressureSummary.cases[0]?.success.exam)+' · 失败线 '+windowText(alt.pressureSummary.cases[0]?.fail.exam):snapshot?'无合格缓冲方案':'等待求解');
+  orderSnapshot=snapshot;
+  for(const side of ['pf','hl']) {
+    const d=decision, dir=d?.directions.find(v=>v.sign===d.adopted);
+    const level=dir?.levels.find(v=>v.percent===d.percent);
+    const diagnostic=!row && d?.mode==='move' && side==='pf'?level.requiredPosition:null;
+    const qty=row?dec(row[side]):diagnostic?.qty?dec(diagnostic.qty):null;
+    const unit=scan?.ctx.market[side].unit;
+    write('order-'+side+'-direction',qty?(diagnostic?'情景所需 · ':'')+(qty.gt(0)?'做多':qty.lt(0)?'做空':'空仓'):'—');
+    write('order-'+side+'-qty',qty?out(qty.abs())+' '+(unit==='contract'?'张':unit):d && side==='hl'?(level.complete && level.requiredPosition.i?'无可行仓位':'未核全'):'—');
+    write('order-'+side+'-value',row?settlementAmount(side==='pf'?row.pfValue:row.hypeValue):diagnostic?.notional?settlementAmount(diagnostic.notional):'—');
+  }
+  const adopted=decision?.directions.find(v=>v.sign===decision.adopted);
+  const selectedLevel=adopted?.levels.find(v=>v.percent===decision.percent);
+  const unresolved=decision?.mode==='maximum'?adopted?.status==='incomplete':decision && !selectedLevel?.complete;
+  const status=!snapshot?'等待有效输入':unresolved?'所选目标未核全':!row?'无可行方案':search?.reason;
+  for(const id of ['live-ratio','live-targets','live-margin','solve-change']) {
+    $(id).dataset.point=row?.key??'';
+    $(id).dataset.snapshotId=snapshot?.snapshotId??'';
+  }
+  write('live-ratio',row?pct(nominal(row),6):status);
+  const currentCase=proof?.cases.find(c=>c.id==='A');
+  write('branch-summary',currentCase?'已填写的资金条件通过 · 基础盘口通过线 '+windowText(currentCase.success.exam)+
+    ' ｜ 失败线 '+windowText(currentCase.fail.exam):search?.status==='none'?'没有同时满足已配置硬约束的仓位。见首页各方向的限制原因。':scan?.plans.decision?'所选目标缺少合格双边组合 · '+(scan.ctx.deriveMoves?'两日可达性未知，未配置方向波动情景':'各分支时间评估见仓位结果'):'等待本帧仓位核验');
+  const moves=$('required-moves');
+  moves.hidden=!(row && scan.ctx.stage==='challenge' && currentCase?.fail.mathMarks && currentCase?.success.mathMarks);
+  if (!moves.hidden) {
+    const describe=(label,path)=>{
+      const {start,trigger}=path.mathMarks;
+      const percent=dec(trigger).minus(start).div(start).times(100);
+      return label+' '+(percent.lt(0)?'下跌 ':'上涨 ')+percent.abs().toFixed(2)+'% 至 '+fmt(trigger,2);
+    };
+    write('required-moves','数学触线价 · Vest 起始价 '+fmt(currentCase.fail.mathMarks.start,2)+' · '+
+      describe('考核失败需',currentCase.fail)+' · '+describe('考核通过需',currentCase.success)+
+      (scan.ctx.deriveMoves?' · 考核期限内可达性未知（缺少方向波动情景）':' · 在已设考核波动情景内'));
+  }
+  const unit=scan?.ctx.market;
+  write('live-targets',row?'PF '+targetQty(row.pf,unit.pf)+'（'+settlementAmount(row.pfValue)+'） · Hype '+targetQty(row.hl,unit.hl)+
+    '（'+settlementAmount(row.hypeValue)+'，'+(row.leverage??'—')+'×）':'—');
+  write('live-margin',row?'最大 Hype 保证金占用 '+settlementAmount(proof.maxMarginUsed?.value)+
+    ' · 最低维持余量 '+settlementAmount(proof.minSurplus?.value)+' · '+'最差现金缓冲 '+signedCash(proof.M_verified)+
+    ' · 完整压力余量 '+(proof.M_full==null?'未知':signedCash(proof.M_full)):allowance?'允许上限 · Hype 杠杆 '+allowance.leverage+'× · 最大保证金占用 '+usd(allowance.margin)+' · 最低维持余量 '+usd(allowance.surplus):'—');
+  const format=x=>pct(x.notionalRatio??x.h,6)+' / PF '+x.pf+' '+unit.pf.unit+'（'+settlementAmount(x.pfValue)+'） / Hype '+x.hl+' '+unit.hl.unit+'（'+settlementAmount(x.hypeValue)+'）';
+  const values=[prior?'上次 '+time(prior.at)+' '+(prior.best?format(prior.best):'无合格目标'):'首帧，无上次求解',
+    '本次 '+(snapshot?time(snapshot.trace.at)+' ':'')+(row?format(row):status)];
+  if(prior?.best && row) {
+    const prev=prior.best;
+    const delta=(x,y,mult=1)=>dec(x).minus(y).times(mult);
+    const signed=x=>(x.gt(0)?'+':'')+out(x);
+    const bp=delta(nominal(row),prev.h,10000);
+    values.push('变化 '+signed(bp.toDecimalPlaces(6))+' bp · PF '+signed(delta(row.pf,prev.pf))+' '+unit.pf.unit+
+      ' · Hype '+signed(delta(row.hl,prev.hl))+' '+unit.hl.unit+' · 缓冲 '+signedCash(delta(proof.M_verified,prev.M)));
+    const sameLots=row.pf===prev.pf && row.hl===prev.hl;
+    values.push(sameLots && row.leverage===prev.leverage?'当前快照重新求解，最优候选未变':'最优候选已变化');
+    const balance=scan.plans.decision?null:search.continuousBalance;
+    if (sameLots && balance?.roundsToWinner && prior.balance?.roundsToWinner && !dec(balance.h).eq(prior.balance.h))
+      values.push('撤前两档盘口的连续平衡比例 '+pct(prior.balance.h,8)+' → '+pct(balance.h,8)+'。比例发生变化，但当前交易数量精度不足以产生新的可执行仓位');
+    if(bp.isZero()) values.push(row.pf===prev.pf && row.hl===prev.hl ?
+      '本帧仍选中同一最大规模，双边名义额之比相同':'仓位规模变化，名义金额比例相同');
+  }
+  write('solve-change',snapshot?[snapshot.solveCause,...values].filter(Boolean).join(' ｜ '):'');
+}
+function showHeadline(snapshot) {
+  const maximum=actionRow(snapshot), scan=snapshot.ratioScan;
+  const stress=maximum?.pressureSummary;
   const certified=stress?.status==='pass' && stress.minFailure?.value!=null && stress.minSuccess?.value!=null;
-  const target=certified ? pressure : base ?? diagnostic;
-  const fail=certified ? stress.minFailure.value : fullCash(target,'fail');
-  const pass=certified ? stress.minSuccess.value : fullCash(target,'pass');
-  const floor=scan.recoveryFloor ?? scan.ctx.book.B, reserve=scan.ctx.params.R, B=scan.ctx.book.B;
-  const source=certified?objectiveName(1,scan)+' · 已核价情景最低资金':base?
-    (scan.plans?.pressure?.status==='none'?'无可行压力仓位 · 基础最大资金对照':'基础最大资金对照 · 压力待核实'):'条件路径对照';
-  write('cash-source',source);
+  if(!certified) {
+    for(const id of ['fail-pf','pass-pf','fail-before','pass-before','scan-fail-cash','scan-pass-cash']) write(id,'—');
+    for(const id of ['scan-fail-summary','scan-pass-summary','scan-withdrawal','scan-final-worst','path-profit','stress-count','venue-report','trigger-paths','reach-windows']) write(id,'');
+    $('scan-cash').dataset.point='';
+    $('scan-cash').dataset.objective='';
+    const decision=scan.plans?.decision;
+    const cap=decision?.directions.find(v=>v.sign===decision.adopted)?.maxFeasiblePosition;
+    write('cash-source',cap?'允许上限的两条路径 · PF '+settlementAmount(cap.notional):'个人资金 · 暂无可核价的合格规模');
+    if(cap) {
+      write('scan-fail-cash',settlementAmount(cap.fail));write('scan-pass-cash',settlementAmount(cap.pass));
+    }
+    return;
+  }
+  const target=maximum;
+  const fail=stress.failComponent?.value??stress.minFailure.value;
+  const floor=scan.recoveryFloor ?? scan.ctx.book.B, B=scan.ctx.book.B;
+  const source='Evaluation · 两条路径的条件资金';
+  const noBuffers=!dec(scan.ctx.params.recoveryBuffer??'0').gt(0) && !dec(scan.ctx.params.successBuffer??'0').gt(0);
+  write('cash-source',source+(noBuffers?' · 极薄缓冲（未设置额外现金门槛）':''));
   const cash=$('scan-cash');
   cash.dataset.point=target.key??'';
-  cash.dataset.objective=certified?'pressure':base?'base':'diagnostic';
+  cash.dataset.objective=scan.plans?.decision?.mode??'maximumScale';
+  write('fail-before',settlementAmount(fail));
   write('scan-fail-cash',settlementAmount(fail));
-  write('scan-pass-cash',settlementAmount(pass));
+
+  const audit=target.pressureSummary;
+  const successCase=stress.successFinal?.id??stress.minSuccess.id;
+  const funds=audit?.cases.find(c=>c.id===successCase)?.success.personalFunds;
+
+  write('fail-pf',settlementAmount(audit.cases.find(c=>c.id===stress.minFailure.id)?.fail.pfEquity));
+  write('pass-pf',settlementAmount(audit.cases.find(c=>c.id===successCase)?.success.pfEquity));
+  const shareLabel=rate=>rate==null?'':'（'+out(dec(rate).times(100))+'%）';
+  write('pass-before',settlementAmount(funds?.before));
+  write('scan-pass-cash',settlementAmount(funds?.final));
+  write('scan-withdrawal',funds?.split?
+    '成功路径 · PF 合格利润 '+settlementAmount(funds.split.qualified)+' · 个人提现 '+settlementAmount(funds.projectedPayout)+shareLabel(scan.ctx.book.share)+
+    ' · 平台分成 '+settlementAmount(funds.split.platform)+shareLabel(scan.ctx.book.platformShare)+(funds.resetEquity!=null?' · 提现后 PF 基准 '+settlementAmount(funds.resetEquity):''):
+    '考核提现 0 U。通过后另开 10,000 U Funded 账户。');
+  const investment=scan.ctx.params.profitBasis;
+  const net=(value)=>signedCash(dec(value).minus(investment));
+  write('path-profit',investment==null || fail==null || funds?.final==null?'双路径净盈利 · 待取得个人投入与双端结算':
+    '已核价情景双路径净盈利 · '+(dec(fail).gt(investment) && dec(funds.final).gt(investment)?'均盈利':'未同时盈利')+
+    '（投入 '+settlementAmount(investment)+'，失败 '+net(fail)+'，考核通过 '+net(funds.final)+'）');
+  const coverage=audit?.coverage;
+  write('stress-count',coverage?'压力情景 · 已配置 '+audit.cases.filter(c=>c.configured).length+
+    ' / 通过 '+coverage.passed+' / 失败 '+coverage.failed+' / 未验证 '+coverage.unverified:'压力覆盖未知');
+  const priceLines=[], windowLines=[];
+  const horizon=scan.ctx.params.horizon, deadline=scan.ctx.params.deadline;
+  const now=snapshot.trace.at;
+  windowLines.push('假设持仓 '+(horizon?.holdHours?horizon.holdHours+' 小时':'未配置')+
+    ' · 考核截止 '+(deadline?new Date(deadline).toLocaleString('zh-CN'):scan.ctx.stage==='funded'?'本阶段不适用':'未配置')+
+    '。窗口截至持仓或考核截止的较早时刻，按已填幅度分段线性折算。');
+  const amplitude=value=>value==null?'未配置':value+'%';
+  windowLines.push('24 小时上行 / 下行幅度假设 '+amplitude(horizon?.dailyUpPct)+' / '+amplitude(horizon?.dailyDownPct)+'。');
+  windowLines.push('48 小时上行 / 下行幅度假设 '+amplitude(horizon?.twoDayUpPct)+' / '+amplitude(horizon?.twoDayDownPct)+'。');
+
+  for (const [end,id,label] of [['fail',stress.minFailure.id,'失败'],['success',successCase,'成功']]) {
+    const scenario=audit?.cases.find(c=>c.id===id);
+    const endpoint=scenario?.[end];
+    const path=endpoint?.prices;
+    if (path?.pf && path.hl) {
+      const legs=[['PF',path.pf],['Hype',path.hl]].map(([name,l])=>
+        name+' '+fmt(l.start)+' → '+fmt(l.mark)+'（'+fmt(l.changePct,2)+'%），净盈亏 '+signedCash(l.netPnl));
+      priceLines.push(label+' · '+scenario.label+' · '+legs.join(' / '));
+    } else {
+      priceLines.push(label+' · '+(endpoint?.reason??'未取得完整退出证据')+'，净盈亏待核实。');
+    }
+    const marks=endpoint?.mathMarks;
+    const start=marks?.start??path?.pf?.start;
+    const trigger=marks?.trigger??endpoint?.venue?.triggerMark??path?.pf?.mark;
+    if(start==null || trigger==null) {
+      windowLines.push(label+' · 数学触线价未知，无法核验可达性。');
+      continue;
+    }
+    const deriv=endpoint.derivation??audit.cases.find(c=>c.id==='A')?.[end]?.derivation;
+    if(deriv?.line!=null) priceLines.push('PF 数学触线价 = '+fmt(start)+' + ('+fmt(deriv.line)+' − '+
+      fmt(deriv.intercept,5)+') / '+fmt(deriv.slope,8)+' ≈ '+fmt(trigger)+'。分子为规则权益减零变动权益，分母为每个原生报价点的有符号权益变化。');
+    const percent=out(dec(trigger).div(start).minus(1).times(100));
+    const windows=reachability(percent,horizon,deadline,now);
+    windowLines.push(label+' · '+snapshot.prices.pf.base+' 以 Vest 永续标记衡量需变化 '+fmt(percent,2)+'%。'+windows.map(w=>
+      w.window+'h（有效 '+fmt(w.effective,1)+'h）'+(w.status==='unknown'?'窗口幅度缺失或冲突，可达性未知':
+        '幅度 '+fmt(w.bound,2)+'%，'+(w.status==='within'?'在假设范围内':'超出假设范围'))).join(' / '));
+    const breaches=Object.entries(endpoint.breach??{}).filter(([,mark])=>mark!=null)
+      .map(([side,mark])=>(side==='pf'?'Vest':'Hype')+' 途中首次触及维持线 '+fmt(mark));
+    windowLines.push(label+' · '+(breaches.join(' / ') || (endpoint.pathStatus==='pass'?
+      '该已核价路径的双边维持保证金检查通过，Hype 最低维持余量 '+settlementAmount(endpoint.minSurplus):
+      endpoint.reason??'提前触线待核实'))+
+      '。考核日亏损、追踪回撤等额外规则未建模，实际能否先于这些规则和期限到达仍未验证。');
+  }
+  write('trigger-paths',priceLines.join('\n'));
+  write('reach-windows',windowLines.join('\n'));
+  write('scan-final-worst',audit?.successFinal?'已核价两端最低个人资金 · 提现前 '+settlementAmount(audit.worstAvailable?.value)+
+    ' · 按规则提现后 '+settlementAmount(audit.worstFinal?.value):'两端资金待计算');
+  const basis=audit?.basis;
+  const q=snapshot.prices.pf.quote;
+  const basisLines=[basis?'当前基差（Hype 折合 '+q+' 减 Vest） '+fmt(basis.gap,4)+' '+q+'，'+fmt(basis.bps,3)+' bp · 汇率 '+fmt(basis.rate,9)+' '+q+'/'+snapshot.prices.hl.quote:'当前基差未知，缺少同帧汇率或报价',
+    '独立情景以双边同比例移动为起点。基差按同币种溢价率扩大或向零收敛。Vest 跳价可越过边界，Hype 跳价在共同移动前发生。Vest 先平时，Hype 从共同终点再走不利幅度；Hype 先平时，Vest 随后走完触线前的最后一段（按起始价 bp）。'];
+  for (const [id,label] of [['A','当前盘口基准'],...Object.entries(venueCases).map(([k,[v]])=>[k,v])]) {
+    const c=audit?.cases.find(c=>c.id===id);
+    if(!c?.configured) {basisLines.push(label+' · 未配置');continue;}
+    for(const [key,title] of [['fail','失败'],['success','成功']]) {
+      const p=c[key];
+      basisLines.push(label+' · '+title+' · '+(p.prices?
+        'PF 净盈亏 '+signedCash(p.prices.pf?.netPnl)+'（含费用 '+settlementAmount(p.fees?.pf)+'），Hype 净盈亏 '+
+        signedCash(p.prices.hl?.netPnl)+'（含费用 '+settlementAmount(p.fees?.hl)+'） · '+
+        (key==='fail'?'失败回收 ':'成功 Hype 剩余 ')+settlementAmount(p.cash)+
+        (p.venue?' · 退出报价基差 '+fmt(p.venue.basisAfter.bps,3)+' bp':''):
+        p.reason??'无法证明完整退出'));
+    }
+  }
+  write('venue-report',basisLines.join('\n'));
   const cushion=fail==null?null:recoveryCushion(fail,B);
   $('scan-fail-summary').classList.toggle('thin-buffer',!!cushion?.thin);
   const delta=(amount,limit)=>signedCash(dec(amount).minus(limit));
   write('scan-fail-summary',fail==null?'完整退出未验证':
-    (certified?stress.minFailure.label+' · ':'')+'较本金 '+delta(fail,B)+
+    (stress.minFailure.label+' · ')+'较本金 '+delta(fail,B)+
     (cushion.thin?' · 极薄缓冲':'')+(dec(floor).gt(B)?' · 保护门槛 '+usd(floor):''));
-  write('scan-pass-summary',pass==null?'完整退出未验证':
-    (certified?stress.minSuccess.label+' · ':'')+'较最低留存 '+delta(pass,reserve));
-  write('scan-representative',(!certified && !base?'仅作路径对照 · ':'')+pct(target.h));
+  write('scan-pass-summary',funds?'成功提现前 · Hype 平仓剩余 '+settlementAmount(funds.before)+'（'+
+    (audit?.cases.find(c=>c.id===successCase)?.label??'条件情景')+'）':'成功路径未核价');
+  write('scan-representative',pct(target.h));
   write('scan-position','PF '+targetQty(target.pf,scan.ctx.market.pf)+' / '+usd(target.pfValue)+
     ' · Hype '+targetQty(target.hl,scan.ctx.market.hl)+' / '+usd(target.hypeValue));
 }
@@ -196,8 +403,8 @@ function showRepresentative(snapshot, auditScan) {
   const { book, params } = scan.ctx;
   // Advanced rule, cutoff and ledger evidence belongs to the base objective.
   const target = maximum ?? row;
-  showHeadline(snapshot,row);
-  const excess = dec(maximum?.failDelta ?? row.failureVsProtection),
+  showHeadline(snapshot);
+  const excess = dec(maximum?.failDelta ?? row.failureVsProtection ?? '0'),
     B = dec(book.B);
   const cushion = maximum ? recoveryCushion(maximum.fail,book.B) : row.cushion;
   const bufferRate = cushion.rate == null ? '无保护基准' : pct(cushion.rate, 6);
@@ -221,13 +428,10 @@ function showRepresentative(snapshot, auditScan) {
               ? '，基础情景刚好覆盖，完整压力未验证'
               : '，仅基础情景刚好覆盖，完整压力未验证'
             : '') +
-          (dec(buffer).gt(0) ? ' · 额外缓冲要求 ' + usd(buffer) : ' · 未设额外安全缓冲')
+          (dec(buffer).gt(0) ? ' · 额外缓冲要求 ' + usd(buffer) : ' · 失败端未设额外安全缓冲')
   );
-  write(
-    'scan-pass-title',
-    row.funded ? '提款线 · Hype 到账前剩余' : '通过后 · Hype 剩余'
-  );
-  const diff = dec(target.successPersonal).minus(B);
+  write('scan-pass-title','考核通过');
+  const diff = target.successPersonal==null ? null : dec(target.successPersonal).minus(B);
   write(
     'scan-pass-net',
     target.passStop
@@ -239,10 +443,10 @@ function showRepresentative(snapshot, auditScan) {
           (target.survives ? '，满足 ' : '，低于 ') +
           usd(params.R) +
           ' 最低留存。个人资金' +
-          (diff.lt(0) ? '距保护本金尚差 ' : '较保护本金多 ') +
-          settlementAmount(diff.abs()) +
+          (diff?.lt(0) ? '距保护本金尚差 ' : '较保护本金多 ') +
+          settlementAmount(diff?.abs()) +
           ' · 相对累计投入 ' +
-          settlementAmount(params.profitBasis==null ? null : dec(target.successPersonal).minus(params.profitBasis))
+          settlementAmount(params.profitBasis==null || target.successPersonal==null ? null : dec(target.successPersonal).minus(params.profitBasis))
   );
   if (maximum && (maximum.sign!==row.sign || maximum.i!==row.i || maximum.j!==row.j)) {
     // Older snapshots can contain a preference ledger for a different position.
@@ -276,19 +480,17 @@ function showRepresentative(snapshot, auditScan) {
         : ''
   );
   if (row.funded && row.passStop)
-    write('scan-funded', 'Funded 分成 · ' + row.passStop + '，无法验证该仓位的完整到账路径');
+    write('scan-funded', 'Funded 分成 · ' + row.passStop + '，无法计算该仓位的条件提现');
   else if (row.funded)
     write(
       'scan-funded',
       'Funded 分成 · 目标可分 ' +
         usd(row.funded.eligible) +
-        ' · 若该笔全额到账，个人现金 ' +
+        ' · 按规则提现后，个人资金 ' +
         settlementAmount(row.funded.ifCredited) +
         '，相对总投入 ' +
         settlementAmount(row.funded.ifCreditedNet) +
-        ' · 已确认到账 ' +
-        (row.funded.received == null ? '未知' : usd(row.funded.received)) +
-        (row.funded.pending == null ? '' : ' · 待到账 ' + usd(row.funded.pending))
+        '（按规则测算）'
     );
   write(
     'scan-risk',
@@ -406,7 +608,7 @@ function renderSubsets() {
     for (const key of subsetGroups) {
       const unknown =
         (key === 'profit' || key.endsWith('Profit')) &&
-        (frame.ctx.params.profitBasis == null || frame.ctx.params.externalPriced === false);
+        frame.ctx.params.profitBasis == null;
       summaryRow(
         details,
         label + ' · ' + names[key],
@@ -581,10 +783,14 @@ const comparisonMetrics = [
   ['success', '完整盘口 · 成功留存', p => settlementAmount(fullCash(p,'pass'))],
   ['minFailure', '已核价最低失败回收', p => settlementAmount(p.pressureSummary?.minFailure?.value)],
   ['minSuccess', '已核价最低成功留存', p => settlementAmount(p.pressureSummary?.minSuccess?.value)],
-  ['cashBuffer', '最差现金缓冲 M', p => signedCash(p.pressureSummary?.cashBuffers?.minimum)],
-  ['coverage', '已验证 / 未验证情景', p => {
+  ['worstAvailable','已核价两端最低个人资金（提现前）',p=>settlementAmount(p.pressureSummary?.worstAvailable?.value)],
+  ['worstFinal','已核价两端最低个人资金（按规则提现后）',p=>settlementAmount(p.pressureSummary?.successFinal?p.pressureSummary.worstFinal?.value:null)],
+  ['personalShare','最低留存情景 · 预计 PF 个人提现',p=>settlementAmount(p.pressureSummary?.cases.find(c=>c.id===p.pressureSummary.minSuccess?.id)?.success.personalFunds?.projectedPayout)],
+  ['fullBuffer','完整压力 M_full',p=>p.pressureSummary?.M_full==null?'未知':signedCash(p.pressureSummary.M_full)],
+  ['cashBuffer', '已核价现金缓冲 M_verified', p => signedCash(p.pressureSummary?.cashBuffers?.minimum)],
+  ['coverage', '通过 / 失败 / 未验证', p => {
     const c = p.pressureSummary?.coverage;
-    return c ? c.verified+' / '+c.unverified : '未记录';
+    return c ? c.passed+' / '+c.failed+' / '+c.unverified : '未记录';
   }],
   ['leverage', 'Hype 建议杠杆', p => p.leverage == null ? '未验证' : p.leverage + '×'],
   ['initial', 'Hype 开仓初始保证金', p => usd(p.initial)],
@@ -614,6 +820,7 @@ function initComparison() {
     link.onclick=()=>{
       const fold=$('plan-evidence').querySelector('details[data-objective="'+key+'"]');
       $('positions-view').open=true;
+      $('position-breakdown').open=true;
       fold.open=true;
       fold.querySelector('summary').focus();
     };
@@ -638,10 +845,22 @@ function planChecks(plan) {
   if (!summary) return '逐项压力未验证';
   if (summary.status==='fail') return '已配置压力未通过';
   if (summary.status!=='pass') return '已配置压力待验证';
-  return summary.coverage?.allSpecifiedPassed ? '全部指定情景通过' : '已核价条件通过';
+  const venueIds=Object.keys(venueCases).filter(id=>summary.cases?.some(c=>c.id===id));
+  const completePrice=[...venueIds,'basis','async','delay','jump','combinedA','combinedB','combinedC'].every(id=>
+    summary.cases?.some(c=>c.id===id && c.configured && c.verified && c.status==='pass'));
+  return completePrice?'完整价格压力通过'+(summary.fullStress?'':'，完整压力验证未完成'):
+    '已配置盘口压力通过，完整压力验证未完成';
 }
 function renderComparison(snapshot) {
   const { ratioScan:scan, targets:winners, stress } = snapshot ?? {targets:objectives.map(() => null)};
+  for(const [slot,id] of [[0,'home-base'],[1,'home-pressure'],[4,'home-cash']]) {
+    const plan=winners[slot], summary=plan?.pressureSummary, c=summary?.coverage;
+    write(id,plan?'PF '+targetQty(plan.pf,scan.ctx.market.pf)+'（'+usd(plan.pfValue)+'） / Hype '+targetQty(plan.hl,scan.ctx.market.hl)+'（'+usd(plan.hypeValue)+'） · 名义比例 '+pct(plan.notionalRatio??out(dec(plan.hypeValue).div(plan.pfValue))):scan?'无合格方案':'等待同帧计算');
+    write(id+'-risk',summary && c?'Hype 最大保证金 '+settlementAmount(summary.maxMarginUsed?.value)+' · 已核价 M_verified '+signedCash(summary.M_verified??summary.cashBuffers.minimum)+' · 完整压力 M_full '+(summary.M_full==null?'未知':signedCash(summary.M_full))+' · 通过 '+c.passed+' / 失败 '+c.failed+' / 未验证 '+c.unverified:'');
+    $(id).dataset.snapshotId=snapshot?.snapshotId??'';
+    $(id).dataset.point=plan?.key??'';
+  }
+  write('home-pressure-name',scan?objectiveName(1,scan):'A-C 压力最大仓位');
   const max = winners[0];
   const baseOnly = stress && !stress.positive.length;
   const partial = stress && (stress.missing.length > 0 || stress.zero.length > 0);
@@ -669,8 +888,8 @@ function renderComparison(snapshot) {
     setText(header.firstElementChild,name);
     header.firstElementChild.setAttribute('aria-label','查看'+name+'的压力明细');
     header.firstElementChild.disabled=!plan;
-    const empty=col===1 && scan ? (scan.plans?.pressure?.reason??'本帧缺少压力结果') : '无合格方案';
-    setText(header.lastElementChild, plan ? planChecks(plan) : empty);
+    const empty=col===4 && scan ? scan.plans?.cashPriority?.reason??'历史帧未求解此目标' : col===1 && scan ? (scan.plans?.pressure?.reason??'本帧缺少压力结果') : '无合格方案';
+    setText(header.lastElementChild, plan ? (col===1 || col===4?'':'基础情景通过 · ')+planChecks(plan) : empty);
     header.title=plan?.pressureSummary?.missing?.join('、')??'';
     for (const [index, [key,,format]] of comparisonMetrics.entries()) {
       const td = $('plan-rows').rows[index].cells[col+1];
@@ -767,7 +986,7 @@ function liquidityLines(cell,first,scan) {
   for (const [label,test] of [['A 完整盘口',first.full],['B 撤档退出 · 撤最优档',first],['C 撤前两档',first.two],['D 剩余可见深度不足',first.shortfall]]) {
     if (!test) continue;
     const cash=test.settlement;
-    detailLine(cell,label+' · 退出核验'+statusText(test.status)+' · '+(cash ? '个人资金 '+settlementAmount(cash.personal)+
+    detailLine(cell,label+' · '+exitDepthLabel(test)+' · 退出核验'+statusText(test.status)+' · '+(cash ? '个人资金 '+settlementAmount(cash.personal)+
       ' / Hype '+settlementAmount(cash.hype) : '全量退出资金未验证')+
       (test.reason?' · '+test.reason:'')+
       ' · 清算路径 '+statusText(test.pathStatus)+'，最低维持余量 '+settlementAmount(test.path?.worst?.surplus));
@@ -857,7 +1076,7 @@ function renderPressureDetails(snapshot) {
     const reason=target ? 'PF '+targetQty(target.pf,snapshot.ratioScan.ctx.market.pf)+' / Hype '+
       targetQty(target.hl,snapshot.ratioScan.ctx.market.hl)+' · '+planChecks(target)+record+
       (missing?.length?'（未验证 '+missing.join('、')+'）':'') : '';
-    const objective=i===1 && target ? ' · 同规模优先提高两端资金的最低余量，再比较清算余量、峰值占用和杠杆。' : '';
+    const objective=i===1 && target ? ' · 同规模先比较最差现金缓冲，再比较按规则提现后的最差个人回收、清算余量及占用。' : '';
     setText(fold.querySelector('p'),reason+objective);
     for (const [field,,format] of evidenceMetrics) {
       const dd=fold.querySelector('dd[data-metric="'+field+'"]');
@@ -880,6 +1099,8 @@ function renderPressureDetails(snapshot) {
       for(const path of [f,p]){
         const cash=tr.insertCell();
         cash.append(settlementAmount(path?.cash));
+        const funds=path?.personalFunds;
+        if(funds && path===p) detailLine(cash,'预计分成 '+settlementAmount(funds.projectedPayout)+' · 按规则提现后，成功路径合计 '+settlementAmount(funds.final));
         if(path?.reason && path.reason!==scenario.reason) detailLine(cash,path.reason);
         const funding=path?.funding;
         if(funding) {
@@ -992,7 +1213,7 @@ function renderPlans(snapshot) {
       detailLine(cell,'深度滑点 PF ' + settlementAmount(path.pf.slippage) + ' / Hype ' + settlementAmount(path.hl.slippage));
       const stressDepth=r.liquidity?.[key];
       if (stressDepth) liquidityLines(cell,stressDepth,scan);
-      if (key === 'pass' && r.successPersonal != null) detailLine(cell,'个人资金（到账前） ' + settlementAmount(r.successPersonal));
+      if (key === 'pass' && r.successPersonal != null) detailLine(cell,'成功提现前 Hype ' + settlementAmount(r.successPersonal));
       for (const [kind,test] of Object.entries(r.pathAudit?.[key] ?? {})) {
         const label = {base:'基础同步',basisWiden:'基差扩大',basisNarrow:'基差收敛',
           adverseJump:'不利跳价',basisAdverse:'基差对当前 Hype 仓不利',basisFavorable:'基差对当前 Hype 仓有利',
@@ -1016,7 +1237,7 @@ function renderPlans(snapshot) {
         const v=test.settlement;
         if (v) detailLine(cell,'双边平仓价 PF '+fmt(v.pfFill)+' / Hype '+fmt(v.hlFill)+
           '，PF 净盈亏 '+signedCash(v.pfNet)+'，Hype 净盈亏 '+signedCash(v.hlNet)+
-          '，Hype 剩余 '+settlementAmount(v.hype)+'，个人回收（分成到账前） '+settlementAmount(v.personal));
+          '，Hype 剩余 '+settlementAmount(v.hype)+'，提现前回收 '+settlementAmount(v.personal));
         else if (kind!=='beforeFill') detailLine(cell,'该路径结算未验证');
         if (test.firstBreach) detailLine(cell,'途中首次触线 ' + fmt(test.firstBreach.mark) + ' ' + report.hlQuote);
       }
@@ -1032,10 +1253,10 @@ function renderPlans(snapshot) {
   $('positions-empty').hidden = hasTargets;
   write('positions-empty', hasTargets ? '' : !snapshot ? '等待首份计算快照' :
     report?.legacy ? '该历史快照缺少分方案明细' :
-    report?.pending ? '分成待到账，目标建议已暂停' : '本次计算没有合格目标方案');
+    '本次计算没有合格目标方案');
   renderScaleComparison(snapshot);
   renderScaleComparison(snapshot,true);
-  write('plan-caption', !report ? '' : report.pending ? '分成待到账' :
+  write('plan-caption', !report ? '' :
     report.legacy ? '历史条件目标' : !report.eligible ? '当前门槛下无合格方案' :
     scan.complete ? '' : '限已扫描规模');
   const units = side => scan.ctx.market[side].unit === 'contract' ? '张' : scan.ctx.market[side].unit;
@@ -1048,8 +1269,12 @@ function renderPlans(snapshot) {
       r.distance == null ? '无已验证交点' : fmt(r.distance, 4) + ' ' + report.hlQuote, cost('fees') + ' U', cost('slippage') + ' U']) detail.insertCell().textContent = str;
   }
   for (const r of report?.rows ?? []) appendRisk(r);
-  const pressure=snapshot?.targets[1];
-  if(pressure && !report?.rows?.some(r=>r.key===pressure.key && r.leverage===pressure.leverage)) appendRisk(pressure);
+  const shown=new Set((report?.rows??[]).map(r=>r.key+'/'+r.leverage));
+  for(const r of [snapshot?.targets[1],snapshot?.targets[4]]) {
+    if(!r || shown.has(r.key+'/'+r.leverage)) continue;
+    appendRisk(r);
+    shown.add(r.key+'/'+r.leverage);
+  }
   patchRows($('plan-risk-rows'), riskBody);
 }
 
@@ -1076,7 +1301,7 @@ function draw(snapshot, auditScan) {
     const unknown =
       key === 'profit' &&
       scan &&
-      (scan.ctx.params.profitBasis == null || scan.ctx.params.externalPriced === false);
+      scan.ctx.params.profitBasis == null;
     const empty = unknown
       ? '个人投入或外币估值待核实'
       : !scan
@@ -1149,7 +1374,7 @@ function draw(snapshot, auditScan) {
       'scan-position',
       'scan-fail-cash',
       'scan-pass-cash',
-      'scan-fail-net',
+      'fail-pf','pass-pf','fail-before','pass-before','path-profit','stress-count','scan-fail-net','scan-withdrawal','scan-final-worst','trigger-paths','reach-windows','venue-report',
       'scan-fail-summary',
       'scan-pass-summary',
       'scan-pass-net',
@@ -1168,6 +1393,12 @@ function draw(snapshot, auditScan) {
 }
 export function renderScan(result, m, r, plan, status, snapshot) {
   const observed = result.observed ?? result;
+  const missingDirection=[['dailyUpPct','twoDayUpPct'],['dailyDownPct','twoDayDownPct']]
+    .some(fields=>fields.every(field=>r[field]==null || String(r[field]).trim()===''));
+  const examIssue=[...(observed.issues??[]),...(result.issues??[])]
+    .find(issue=>/考核.*(可达性|开始|截止|没有可行仓位)/.test(issue));
+  write('exam-status',r.stage!=='challenge'?'出金阶段':examIssue ?? (missingDirection?
+    '考核波动情景未填全，已分别列出通过线与失败线':'考核截止 '+new Date(r.deadline).toLocaleString('zh-CN')));
   const networkError = m.errors?.pf || m.errors?.hl;
   const waitingForMarket = !networkError && !m.errors?.spec && m.source !== '手工确认盘口' &&
     ((!m.pf || !m.hl) || (!m.spec && (!m.specStatus || m.specStatus === 'loading')));
@@ -1186,10 +1417,16 @@ export function renderScan(result, m, r, plan, status, snapshot) {
     const prices = book ?? saved;
     const c = observed.currencies?.[key] ?? (saved && {baseAsset:saved.base, quoteAsset:saved.quote});
     const prefix = 'scan-' + key + '-';
+    const health=m.health?.[key];
+    write(prefix+'connection',health?'WS Connected '+(health.connected?'是':'否')+' · 最近消息 '+time(health.lastMessageAt)+
+      ' · 盘口 '+time(health.lastBookAt)+' · Mark '+time(health.lastMarkAt)+' · '+(key==='hl'?'心跳 ':'消息活动 ')+(health.heartbeat?'正常':'待确认')+' · '+(key==='hl' && health.continuous && health.subscription==='streaming'?'持续接收 '+m.asset+' · ':'')+'最近有效报价 '+time(health.lastValidQuoteAt)+' · 报价年龄 '+(health.lastValidQuoteAt?Math.max(0,Date.now()-Date.parse(health.lastValidQuoteAt))+' ms':'未知')+
+      ' · 重连 '+health.reconnectCount+' 次 · 订阅 '+health.subscription+(key==='pf'?' · 连接 ID '+(health.connectionId??'—')+
+        ' · 订阅 ID '+(health.subscriptionId??'—')+' · 上次断开 '+(health.lastDisconnectReason??'无')+
+        ' · 上次重连 '+(health.lastReconnectAt?time(health.lastReconnectAt):'无')+' · 连续稳定 '+Math.floor((health.stableMs??0)/1000)+' 秒 · 解析异常 '+(health.parseErrors??0):''):'连接状态未知');
     write(prefix + 'product', (key === 'pf' ? 'Vest ' : 'Hyperliquid ') + (m.asset ?? '') + ' Perp');
     write(prefix + 'unit', c?.quoteAsset && c?.baseAsset ? c.quoteAsset + '/' + c.baseAsset : '报价币待核实');
     const bookInvalid = m.errors?.[key] || observed.timing?.clocks?.[key]?.ok === false;
-    write(prefix + 'health', prices && (!book || bookInvalid) ? ' · 已失效' : '');
+    write(prefix + 'health', bookInvalid || (prices && !book) ? ' · 已失效' : health ? (health.ready?' · 行情有效':' · 等待有效订阅') : '');
     write(prefix + 'price', q?.mark ?? saved?.mark ?? '—');
     const markAt = q?.mark != null ? q.markAt ?? q.asOf : saved?.markAt ?? saved?.asOf;
     $(prefix + 'price').title = (q?.mark == null && saved ? '历史标记时间 ' : (q?.markSource??'标记时间')+' ') + time(markAt);
@@ -1204,7 +1441,11 @@ export function renderScan(result, m, r, plan, status, snapshot) {
   }
   const displayed = result.ratioScan ? result : result.retained;
   const tr = snapshot?.trace;
-  const f = result.funding;
+  const f = observed.funding;
+  const theory=observed.theoreticalRatio;
+  write('theory-only',theory?.lower!=null && theory?.upper!=null?
+    (theory.code==='NO_CASH_INTERSECTION'?'无交集 · 下界 / 上界 ':'')+
+    pct(theory.lower)+' – '+pct(theory.upper)+'（按本金与成功留存计算，假设零成交成本）':'等待资金规则');
   write('scan-source', plan ? (r.planCrossFlat === true ? '预设资金规划 · 规划空仓' : '预设资金规划 · 仓位待确认') : f?.C_H == null || f?.E == null ? '当前账户快照 · 待读取' : '当前账户快照');
   write(
     'scan-capital',
@@ -1214,9 +1455,6 @@ export function renderScan(result, m, r, plan, status, snapshot) {
           usd(f.B) +
           ' · Hype ' +
           usd(f.C_H) +
-          ' · 外部到账 ' +
-          usd(f.C_E) +
-          (result.notices?.some((v) => v.includes('估值未确认')) ? '（未含待估值外币）' : '') +
           ' · PF ' +
           usd(f.E) +
           '（失败 ' +
@@ -1224,26 +1462,12 @@ export function renderScan(result, m, r, plan, status, snapshot) {
           ' / 成功 ' +
           fmt(f.T) +
           '） · 成功最低留存 ' +
-          usd(f.R_success)
+          usd(f.R??f.R_success)
       : plan
         ? '预设规划 · 等待完整行情和规划条件'
         : '当前账户 · 等待有效权益和持仓快照'
   );
-  if (r.stage !== 'funded') write('scan-funded', 'Funded 分成 · 当前阶段不适用');
-  else if (result.receipt?.amount != null && dec(result.receipt.amount).gt(0))
-    write(
-      'scan-funded',
-      '本轮首笔已到账 ' +
-        usd(result.receipt.amount) +
-        ' · 当前个人现金 ' +
-        usd(result.receipt.cash) +
-        ' · 相对累计投入 ' +
-        settlementAmount(result.receipt.net) +
-        ' · 已计入' +
-        (result.receipt.source === 'hl' ? ' Hype 权益' : '外部资金')
-    );
-  else if (!snapshot?.ratioScan?.representative?.row?.funded)
-    write('scan-funded', 'Funded 分成 · 等待有效快照，到账状态待核实');
+  if (!snapshot?.ratioScan?.representative?.row?.funded) write('scan-funded',r.stage==='challenge'?'考核分成 · 当前阶段不适用（PF 提现 0 U）':'Funded · 等待有效结算快照');
   const timing = observed.timing;
   const quoteBreak = timing?.quoteSkew > timing?.quoteLimit;
   const state = waitingForMarket ? 'loading' : publicationState(result,snapshot,m,
@@ -1261,10 +1485,18 @@ export function renderScan(result, m, r, plan, status, snapshot) {
   } else if (state === 'recovering') {
     validity = tr ? '行情和输入已恢复，正在重新计算' : '输入就绪，首次计算中';
   } else if (currentInputs) {
-    validity = '当前数据有效 · 条件估算（当前快照计算结果）';
+    const isOpening = snapshot?.ratioScan.plans?.collection?.opening === true;
+    const hasRows = (snapshot?.ratioScan.plans?.collection?.summary?.total ?? 0) > 0;
+    validity = (!isOpening && snapshot?.ratioScan.plans?.pressure?.status==='none')
+      ? '已配置硬约束下无解 · 原因见双向仓位结果'
+      : (isOpening && !hasRows)
+        ? '当前资金/规则下无可行仓位'
+        : snapshot?.ratioScan.ctx.deriveMoves
+          ? '当前盘口实时测算（未填辅助方向波动情景，不影响仓位求解）'
+          : '当前盘口实时测算';
     if (displayed?.ratioScan?.complete === false) validity += '（部分网格）';
   } else if (state === 'updating') {
-    validity = tr ? (result.trigger === '行情更新' ? '盘口已更新，目标仓位重算中' : '输入已变更，正在重算') + ' · 历史快照，暂停新建议' : '输入就绪，首次计算中';
+    validity = tr ? (result.trigger === '行情更新' ? '盘口已更新，重算中（下方为上一快照）' : '输入已变更，重算中（下方为上一快照）') : '输入就绪，首次计算中';
   } else if (waitingForMarket) {
     validity = '等待双边盘口';
   } else {
@@ -1303,29 +1535,47 @@ export function renderScan(result, m, r, plan, status, snapshot) {
   );
   if (frameKey !== (id || 'empty')) {
     const auditScan = displayed?.trace?.id === id ? (displayed.baseScan ?? displayed.ratioScan) : null;
-    draw(snapshot, auditScan);
+    if(!snapshot?.ratioScan.plans?.collection?.opening) {
+      draw(snapshot, auditScan);
+      showOptimum(snapshot);
+    }
+    drawCandidateSet(snapshot);
     // All panels are patched synchronously from one publication before exposing its version.
     frameKey = id || 'empty';
-    for (const panel of ['live-view','positions-view','scale-details','desk-details','scan-results','scan-cash','ratio-intervals','desk-state']) {
+    for (const panel of ['candidate-grid','live-view','positions-view','scale-details','desk-details','scan-results','scan-cash','ratio-intervals','desk-state']) {
       $(panel).dataset.snapshotId = id;
       $(panel).dataset.calculatedAt = completedAt ?? '';
     }
     for (const key of ['quoteSnapshotId','accountSnapshotId','rulesVersion','solverVersion','calculatedAt'])
       desk.dataset[key] = snapshot?.[key] ?? '';
     desk.dataset.resultId = id;
+    desk.dataset.solverRunId = snapshot?.solverRunId ?? '';
   }
-
+  const row=actionRow(snapshot);
+  const expiry=observed.expiryOutcome;
+  write('unhit-expiry','到期未触线退出 · '+(expiry?(expiry.cash==null?expiry.reason:
+    '若期间未曾触线，截止盘口估算个人回收 '+settlementAmount(expiry.cash)+'，待实际结算'):row?expiryText(row.deadline):'缺少本帧可核价仓位'));
+  for(const side of ['pf','hl']) $('copy-'+side).disabled=!orderParameters(side);
 }
-export function setupScan() {
+export function setupScan(refresh) {
+  setupCandidateSet(refresh);
+  for(const side of ['pf','hl']) $('copy-'+side).onclick=async ()=>{
+    const original=orderSnapshot?.snapshotId;
+    refresh();
+    const text=orderParameters(side);
+    if(!text || original!==orderSnapshot?.snapshotId) {write('copy-status','行情或仓位已更新，请核对当前结果');return;}
+    try {await navigator.clipboard.writeText(text);write('copy-status','已复制 '+(side==='pf'?'PF':'Hype')+' 下单参数');}
+    catch {write('copy-status','浏览器未允许复制，请使用页面中的目标仓位');}
+  };
   initComparison();
   initPressureDetails();
   const buttons = [...$('desk-views').querySelectorAll('button')];
   for (const button of buttons) {
     const panel = $(button.getAttribute('aria-controls'));
-    button.onclick = () => { panel.open = true; };
+    button.onclick = () => { panel.open = true; panel.scrollIntoView({block:'start'}); };
     panel.addEventListener('toggle', () => button.setAttribute('aria-expanded',String(panel.open)));
   }
-  $('scale-link').onclick = () => { $('positions-view').open = true; };
+  $('scale-link').onclick = () => { $('positions-view').open = true; $('position-breakdown').open=true; };
   for (const id of ['desk-details', 'audit-details', 'scan-detail'])
     $(id).addEventListener('toggle', auditText);
   $('subset-detail').ontoggle = renderSubsets;

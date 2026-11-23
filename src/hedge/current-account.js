@@ -8,7 +8,8 @@ export async function accountSnapshot(user, asset, query, clock = Date.now) {
     'frontendOpenOrders',
     'userAbstraction',
     'activeAssetData',
-    'userFees'
+    'userFees',
+    'spotClearinghouseState'
   ];
   const requested = {};
   const data = await Promise.allSettled(
@@ -41,7 +42,14 @@ export async function accountSnapshot(user, asset, query, clock = Date.now) {
   const cap = result(3);
   const validCap = cap?.user?.toLowerCase() === user.toLowerCase() && cap.coin === asset;
   const mode = result(2) ?? '未知';
-  const unsupported = accountMode(mode) !== 'standard';
+  const spotBalances = Array.isArray(result(5)?.balances) ? result(5).balances : null;
+  const spotUsdcRow = spotBalances?.find((b) => b.token === 0 || b.coin === 'USDC');
+  const spotUsdcTotal = spotUsdcRow?.total != null ? nonnegative(String(spotUsdcRow.total)) : null;
+  const nonUsdcSpot = spotBalances
+    ? spotBalances.filter((b) => b.token !== 0 && b.coin !== 'USDC' && dec(String(b.total || '0')).gt(0))
+    : [];
+  const isUnifiedUsdcOnly = mode === 'unifiedAccount' && spotBalances != null && nonUsdcSpot.length === 0;
+  const unsupported = accountMode(mode) !== 'standard' && !isUnifiedUsdcOnly;
   const marginMode = validCap ? cap.leverage?.type : pos?.leverage?.type;
   const qty = pos?.qty ?? '0';
   const anchor =
@@ -55,8 +63,14 @@ export async function accountSnapshot(user, asset, query, clock = Date.now) {
   const knownHolds=!unsupported && !positionsElsewhere && Array.isArray(orders) && !orders.length;
   const otherHold=knownHolds ? (reportedUsed==null ? '0' :
     reportedUsed.gte(targetMargin) ? out(reportedUsed.minus(targetMargin)) : null) : null;
+  const computedEquity = unsupported || cross?.accountValue == null
+    ? null
+    : isUnifiedUsdcOnly
+      ? out(dec(String(cross.accountValue)).plus(spotUsdcTotal ?? '0'))
+      : out(dec(String(cross.accountValue)));
   return {
     source: 'Hype 主网 API',
+    sourceDetail: isUnifiedUsdcOnly ? 'Hype 主网 API（Unified USDC）' : 'Hype 主网 API',
     at: account.occurredAt,
     ordersAt: requested.frontendOpenOrders,
     feeAt: requested.userFees,
@@ -65,13 +79,15 @@ export async function accountSnapshot(user, asset, query, clock = Date.now) {
     leverageAt: validCap ? requested.activeAssetData : account.occurredAt,
     marginModeAt: validCap ? requested.activeAssetData : account.occurredAt,
     receivedAt,
-    equity: unsupported || cross?.accountValue==null ? null : out(dec(String(cross.accountValue))),
+    equity: computedEquity,
     rawEquity: account.equity,
+    spotUsdc: spotUsdcTotal ? out(spotUsdcTotal) : null,
+    unifiedUsdcOnly: isUnifiedUsdcOnly,
     qty,
     anchor,
     orders: mapped,
     mode,
-    crossPoolVerified: !unsupported && cross?.accountValue!=null,
+    crossPoolVerified: !unsupported && computedEquity != null,
     unsupported,
     marginMode,
     otherPositions:positionsElsewhere,
@@ -135,14 +151,16 @@ export function presetAccount(r, side) {
     marginMode: r.planCrossFlat === true ? 'cross' : null
   };
   try {
-    const capital = nonnegative(r.planCapital);
+    const capital = nonnegative(r.planCapital ?? r.B);
     const paid = nonnegative(r.registration);
     if (paid.gt(capital)) throw Error('报名费超过预设个人本金');
     const equity =
       side === 'pf'
-        ? out(positive(r.planPF))
+        ? out(positive(r.stage==='funded' ? (r.fundedAccount?.equity ?? r.planPF ?? '10000') : r.planPF))
         : r.stage === 'funded'
-          ? out(nonnegative(r.planFundedCash))
+          ? (r.planFundedCash === '' || r.planFundedCash == null
+              ? (() => { throw Error('请填写当前 Funded 阶段实盘结余（U）'); })()
+              : out(nonnegative(r.planFundedCash)))
           : out(capital.minus(paid));
     return {
       ...common,

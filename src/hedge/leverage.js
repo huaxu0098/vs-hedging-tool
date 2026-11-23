@@ -136,7 +136,7 @@ export function evaluateLeverageGrid(book, market, profile, pf, hl, checks, fixe
           )
         );
     } else extra.push(constraint('hl_AVAILABLE', null, '0', 'U', 'missing'));
-    if (leg.capacity && (n <= Number(leg.configuredLeverage) || !n))
+    if (leg.capacity)
       extra.push(
         constraint(
           'hl_AVAILABLE',
@@ -187,9 +187,17 @@ export function evaluateLeverageGrid(book, market, profile, pf, hl, checks, fixe
     if (
       !best ||
       rank[row.status] < rank[best.row.status] ||
+      (checks.minimizeMargin && row.status==='pass' && best.row.status==='pass' && margin.lt(best.margin)) ||
       (checks.scanRiskOnly && row.status === best.row.status && entryOK && !best.entryOK)
     )
       best = { row, extra, margin, entryOK };
+    // Early exit (identical result): ascending enumeration already found the best achievable
+    // status with an entry-admissible setting, and nothing later can rank higher. Only used
+    // when the caller does not need the full leverage grid report.
+    if (
+      checks.leverageEarlyExit && !checks.minimizeMargin && best.entryOK &&
+      rank[best.row.status] <= rank[commonFailure?.status ?? 'pass']
+    ) break;
   }
   const constraints = [...common, ...best.extra];
   const code = constraints.some((c) => c.status === 'fail')

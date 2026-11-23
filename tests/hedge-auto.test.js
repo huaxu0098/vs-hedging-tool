@@ -1,3 +1,5 @@
+import { venuePath, basisObservation } from '../src/hedge/venue-scenarios.js';
+import { reachability,targetsWithinExam,examEnvelope } from '../src/hedge/reachability.js';
 import { searchLiquidityMaximum } from '../src/hedge/liquidity-search.js';
 import { unitContract, usdQuote } from '../fixtures/hedge-currency-contracts.js';
 import test from 'node:test';
@@ -19,11 +21,11 @@ import { calculateCurrent, rules, splitReserves } from '../src/hedge/current.js'
 import { solveAuto, compareAuto, compareConservative } from '../src/hedge/auto.js';
 import { demoMarket, evaluateCandidate, profileInputs, validateMargin } from '../src/hedge/solver.js';
 import { createBook } from '../src/hedge/book.js';
-import { dec, out, min, fillEvidence } from '../src/hedge/math.js';
+import { dec, out, min, max, fillEvidence } from '../src/hedge/math.js';
 const at = '2026-11-19T12:00:00Z',
   t = Date.parse(at);
 const inputs = {
-  ...rules,
+  ...rules,dailyUpPct:'10000',dailyDownPct:'100',twoDayUpPct:'10000',twoDayDownPct:'100',
   deadline: '2026-11-20T12:00:00Z',
   B: '160',
   investedCapital: '160',
@@ -79,12 +81,12 @@ test('AUTO01 auto 默认联合搜索两边空仓的最大 PF 名义额', () => {
   assert.ok(x.top.length > 1);
   assert.ok(x.eliminated.check);
 });
-test('AUTO02 外部已到账 100U 只增加个人保护资金', () => {
+test('AUTO02 旧外部余额不能增加个人保护资金', () => {
   const x = calc(),
     y = calc({ externalAt: at, external: '100' });
-  assert.equal(y.protect, '220');
+  assert.equal(y.protect, x.protect);
   assert.equal(y.marginHL, x.marginHL);
-  assert.ok(dec(y.range.min).lt(x.range.min));
+  assert.equal(y.range.min,x.range.min);
 });
 test('AUTO03 减少 Hype 抵押品限制最大可行规模', () => {
   const f = fixture();
@@ -142,6 +144,8 @@ test('AUTO08 账户或行情单独过期禁止推荐，超期退出不虚增现�
   const x = calc({ deadline: at });
   assert.equal(x.autoStatus, 'AUTO_DEADLINE_EXIT_REQUIRED');
   assert.equal(x.deadlineExit, '120');
+  assert.deepEqual(x.expiryOutcome,{cash:'120',reason:null});
+  assert.equal(x.evaluationClose,null);
 });
 test('AUTO09 达到已证明最优的现仓保持，双边差额为零', () => {
   const f = fixture(),
@@ -174,7 +178,7 @@ test('AUTO10 全部候选不符时给出实际缺口', () => {
   assert.ok(dec(x.eliminated.check.shortfall).gt(0));
   assert.equal(x.candidate, undefined);
 });
-test('AUTO11 已到账外币折算、未知估值、在途和分成分开', () => {
+test('AUTO11 旧外币及在途字段不参与新资金模型', () => {
   const x = calc({
     externalAt: at,
     external: '100',
@@ -183,12 +187,12 @@ test('AUTO11 已到账外币折算、未知估值、在途和分成分开', () =
     externalFxAt: at,
     inTransit: '9999'
   });
-  assert.equal(x.protect, '200');
+  assert.equal(x.protect, '120');
   assert.equal(x.marginHL, '120');
-  assert.equal(x.candidate.pressureCashAfter, out(dec(x.candidate.hlBeforePayout).plus(80)));
+  assert.equal(x.candidate.pressureCashAfter, out(dec(x.candidate.hlBeforePayout).plus(x.candidate.expectedUserPayout)));
   const y = calc({ externalAt: at, external: '100', externalCurrency: 'OTHER' });
   assert.equal(y.protect, '120');
-  assert.match(y.notices.join(' '), /估值未确认/);
+  assert.deepEqual(y.candidate,x.candidate);
 });
 test('AUTO12 逐仓位逐杠杆穷举对照，含非零压力和搜索未完成状态', () => {
   const s = createBook({ id: 'grid', mode: 'demo', time: at });
@@ -310,23 +314,23 @@ test('两边权益独立过期时均不判定失败、通过、提款或退出�
     }
 });
 
-test('保护金不复用旧 Hype 权益，保证金与外部现金独立确认', () => {
+test('保护金不复用旧 Hype 权益，保证金与Hype权益独立确认', () => {
   const f = fixture();
   Object.assign(f.a.hl, { equity: '400', free: '12', equityAt: '2020-01-01' });
   let x = calc({ external: '10', externalAt: at }, f);
   assert.equal(x.protect, null);
   assert.equal(x.marginHL, '12');
-  assert.equal(x.externalValue, '10');
+  assert.equal(x.externalValue, undefined);
   f.a.hl.equityAt = at;
   f.a.hl.freeAt = '2020-01-01';
   x = calc({ external: '10', externalAt: at }, f);
-  assert.equal(x.protect, '410');
+  assert.equal(x.protect, '400');
   assert.equal(x.marginHL, null);
   assert.equal(x.candidate, undefined);
   f.a.hl.freeAt = at;
   x = calc({ external: '10', externalAt: '2020-01-01' }, f);
-  assert.equal(x.protect, null);
-  assert.equal(x.externalValue, '0');
+  assert.equal(x.protect, '400');
+  assert.equal(x.externalValue, undefined);
   assert.equal(x.marginHL, '12');
 });
 
@@ -678,19 +682,19 @@ test('STATE01 压力输入缺失、显式零、账户未核实或未进行逐仓
   delete f.a.hl.configuredLeverage;
   assert.equal(calc(stress, f).autoStatus, 'AUTO_PARTIAL');
 });
-test('STATE02 失败端单列 Hype 结算现金和已到账外部资金，抵押池不变', () => {
+test('STATE02 失败端仅包含 Hype 结算现金', () => {
   const x = calc({ external: '45', externalAt: at, inTransit: '70' });
   const c = x.candidate;
-  assert.equal(x.protect, '165');
+  assert.equal(x.protect, '120');
   assert.equal(x.marginHL, '120');
-  assert.equal(c.externalReceived, '45');
-  assert.equal(c.failureCash, out(dec(c.failureHypeCash).plus('45')));
-  assert.equal(c.cashBeforePayout, out(dec(c.hlBeforePayout).plus('45')));
+  assert.equal(c.externalReceived, undefined);
+  assert.equal(c.failureCash, out(dec(c.failureHypeCash)));
+  assert.equal(c.cashBeforePayout, out(dec(c.hlBeforePayout)));
 });
-test('STATE03 考核期应分额为零，Funded 到账前后分别结算', () => {
-  const c = calc({ external: '10', externalAt: at }).candidate;
+test('STATE03 只有 Funded 成功路径按规则分成', () => {
+  const c = calc({ payoutMode:'fundedOnly', external: '10', externalAt: at }).candidate;
   assert.equal(c.expectedUserPayout, '0');
-  assert.equal(c.hlBeforePayout, out(dec(c.pressureCashAfter).minus('10')));
+  assert.equal(c.hlBeforePayout, c.pressureCashAfter);
   const f = fixture();
   f.m.spec.fundedInitMarginRatio = '0.1';
   const funded = calc(
@@ -698,7 +702,7 @@ test('STATE03 考核期应分额为零，Funded 到账前后分别结算', () =>
     f
   ).candidate;
   assert.equal(funded.expectedUserPayout, '80');
-  assert.equal(funded.pressureCashAfter, out(dec(funded.hlBeforePayout).plus('10').plus('80')));
+  assert.equal(funded.pressureCashAfter, out(dec(funded.hlBeforePayout).plus('80')));
 });
 test('双方案共享可复算快照，行情、规则或账户变化产生不同依据', () => {
   const f = fixture(),
@@ -746,7 +750,7 @@ test('OPT02 搜索范围记录双边方向、步长和数量上限，预算中�
   const partial = calculateCurrent(inputs, f.a, f.m, {}, t, { searchBudget: 1 });
   assert.equal(partial.search.complete, false);
   assert.ok(!partial.maximum?.complete);
-  assert.equal(full.trace.model, 'AUTO-0.21.8');
+  assert.equal(full.trace.model, 'AUTO-0.21.25');
 });
 test('OPT03 PF 虚拟保证金、目标 Hype 初始、其他占用及调仓后真实可用分别核验', () => {
   const f = fixture();
@@ -756,7 +760,7 @@ test('OPT03 PF 虚拟保证金、目标 Hype 初始、其他占用及调仓后�
   const x = calc({ external: '20', externalAt: at }, f);
   const c = x.candidate;
   assert.equal(x.marginHL, '110');
-  assert.equal(x.protect, '140');
+  assert.equal(x.protect, '120');
   assert.equal(c.otherInitialMargin, '10');
   assert.equal(c.availableAfter, out(dec('110').minus(c.requiredInitialMargin)));
   assert.equal(c.initialMargin[0], out(dec(c.vsNotional).div(10)));
@@ -964,21 +968,19 @@ test('OPT09 迟滞仅保留最新快照上仍合法的目标，同时保留原�
 test('OPT10 每项未配置压力附独立入口，缺少账户、杠杆、期限可定位', () => {
   const x = calc({ deadline: '' });
   assert.equal(x.autoStatus, 'AUTO_PARTIAL');
-  for (const id of ['hl-source', 'deadline', 'adverseBps', 'fundingDebit', 'delayBps', 'jumpBps'])
+  for (const id of ['hl-source', 'adverseBps', 'fundingDebit', 'delayBps', 'jumpBps'])
     assert.ok(
       x.missingFields.some((item) => item.id === id),
       id
     );
 });
-test('OPT11 未确认截止时间时，配置波幅仍不产生两日通过结论', () => {
+test('OPT11 未填写截止时间时从开始时间起算48小时', () => {
   const x = calc({ deadline: '', movePct: '3' });
-  assert.equal(x.deadline, null);
-  assert.equal(x.stressedEquity, undefined);
-  assert.deepEqual(x.pressure, {});
+  assert.equal(Date.parse(x.deadline)-Date.parse(x.challengeStart),48*3600000);
   assert.ok(x.candidate);
   assert.equal(calc({ deadline: at }).autoStatus, 'AUTO_DEADLINE_EXIT_REQUIRED');
 });
-test('OPT12 失败端现金从当前权益、真实成交滑点、开平费用及外部资金逐项复算', () => {
+test('OPT12 失败端从 Hype 权益、成交滑点及开平费用逐项复算', () => {
   const f = fixture();
   f.a.pf.qty = '-2';
   f.a.hl.qty = '1';
@@ -986,9 +988,9 @@ test('OPT12 失败端现金从当前权益、真实成交滑点、开平费用�
   const x = calc({ pfFee: '0.0001', hlFee: '0.0005', external: '15', externalAt: at, k: '0.1' }, f),
     b = x.bridge;
   assert.equal(b.start, '120');
-  assert.equal(b.external, '15');
+  assert.equal(b.external, undefined);
   assert.ok(dec(b.settled).minus(x.candidate.failureHypeCash).abs().lt('1e-35'));
-  assert.ok(dec(b.settled).plus(b.external).minus(x.candidate.failureCash).abs().lt('1e-35'));
+  assert.ok(dec(b.settled).minus(x.candidate.failureCash).abs().lt('1e-35'));
   assert.ok(dec(b.exitFee).gt(0));
   assert.ok(dec(b.exitFill).lt(0));
 });
@@ -1153,7 +1155,7 @@ test('SNAP01 八项资金规则或权益改变均产生新快照，候选和流�
     [{}],
     [{ B: '163' }],
     [{}, 'hl', '119'],
-    [{ external: '3', externalAt: at }],
+    [{ minimumProfit: '3' }],
     [{}, 'pf', '1004'],
     [{ challengeFloor: '895' }],
     [{ challengeTarget: '1095' }],
@@ -1490,7 +1492,7 @@ test('RANGE09 规划与实际快照独立，未确认空仓或权益时不可产
   assert.equal(inspectRatio(unconfirmed.ctx, unconfirmed.defaultPoint).successNet, null);
 });
 test('RANGE10 / PATH01、PATH02 考核两端自动结算并排除 PF 虚拟盈利', () => {
-  const s = scanFixture().ratioScan;
+  const s = scanFixture({payoutMode:'fundedOnly'}).ratioScan;
   const row = inspectRatio(s.ctx, s.defaultPoint);
   assert.equal(row.funded, null);
   assert.equal(row.payout, '0');
@@ -1498,36 +1500,18 @@ test('RANGE10 / PATH01、PATH02 考核两端自动结算并排除 PF 虚拟盈�
   assert.equal(row.failNet, out(dec(row.fail).minus(s.ctx.book.B)));
   assert.equal(row.paths.pass.pf.settled, inputs.challengeTarget);
 });
-test('RANGE11 Funded 自动提供分成到账条件，实际回执未知时不增加个人现金', () => {
-  const rules = { stage: 'funded', fundedTarget: '1100', fundedFloor: '900' };
-  const s = scanFixture(rules).ratioScan;
-  const a = inspectRatio(s.ctx, s.defaultPoint);
-  assert.equal(a.funded.eligible, '80');
-  assert.equal(a.funded.received, null);
-  assert.ok(s.sets.afterCreditProfit.count > s.sets.profit.count);
-  assert.ok(dec(a.funded.ifCreditedNet).minus(a.successNet).eq(80));
-  assert.equal(a.deadline.status, 'notApplicable');
-  const waiting = scanFixture({ ...rules, receivable: '80' });
-  assert.ok(waiting.ratioScan && !waiting.candidate);
-  const paid = scanFixture({
-    ...rules,
-    receivedPayout: '80',
-    receivedPayoutAt: at,
-    external: '80',
-    externalAt: at
-  });
-  assert.equal(paid.autoStatus, 'AUTO_CYCLE_SETTLED');
-  assert.equal(paid.receipt.cash, '200');
-  assert.equal(paid.marginHL, '120');
-  const receivedHL = scanFixture({
-    ...rules,
-    receivedPayout: '80',
-    receivedPayoutAt: at,
-    receiptSource: 'hl'
-  });
-  assert.equal(receivedHL.receipt.cash, '120');
-  assert.equal(receivedHL.receipt.net, '-40');
-  assert.equal(receivedHL.marginHL, '120');
+test('RANGE11 历史提现审批或回执不改变求解状态或成功路径的规则分成',()=>{
+  const policy={stage:'funded',fundedTarget:'1100',fundedFloor:'900'};
+  const regular=scanFixture(policy);
+  const imported=scanFixture({...policy,receivable:'80',creditStatus:'credited',approvalStatus:'pending',
+    claimEquity:'1100',receivedPayout:'80',payoutRounds:[{id:'old'}]});
+  assert.equal(imported.trace.id,regular.trace.id);
+  assert.equal(imported.autoStatus,regular.autoStatus);
+  const scan=imported.ratioScan, row=inspectRatio(scan.ctx,scan.defaultPoint);
+  assert.equal(row.funded.eligible,'80');
+  assert.equal(row.funded.received,undefined);
+  assert.equal(imported.receipt,undefined);
+  assert.equal(imported.marginHL,'120');
 });
 test('PATH03 在同一笔 15.3739% 仓位同时核算两端，不将失败回本归类为净盈利', () => {
   const orig = scanFixture().ratioScan.ctx;
@@ -1704,12 +1688,11 @@ test('DYN02 分别改变点差、单边费率，核对相同实际仓位的双�
   }
 });
 
-test('DYN03 本金、Hype权益、外部资金、当前 PF 权益、两条触线、成功留存独立驱动上下界', () => {
+test('DYN03 本金、Hype权益、当前 PF 权益、两条触线、成功留存独立驱动上下界', () => {
   const a = scanFixture();
   for (const [patch, side, equity, lo, hi, label] of [
     [{ B: '183' }, null, null, '0.63', '1', '保护本金'],
     [{}, 'hl', '145', '0.15', '1.25', 'Hype 权益'],
-    [{ external: '18', externalAt: at }, null, null, '0.22', '1', '外部到账资金'],
     [{}, 'pf', '1020', out(dec('40').div(120)), '1.25', 'PF 权益'],
     [{ challengeFloor: '929' }, null, null, out(dec('40').div(71)), '1', '失败线'],
     [{ challengeTarget: '1150' }, null, null, '0.4', out(dec('100').div(150)), '成功线'],
@@ -1872,7 +1855,7 @@ test('三目标从合格交集分别取真仓位，对照逐点账本、额外�
   }
 });
 
-test('每行原生买卖均价及双边费用来自同一个差额仓位，外部现金只计入个人总额', () => {
+test('每行原生买卖均价及双边费用来自同一个差额仓位，失败回收等于Hype结算', () => {
   const f=fixture();
   f.a.hl.qty='1'; f.a.hl.currentMarginCredit='10';
   f.m.hl.levels=[[['99.8','0.5'],['99.6','30']],[['100.1','0.5'],['100.2','30']]];
@@ -1882,7 +1865,7 @@ test('每行原生买卖均价及双边费用来自同一个差额仓位，外�
     assert.equal(r.hlFill.price,actual.paths.fail.hl.entryPrice);
     if(r.j===1) assert.equal(r.hlFill.price,null);
     else assert.ok(p.sign<0 ? dec(r.hlFill.price).gt('100.1') : dec(r.hlFill.price).lt('99.8'));
-    assert.ok(dec(r.fail).minus(r.failHype).eq('15'), JSON.stringify([r.fail, r.failHype, scan.ctx.book.external]));
+    assert.ok(dec(r.fail).eq(r.failHype), JSON.stringify([r.fail, r.failHype, scan.ctx.book.external]));
     for(const [key,path] of [['failCost','fail'],['passCost','pass']]) {
       const {pf,hl}=actual.paths[path];
       const total=sumPostings([pf.entryFee,hl.entryFee,pf.exitFee,hl.exitFee]);
@@ -1942,7 +1925,7 @@ test('发布快照引用同一批目标并冻结，修改资金规则后各版�
   assert.equal(first.quoteSnapshotId,next.quoteSnapshotId);
   assert.equal(first.accountSnapshotId,next.accountSnapshotId);
   const plans=first.ratioScan.plans;
-  assert.equal(first.targets.length,4);
+  assert.equal(first.targets.length,5);
   assert.equal(first.targets[1],plans.pressure.row ?? null);
   for (const [i,slot] of [0,2,3].entries()) {
     const row=first.targets[slot];
@@ -1952,7 +1935,7 @@ test('发布快照引用同一批目标并冻结，修改资金规则后各版�
   for (const row of first.scale.automatic.rows)
     assert.equal(row,plans.rows.find(r=>r.key===row.key));
   const none=publish({recoveryBuffer:'1000'});
-  assert.deepEqual(none.targets,[null,null,null,null]);
+  assert.deepEqual(none.targets,[null,null,null,null,null]);
   assert.equal(none.ratioScan.plans.eligible,0);
   assert.ok(Object.isFrozen(first) && Object.isFrozen(first.targets) && Object.isFrozen(first.scale.fixed.rows));
 });
@@ -2169,7 +2152,7 @@ test('候选各自按有符号 PF 数量反解两条原生触线价，并独立�
         if (venue==='pf') close(net.plus(1000),pfTarget);
         else {
           close(path.hypeNet,net.minus(stressed ? dec('104').times(2).times('0.0002').plus('0.1') : 0));
-          close(key==='fail'?r.fail:r.success,dec('120').plus(path.hypeNet).plus(key==='fail'?12:0));
+          close(key==='fail'?r.fail:r.success,dec('120').plus(path.hypeNet));
         }
       }
     }
@@ -2581,7 +2564,7 @@ test('前版已完成快照仅供历史核对，本版拒绝跨候选拼接的�
   const [[key,json]]=data.entries(), old=JSON.parse(json);
   old.view.trace.model='AUTO-0.21.7';
   data.clear();
-  storage.setItem(key.replace('AUTO-0.21.8','AUTO-0.21.7'),JSON.stringify(old));
+  storage.setItem(key.replace('AUTO-0.21.25','AUTO-0.21.7'),JSON.stringify(old));
   const historic=displayHistory(storage).read('plan:BTC');
   assert.equal(historic.solverVersion,'AUTO-0.21.7');
   assert.throws(()=>createSolutionSnapshot({...result,trace:old.view.trace}),/求解器版本已变更/);
@@ -2780,8 +2763,8 @@ test('PRESSRANK02 全网格与所有同规模并列项的独立排序一致，�
   const baseline={B:'157',R_success:'65',R_free:'0',pfFee:'0.0001',hlFee:'0.0005',
     adverseBps:'1',asyncBps:'1',jumpBps:'1',delayBps:'1',fundingDebit:'0.01'};
   let tied=false;
-  const outcomes=[];
-  for (const patch of [{},{B:'142'},{B:'125',R_success:'35',recoveryBuffer:'11'},
+  const outcomes=[], cashKeys=new Set(), cashMargins=new Set();
+  for (const patch of [{},{B:'142'},{B:'142',successBuffer:'3',recoveryBuffer:'1'},{B:'125',R_success:'35',recoveryBuffer:'11'},
       {asyncBps:'150'},{fundingDebit:'4'},{fundingDebit:'1.95',fundingRatesBps:'70,25'},{asyncBps:'900',fundingDebit:'7'}]) {
     const r={...inputs,...baseline,...patch};
     const configured=scanFixture(r,fixture).ratioScan;
@@ -2794,7 +2777,7 @@ test('PRESSRANK02 全网格与所有同规模并列项的独立排序一致，�
       const cases=p.cases.filter(c=>c.configured && c.status==='pass');
       const fail=min(...cases.map(c=>dec(c.fail.cash))),success=min(...cases.map(c=>dec(c.success.cash)));
       assert.ok(fail.eq(p.minFailure.value) && success.eq(p.minSuccess.value));
-      assert.ok(fail.gte(dec(r.B).plus(r.recoveryBuffer??'0')) && success.gte(r.R_success));
+      assert.ok(fail.gte(dec(r.B).plus(r.recoveryBuffer??'0')) && success.gte(dec(r.R_success).plus(r.successBuffer||'0')));
       assert.ok(min(fail.minus(r.B),success.minus(r.R_success)).eq(p.cashBuffers.minimum));
       valid.push({row,headroom:min(fail.minus(r.B),success.minus(r.R_success)),
         margin:dec(p.maxMarginUsed.value),surplus:dec(p.minSurplus.value)});
@@ -2803,17 +2786,26 @@ test('PRESSRANK02 全网格与所有同规模并列项的独立排序一致，�
       a.margin.cmp(b.margin) || Number(a.row.leverage)-Number(b.row.leverage) ||
       b.row.sign-a.row.sign || a.row.j-b.row.j);
     const best=valid[0]?.row.key??null;
+    const peak=valid.length?out(max(...valid.map(candidate=>candidate.headroom))):null;
+    for(const report of [configured.plans,desk.plans]) {
+      assert.equal(report.cashPriority.row?.pressureSummary.cashBuffers.minimum??null,peak);
+    }
     assert.equal(configured.plans.pressure.key,best);
     assert.equal(desk.plans.pressure.key,best);
-    if (patch.recoveryBuffer) {
+    if (patch.recoveryBuffer==='11') {
       // Both candidates meet the extra 11 U admission floor. Subtracting it
       // again from M_fail would incorrectly choose four Hype lots over three.
       assert.equal(best,'1/7/3');
       assert.ok(valid.some(x=>x.row.key==='1/7/4'));
     }
+    if(peak!=null) {
+      cashKeys.add(desk.plans.cashPriority.key);
+      cashMargins.add(peak);
+    }
     outcomes.push(best);
     if (valid.length && valid.filter(x=>x.row.i===valid[0].row.i).length>1) tied=true;
   }
+  assert.ok(cashKeys.size>1 && cashMargins.size>1);
   assert.ok(tied);
   assert.ok(new Set(outcomes).size>1);
 });
@@ -2832,7 +2824,8 @@ test('PRESSRANK03 延迟增加仓位时单独核验抵押品，先尝试更高�
   assert.equal(larger.configuredPass,true);
   const winner=scan.plans.pressure.row;
   assert.equal(winner.key,larger.key);
-  assert.equal(winner.leverage,'4');
+  assert.equal(winner.leverage,'10');
+  assert.ok(dec(winner.pressureSummary.maxMarginUsed.value).lt(larger.pressureSummary.maxMarginUsed.value));
   assert.equal(winner.pressureSummary.key,winner.key);
 });
 
@@ -2910,7 +2903,7 @@ test('四方案快照核对压力极值的情景来源，并拒收借用其他�
   const result=scanFixture({B:'157',R_free:'0',R_success:'72'},f);
   result.calculationMarket=f.m;
   const frame=createSolutionSnapshot(result),plans=frame.ratioScan.plans;
-  assert.deepEqual(frame.targets.map(t=>t?.key),[plans.targetKeys[0],plans.pressure.key,...plans.targetKeys.slice(1)]);
+  assert.deepEqual(frame.targets.map(t=>t?.key),[plans.targetKeys[0],plans.pressure.key,...plans.targetKeys.slice(1),plans.cashPriority.key??undefined]);
   assert.equal(frame.targets[1],plans.pressure.row);
   for(const change of [p=>{p.pressure.row.pressureSummary.minFailure.value='10000';},
       p=>{p.pressure.row.pressureSummary.leverage='999';},p=>{p.pressure.row.pressureSummary.cases.find(c=>c.id==='B').success.cash='0';}]){
@@ -2918,4 +2911,520 @@ test('四方案快照核对压力极值的情景来源，并拒收借用其他�
     change(damaged.ratioScan.plans);
     assert.throws(()=>createSolutionSnapshot(damaged),/压力/);
   }
+});
+
+test('双端现金缓冲分别排除原最大仓位，D 硬约束保留基础结果',()=>{
+  const fixture=pressureFixture(), rules={B:'157',R_success:'65',R_free:'0'};
+  const solve=patch=>scanFixture({...rules,...patch},fixture);
+  const initial=solve({}), winner=initial.ratioScan.plans.pressure.row;
+  for(const [field,end] of [['recoveryBuffer','fail'],['successBuffer','success']]){
+    const required=out(dec(winner.pressureSummary.cashBuffers[end]).plus('0.000001'));
+    const next=solve({[field]:required}), search=next.ratioScan.plans.pressure;
+    assert.notEqual(next.trace.rulesId,initial.trace.rulesId);
+    assert.notEqual(search.key,winner.key);
+    if(search.row) {
+      const summary=search.row.pressureSummary;
+      assert.ok(dec(summary.cashBuffers[end]).gte(required));
+      assert.ok(summary.cases.filter(c=>c.configured).every(c=>c.status==='pass'));
+    }
+  }
+  const hard=solve({hardDepthD:'required'}).ratioScan.plans;
+  assert.ok(hard.targetKeys[0]);
+  assert.equal(hard.pressure.key,null);
+  const d=hard.rows[0].pressureSummary.cases.find(c=>c.id==='D');
+  assert.equal(d.configured,true);
+  assert.equal(d.verified,false);
+  assert.equal(d.fail.cash,null);
+  assert.equal(d.success.cash,null);
+});
+
+test('提现手续费只扣一次，六项规则驱动每个候选的实际条件结算',()=>{
+  const fixture=pressureFixture();
+  const config={stage:'funded',fundedTarget:'1100',fundedFloor:'900',baseline:'1000',resetBaseline:'950',R_free:'0'};
+  function check(patch,expected){
+    const scan=scanFixture({...config,...patch},fixture).ratioScan;
+    const a=scan.plans.cashPriority.row.pressureSummary;
+    for(const c of a.cases.filter(c=>c.verified)){
+      const funds=c.success.personalFunds, split=funds.split;
+      assert.deepEqual([split.qualified,split.user,split.platform,funds.resetEquity],expected);
+      assert.ok(dec(funds.final).minus(funds.hype).minus(split.user).abs().lt('1e-40'));
+      assert.equal(c.fail.personalFunds.projectedPayout,'0');
+      assert.equal(c.fail.personalFunds.final,c.fail.personalFunds.hype);
+    }
+    return a;
+  }
+  const full=check({},['100','80','20','950']);
+  check({share:'0.7',platformShare:'0.3'},['100','70','30','950']);
+  check({baseline:'1050',resetBaseline:'1000'},['50','40','10','1000']);
+  check({minimumProfit:'100',withdrawalFee:'10'},['90','72','18','950']);
+  check({minimumProfit:'101'},['0','0','0',null]);
+  const noCash=check({withdrawalFee:'150'},['0','0','0',null]);
+  assert.equal(noCash.M_verified,full.M_verified);
+  assert.equal(full.M_full,null);
+});
+
+test('提现前后两条路径用同一候选分别取最低值，独立外部资金不冒充 Hype 结余',()=>{
+  const scan=scanFixture({B:'157',R_success:'65',R_free:'0',external:'20',externalAt:at},pressureFixture()).ratioScan;
+  const audit=scan.plans.cashPriority.row.pressureSummary;
+  const known=audit.cases.filter(c=>c.verified);
+  const failures=known.map(c=>c.fail.personalFunds.hype);
+  const success=known.map(c=>c.success.personalFunds);
+  assert.equal(audit.failComponent.value,out(min(...failures)));
+  assert.equal(audit.successFinal.value,out(min(...success.map(p=>p.final))));
+  assert.equal(audit.worstAvailable.value,out(min(...failures,...success.map(p=>p.before))));
+  assert.equal(audit.worstFinal.value,out(min(...failures,...success.map(p=>p.final))));
+  assert.equal(audit.M_full,null);
+});
+
+test('独立跨所压力使用同一候选的两条路径并进入现金硬筛选',()=>{
+  const config={B:'157',R_success:'65',R_free:'0',pfFee:'0.0001',hlFee:'0.0005',
+    widenBps:'1',narrowBps:'1',vestJumpBps:'1',hypeJumpBps:'1',exitLagBps:'1'};
+  const scan=scanFixture(config,pressureFixture()).ratioScan;
+  const {row}=scan.plans.cashPriority;
+  assert.ok(row?.configuredPass);
+  for(const id of ['premiumWider','premiumCloser','vestJump','hypeJump','vestFirst','hypeFirst']) {
+    const c=row.pressureSummary.cases.find(c=>c.id===id);
+    assert.equal(c.verified,true);assert.equal(c.status,'pass');
+    for(const p of [c.fail,c.success]) {
+      assert.ok(p.venue && p.cash!=null && dec(p.fees.pf).gt(0) && dec(p.fees.hl).gt(0));
+      const {slope,intercept,line}=p.derivation;
+      assert.ok(dec(line).minus(intercept).div(slope).plus(p.mathMarks.start).minus(p.venue.triggerMark).abs().lt('1e-38'));
+    }
+  }
+  const bad=scanFixture({...config,hypeJumpBps:'30000'},pressureFixture()).ratioScan;
+  const rejected=planRecord(bad,row).pressureSummary;
+  assert.notEqual(rejected.cases.find(c=>c.id==='hypeJump').status,'pass');
+  assert.notEqual(bad.plans.cashPriority.key,row.key);
+  const noFX={...scan.ctx,checks:{...scan.ctx.checks,basisRate:null}};
+  assert.equal(searchLiquidityMaximum(scan,()=>assert.fail('缺少汇率不得估价'),false,noFX).status,'incomplete');
+});
+
+test('跨币种基差按有方向汇率归一化，收敛止于零，各腿独立移动',()=>{
+  const m={pf:{mark:'100'},hl:{mark:'120'}};
+  const path=(id,bp='100',qty='-1')=>venuePath(id,m,'105','0.9',bp,qty);
+  assert.equal(basisObservation('100','120','0.9').gap,'8');
+  assert.equal(basisObservation('100','120',null),null);
+  assert.ok(dec(path('premiumWider').basisAfter.bps).minus('900').abs().lt('1e-38'));
+  assert.ok(dec(path('premiumCloser').basisAfter.bps).minus('700').abs().lt('1e-38'));
+  assert.ok(dec(path('premiumCloser','1000').basisAfter.bps).minus('0').abs().lt('1e-38'));
+  assert.equal(path('vestJump').pfEnd,'106');assert.equal(path('vestJump').hlEnd,'126');
+  assert.equal(path('hypeJump').pfEnd,'105');assert.equal(path('hypeJump').hlEnd,'127.2');
+  assert.equal(path('hypeJump','100','1').hlEnd,'124.8');
+  assert.equal(path('vestFirst').hlEnd,'127.26');assert.equal(path('hypeFirst').hlEnd,'124.8');
+  const discounted=venuePath('premiumWider',{pf:{mark:'100'},hl:{mark:'100'}},'80','0.99','10','1');
+  assert.ok(dec(discounted.basisAfter.bps).minus('-110').abs().lt('1e-38'));
+  assert.ok(venuePath('vestJump',m,'105',null,'1','1').error);
+});
+
+test('数学终点窗口分别限制上涨和下跌，最长持仓和考核截止取先到者',()=>{
+  const at='2026-11-20T00:00:00Z',deadline='2026-11-20T06:00:00Z';
+  const cfg={holdHours:'12',dailyUpPct:'24',dailyDownPct:'12'};
+  const price=(change,rules=cfg,expiry=deadline)=>reachability(change,rules,expiry,at);
+  const by24=rows=>rows.find(r=>r.window==='24');
+  assert.deepEqual(by24(price('6')),{window:'24',effective:'6',bound:'6',status:'within'});
+  assert.equal(by24(price('-6')).status,'outside');
+  assert.equal(by24(price('-6',cfg,null)).effective,'12');
+  assert.equal(by24(price('-6',cfg,null)).status,'within');
+  const both={dailyUpPct:'5',dailyDownPct:'4',twoDayUpPct:'12',twoDayDownPct:'10'};
+  const by48=rows=>rows.find(r=>r.window==='48');
+  assert.equal(by24(price('10',both,null)).status,'outside');
+  assert.equal(by48(price('10',both,null)).status,'within');
+  assert.equal(by48(price('-10',both,null)).status,'within');
+  assert.equal(by48(price('10',both,'2026-11-21T12:00:00Z')).bound,'8.5');
+  assert.equal(by48(price('10',{dailyUpPct:'5'},null)).status,'unknown');
+  assert.equal(by48(price('10',{twoDayUpPct:'12'},'2026-11-22T00:00:00Z')).status,'within');
+  assert.equal(by24(price('0.001',cfg,at)).status,'outside');
+  assert.equal(by24(price('6',{})).status,'unknown');
+  assert.equal(by24(price('6',{dailyUpPct:'0'})).status,'outside');
+});
+
+test('考核剩余时间进入离散仓位与压力筛选，超出窗口的历史结果不能重新发布',()=>{
+  const horizon={challengeStart:at,dailyUpPct:'20',dailyDownPct:'20',twoDayUpPct:'35',twoDayDownPct:'35'};
+  const solve=(hours,overrides={})=>scanFixture({...horizon,B:'157',R_success:'72',R_free:'0',
+    deadline:new Date(t+hours*3600000).toISOString(),...overrides},pressureFixture());
+  const full=solve(48),short=solve(12);
+  assert.equal(full.ratioScan.plans.cashPriority.row.i,7);
+  assert.equal(short.ratioScan.plans.cashPriority.row,undefined);
+  assert.equal(short.ratioScan.plans.pressure.row,undefined);
+  assert.equal(targetsWithinExam(full,t),true);
+  assert.equal(targetsWithinExam(full,t+36*3600000),false);
+  assert.equal(targetsWithinExam(full,t+48*3600000),false);
+  for (const sign of [-1,1]) {
+    assert.ok(ratioSlice(full.ratioScan,sign,7,'eligible').length);
+    assert.deepEqual(ratioSlice(short.ratioScan,sign,7,'eligible'),[]);
+    for(const key of ['fail','pass']) assert.ok(inspectRatio(short.ratioScan.ctx,{sign,i:7,j:3})[key==='pass'?'passStop':'failStop']);
+  }
+  assert.deepEqual(solve(48,{examEquityFloor:'901'}).ratioScan.plans.targetKeys,[null,null,null]);
+  const unknown=solve(48,{dailyUpPct:'40',twoDayUpPct:'35'});
+  assert.match(unknown.issues.join(' '),/可达性未知/);
+  assert.equal(unknown.candidate,undefined);assert.equal(unknown.ratioScan,undefined);
+  const blank={dailyUpPct:'',twoDayUpPct:'',dailyDownPct:'',twoDayDownPct:''};
+  for (const limits of [blank,{...blank,twoDayDownPct:'35'}]) {
+    const conditional=solve(48,limits);
+    assert.equal(conditional.advice,null);
+    const {row}=conditional.ratioScan.plans.cashPriority;
+    assert.ok(row);
+    const proof=row.pressureSummary, base=proof.cases.find(c=>c.id==='A');
+    assert.equal(proof.cases.find(c=>c.id==='examReachability').verified,false);
+    assert.equal(proof.M_full,null);
+    for(const end of [base.fail,base.success]){
+      assert.ok(end.mathMarks.trigger);
+      assert.equal(end.exam.percent,out(dec(end.mathMarks.trigger).minus(end.mathMarks.start).times(100).div(end.mathMarks.start)));
+      assert.equal(end.exam.status,limits.twoDayDownPct && dec(end.exam.percent).isNegative()?'pass':'unknown');
+    }
+    assert.equal(targetsWithinExam(conditional,t),true);
+    assert.equal(targetsWithinExam(conditional,t+48*3600000),false);
+  }
+  const zero=solve(48,{...blank,twoDayUpPct:'0'});
+  assert.equal(zero.ratioScan.plans.cashPriority.row,undefined);
+
+});
+
+test('先后平仓独立筛选，预留执行时间压缩了可用考核窗口',()=>{
+  const config={B:'157',R_success:'72',R_free:'0',challengeStart:at,
+    deadline:new Date(t+48*3600000).toISOString(),dailyUpPct:'20',dailyDownPct:'20',twoDayUpPct:'35',twoDayDownPct:'35'};
+  const run=patch=>scanFixture({...config,...patch},pressureFixture());
+  assert.equal(examEnvelope({...config,holdHours:'12'},config.deadline,at,3600).up,out(dec('20').times(11).div(24)));
+  const base=run({});
+  assert.ok(base.ratioScan.plans.pressure.row);
+  for (const [field,id,other] of [['vestFirstBps','vestFirst','hypeFirst'],['hypeFirstBps','hypeFirst','vestFirst']]) {
+    const mild=run({[field]:'0.01'});
+    const row=mild.ratioScan.plans.cashPriority.row;
+    const scenario=row.pressureSummary.cases.find(c=>c.id===id);
+    assert.equal(scenario.status,'pass');
+    assert.equal(row.pressureSummary.cases.find(c=>c.id===other).configured,false);
+    for(const side of [scenario.fail,scenario.success]) {
+      assert.ok(side.prices.pf && side.prices.hl && side.fees.pf!=null && side.fees.hl!=null);
+      assert.equal(side.exam.status,'pass');
+    }
+    assert.equal(scenario.fail.personalFunds.projectedPayout,'0');
+    assert.equal(scenario.success.personalFunds.final,out(dec(scenario.success.personalFunds.before).plus(scenario.success.personalFunds.projectedPayout)));
+  }
+  for (const patch of [{vestFirstBps:'2500'},{exitLagBps:'1',exitDelaySeconds:String(47*3600)},{exitDelaySeconds:'1'}]) {
+    const plans=run(patch).ratioScan.plans;
+    assert.equal(plans.pressure.row,undefined);
+    assert.equal(plans.cashPriority.row,undefined);
+  }
+});
+
+test('期限网格证明无解时，现仓回收也须通过自身的时间路径',()=>{
+  const f=pressureFixture();
+  Object.assign(f.a.pf,{qty:'5'});
+  Object.assign(f.a.hl,{qty:'-2',currentMarginCredit:'40'});
+  const result=calculateCurrent({...inputs,challengeStart:at,deadline:new Date(t+3600000).toISOString(),
+    dailyUpPct:'1',dailyDownPct:'1',twoDayUpPct:'25',twoDayDownPct:'25'},f.a,f.m,{},t,
+    {scanRatios:true,baseObjectives:true});
+  assert.equal(result.ratioScan.complete,true);
+  assert.equal(result.ratioScan.sets.risk.count,0);
+  assert.equal(result.candidate,undefined);
+  assert.equal(result.flatHold,false);
+  assert.equal(result.heldCash.failureCash,undefined);
+  assert.equal(result.heldCash.cashBeforePayout,undefined);
+  assert.match(result.notices.join(' '),/现仓成功线超出考核可达范围/);
+});
+
+test('固定 Mark 的 Bid、Ask、撤档深度与热启动均按新快照联合求最大缓冲',()=>{
+  const config={...inputs,B:'157',R_success:'72',R_free:'0',pfFee:'0.0001',hlFee:'0.0005'};
+  const f=pressureFixture();
+  const solve=seed=>calculateCurrent(config,f.a,f.m,{},t,{scanRatios:true,baseObjectives:true,cashSeed:seed}).ratioScan.plans.cashPriority;
+  const base=solve();
+  const seed={i:base.row.i,j:base.row.j,sign:base.row.sign};
+  const check=()=>{
+    const cold=solve(),warm=solve(seed);
+    assert.equal(warm.key,cold.key);
+    assert.equal(warm.row.pressureSummary.M_verified,cold.row.pressureSummary.M_verified);
+    return warm;
+  };
+  f.m.hl.levels[0][0][0]='99.95';
+  const bid=check();
+  assert.equal(bid.key,base.key);
+  assert.ok(bid.localEvaluations>0);
+  assert.ok(dec(bid.row.pressureSummary.M_verified).lt(base.row.pressureSummary.M_verified));
+  f.m.hl.levels[0][0][0]='100';
+  f.m.pf.levels[1][0][0]='100.02';
+  assert.ok(dec(check().row.pressureSummary.M_verified).lt(base.row.pressureSummary.M_verified));
+  f.m.pf.levels[1][0][0]='100';
+  for(const side of f.m.pf.levels){side[2][1]='4';side[3][1]='2';}
+  const depth=check();
+  assert.deepEqual([base.row.pf,base.row.hl,depth.row.pf,depth.row.hl],['7','-3','5','-2']);
+  assert.equal(depth.row.h,'0.4');
+});
+
+test('Evaluation 每个候选均无 PF 分成，现金排序独立于 Funded 门槛和费率',()=>{
+  const config={B:'157',outsideCosts:'0.3',R_success:'65',R_free:'0'};
+  const reports=[{}, {minimumProfit:'',baseline:'',withdrawalFee:'-5',share:'',platformShare:'invalid',fundedFloor:'12000'}]
+    .map(patch=>scanFixture({...config,...patch},pressureFixture()).ratioScan.plans);
+  const best=reports[0].cashPriority.row;
+  assert.equal(reports[1].cashPriority.key,best.key);
+  for(const row of [...reports[0].rows,best,reports[1].cashPriority.row]){
+    const proof=row.pressureSummary;
+    if(!proof) continue;
+    for(const c of proof.cases.filter(c=>c.verified)) for(const e of [c.fail,c.success]){
+      if(!e.personalFunds) continue;
+      assert.equal(e.personalFunds.final,e.personalFunds.hype);
+      assert.equal(e.personalFunds.projectedPayout,'0');
+    }
+    if(proof.minFailure && proof.minSuccess) assert.equal(proof.M_eval,
+      out(min(dec(proof.minFailure.value).minus(config.B),dec(proof.minSuccess.value).minus(config.R_success))));
+  }
+});
+
+test('账户权益通过后结束考核，Hype 尚有仓位时不虚构退出现金',()=>{
+  const f=fixture(), profile={...inputs,challengeFloor:'9400',challengeTarget:'12000'};
+  f.a.pf.equity='12000'; f.a.hl.qty='1';
+  const first=calculateCurrent(profile,f.a,f.m,{},t);
+  assert.equal(first.evaluationClose.pf,'12000');assert.equal(first.evaluationClose.hype,null);
+  assert.equal(first.evaluationClose.payout,'0');assert.equal(first.candidate,undefined);
+  const closed={...profile,stage:'funded',evaluationClose:first.evaluationClose};
+  f.a.hl.qty='0'; f.a.hl.equity='101.28';
+  const settled=calculateCurrent(closed,f.a,f.m,{},t);
+  assert.equal(settled.evaluationClose.personal,'101.28');
+  assert.equal(settled.ratioScan,undefined);assert.equal(settled.needsSearch,undefined);
+  f.a.pf.at=new Date(t-86400000).toISOString();
+  assert.equal(calculateCurrent(profile,f.a,f.m,{},t).evaluationClose,null);
+});
+
+test('现金目标在双向数量步长与每个可行杠杆中按 M、峰值保证金、维持余量排序',()=>{
+  const scan=scanFixture({B:'157',R_success:'65',R_free:'0'},pressureFixture()).ratioScan;
+  const winner=scan.plans.cashPriority.row;
+  const best=winner.pressureSummary;
+  let checked=0, largerMargin=false;
+  for(const sign of [1,-1]) for(let i=1;i<=10;i++) for(const [lo,hi] of ratioSlice(scan,sign,i,'eligible')){
+    for(let j=lo;j<=hi;j++){
+      const point={sign,i,j};
+      const grid=inspectRatio(scan.ctx,point,{includeLeverageGrid:true}).leverageGrid;
+      for(const tier of grid.filter(x=>x.status==='pass')){
+        const row=recordFromInspection(scan.ctx,inspectRatio(scan.ctx,point,{fixedLeverage:tier.leverage,includePathAudit:true}));
+        if(!row.configuredPass)continue;
+        const p=row.pressureSummary;
+        const rank=dec(best.M_eval).cmp(p.M_eval) || dec(p.maxMarginUsed.value).cmp(best.maxMarginUsed.value) ||
+          dec(best.minSurplus.value).cmp(p.minSurplus.value);
+        assert.ok(rank>=0);
+        if(row.key===winner.key && dec(p.maxMarginUsed.value).gt(best.maxMarginUsed.value))largerMargin=true;
+        checked++;
+      }
+    }
+  }
+  assert.ok(checked>1 && largerMargin);
+});
+
+test('只改变 Vest 买盘价格，Mark、各档数量和资金规则不变，现金最优比例跨越数量步长',()=>{
+  const f=pressureFixture(), config={B:'126',R_success:'35',R_free:'0'};
+  const solve=()=>scanFixture(config,f).ratioScan.plans.cashPriority.row;
+  const first=solve();
+  for(const level of f.m.pf.levels[0]) level[0]=out(dec(level[0]).minus(1));
+  const next=solve();
+  assert.deepEqual([first.key,next.key],['1/7/3','1/2/1']);
+  assert.notEqual(first.h,next.h);
+});
+
+test('SCALE01 同一10%名义比例的三个独立规模重新结算双路径，其他比例另行计价',()=>{
+  const f=fixture();
+  for(const side of ['pf','hl']) {
+    f.m[side].levels=[[['100','400'],['99.99','400'],['99.98','400']],
+      [['100','400'],['100.01','400'],['100.02','400']]];
+  }
+  Object.assign(f.a.pf,{equity:'10000',free:'10000'});
+  Object.assign(f.a.hl,{equity:'409',free:'409'});
+  f.m.spec.maxQty='350'; f.m.hl.maxQty='100';
+  const rules={baseline:'10000',B:'500',investedCapital:'500',R_success:'100',R_free:'0',
+    pfFee:'0.0001',hlFee:'0.0004',challengeTarget:'12000',challengeFloor:'9400'};
+  const scan=scanFixture(rules,f).ratioScan;
+  const probe=(i,j)=>inspectRatio(scan.ctx,{i,j,sign:1},{minimizeMargin:true,includePathAudit:true});
+  const samples=[[10,1],[100,10],[200,20],[100,15]].map(([i,j])=>probe(i,j));
+  for(const [k,r] of samples.entries()) {
+    assert.equal(out(dec(r.hypeValue).div(r.pfValue)),k<3?'0.1':'0.15');
+    for(const [end,line] of [['pass',12000],['fail',9400]]) {
+      assert.ok(dec(r.paths[end].pf.settled).minus(line).abs().lt('0.000001'));
+      const pnl=dec(r.paths[end].hl.settled).minus(f.a.hl.equity);
+      assert.equal(pnl.isPositive(),end==='fail');
+      assert.ok(dec(r.paths[end].hl.exitFee).gt(0));
+    }
+    assert.ok(dec(r.initial).gt(0) && r.liquidation!=null);
+  }
+  assert.deepEqual(samples.map(r=>r.pfValue),['1000','10000','20000','10000']);
+  assert.ok(dec(samples[2].initial).gt(samples[1].initial) && dec(samples[1].initial).gt(samples[0].initial));
+  assert.ok(dec(samples[0].paths.pass.pf.exitMark).gt(samples[2].paths.pass.pf.exitMark));
+  assert.notEqual(samples[1].fail,samples[3].fail);
+  assert.deepEqual(scan.plans.checkpoints.map(r=>r.target),[500,1000,2000,3000,5000,8000,10000,15000,20000,30000]);
+  const matrix=scan.plans.ratioCheckpoints;
+  assert.deepEqual(Object.keys(matrix),['5','8','10','12','15','18','20']);
+  for(const rows of Object.values(matrix)) assert.equal(rows.length,10);
+  for(const [index,target] of [[1,1000],[6,10000]]) {
+    const record=matrix[10][index];
+    assert.equal(Number(record.pfValue),target); assert.equal(Number(record.hypeValue),target/10);
+    const expected=recordFromInspection(scan.ctx,inspectRatio(scan.ctx,{sign:record.sign,i:record.i,j:record.j},
+      {fixedLeverage:Number(record.leverage),includePathAudit:true}));
+    assert.equal(record.fail,expected.pressureSummary.minFailure.value);
+    assert.equal(record.pass,expected.pressureSummary.minSuccess.value);
+    assert.equal(record.margin,expected.pressureSummary.maxMarginUsed.value);
+  }
+  assert.notEqual(matrix[10][1].fail,matrix[10][6].fail);
+  assert.ok(matrix[15].every(r=>r.status==='pass' || r.reason.length>0));
+  if(process.env.SHOW_SCALE_TEST) console.log(JSON.stringify(samples.map(r=>({pf:r.pfValue,hype:r.hypeValue,
+    fail:r.paths.fail.hl.settled,pass:r.paths.pass.hl.settled,margin:r.initial,liq:r.liquidation,risk:r.verification.liquidation}))));
+});
+
+test('SCALE02 30000 U 扫描档以上仍可选为最大规模，缩短窗口后独立重算',()=>{
+  const f=fixture();
+  for (const side of ['pf','hl']) f.m[side].levels=[
+    [['100','400'],['99.999','400'],['99.998','400']],
+    [['100','400'],['100.001','400'],['100.002','400']]];
+  Object.assign(f.a.pf,{equity:'10000',free:'10000'});
+  Object.assign(f.a.hl,{equity:'450',free:'450'});
+  f.m.spec.maxQty='350'; f.m.hl.maxQty='100';
+  const rules={baseline:'10000',B:'500',investedCapital:'500',R_success:'100',R_free:'0',
+    challengeFloor:'9400',challengeTarget:'12000',deadline:new Date(t+48*3600000).toISOString(),
+    dailyUpPct:'5',dailyDownPct:'5',twoDayUpPct:'10',twoDayDownPct:'10'};
+  const result=scanFixture(rules,f).ratioScan.plans;
+  const reference=result.ratioCheckpoints[10].find(r=>r.target===10000);
+  assert.equal(reference.cashStatus,'pass');
+  assert.equal(reference.status,'none');
+  assert.equal(reference.branches[0].pass.status,'fail');
+  assert.equal(reference.branches[0].fail.status,'pass');
+  assert.ok(dec(reference.fail).gte(500) && dec(reference.pass).gte(100));
+  const unbounded=scanFixture({...rules,dailyUpPct:'',dailyDownPct:'',twoDayUpPct:'',twoDayDownPct:'',
+    deadlineMark:'100',deadlineAsset:'BTC',deadlineBound:rules.deadline},f).ratioScan.plans;
+  const same=unbounded.ratioCheckpoints[10].find(r=>r.target===10000);
+  assert.equal(same.status,'pass');
+  assert.equal(same.cashStatus,'pass');
+  assert.ok(same.branches.every(b=>b.pass.status==='unknown' && b.fail.status==='unknown'));
+  assert.equal(same.deadline.status,'scenario');
+  assert.ok(dec(same.deadline.cash).gt(0));
+  const tooSmall=unbounded.checkpoints[0];
+  assert.equal(tooSmall.status,'none');
+  assert.ok(tooSmall.branches.every(b=>b.pass.status==='fail' || b.fail.status==='fail'));
+  assert.equal(result.pressure.row.pfValue,'35000');
+  assert.ok(result.checkpoints.find(r=>r.target===1000).reason.includes('窗口上限'));
+  assert.equal(result.checkpoints.at(-1).status,'pass');
+  assert.ok(dec(result.cashPriority.row.pressureSummary.M_eval).gte(result.pressure.row.pressureSummary.M_eval));
+  assert.notEqual(result.pressure.key,result.cashPriority.key);
+  const onlyTen=calculateCurrent({...inputs,...rules},f.a,f.m,{},t,{scanRatios:true,scanPercentages:[10]}).ratioScan.plans;
+  assert.deepEqual(Object.keys(onlyTen.ratioCheckpoints),['10']);
+  assert.deepEqual(onlyTen.ratioCheckpoints[10],result.ratioCheckpoints[10]);
+  assert.equal(onlyTen.pressure.key,result.pressure.key);
+  assert.equal(onlyTen.cashPriority.key,result.cashPriority.key);
+  const shorter=scanFixture({...rules,deadline:new Date(t+12*3600000).toISOString()},f).ratioScan.plans;
+  assert.equal(shorter.pressure.status,'none'); assert.equal(shorter.cashPriority.status,'none');
+});
+
+function moveCase(changes={},settings={}) {
+  const f=fixture(), r={...inputs,B:'500',R_success:'100',R_free:'0',baseline:'10000',
+    investedCapital:'500',challengeTarget:'12000',challengeFloor:'9400',
+    dailyUpPct:'',dailyDownPct:'',twoDayUpPct:'',twoDayDownPct:'',...changes};
+  for(const [side,equity] of [['pf','10000'],['hl','409']]) {
+    f.a[side].equity=f.a[side].free=equity;
+    f.m[side].levels=[[['100','2000'],['99.99999','2000'],['99.99998','2000']],
+      [['100','2000'],['100.00001','2000'],['100.00002','2000']]];
+  }
+  f.m.spec.maxQty='65'; f.m.hl.maxQty='60'; f.m.hl.sizeDecimals=2;
+  const x=calculateCurrent(r,f.a,f.m,{},t,{scanRatios:true,baseObjectives:true,
+    decision:{mode:'move',direction:'1',percent:'5',...settings}});
+  return {x,d:x.ratioScan.plans.decision,f,r};
+}
+
+test('MOVE 1/3 反推所需独立于数量上限；两个方向、每档可行集合与路径分开',()=>{
+  const {d}=moveCase();
+  for(const dir of d.directions) {
+    for(const [pct,expected] of [['10','20000'],['5','40000'],['2','100000']]) {
+      const level=dir.levels.find(l=>l.percent===pct);
+      assert.equal(level.requiredPosition.notional,expected);
+      assert.equal(level.requiredPosition.lines.pass.percent,String(dir.sign*Number(pct)));
+      assert.equal(level.time.pass.status,'unknown');assert.equal(level.time.fail.status,'unknown');
+      assert.equal(level.choice,null);assert.deepEqual(level.hedgeFeasibleSet,[]);
+      assert.equal(dir.maxFeasiblePosition.notional,'6500');
+      assert.ok(level.bindingConstraints.length);
+    }
+  }
+  assert.equal(d.action,null);
+});
+
+test('MOVE 2 单边万一手续费计入开平仓，取整后再次核算净权益',()=>{
+  const {d}=moveCase({pfFee:'0.0001'});
+  const req=d.directions[0].levels.find(l=>l.percent==='5').requiredPosition;
+  assert.ok(dec(req.continuous).minus('40164.675168').abs().lt('0.000001'));
+  assert.equal(req.notional,'40200');
+  assert.equal(req.equity,out(dec('10000').plus(dec('40200').times('0.049795'))));
+  assert.ok(dec(req.equity).gte('12000') && dec(req.equity).minus('4.9795').lt('12000'));
+});
+
+test('MOVE 4/5 分析副本调整留存；同一比例两种规模独立核价',()=>{
+  const {x,d,r}=moveCase({}, {trial:{field:'R',value:'90'}});
+  assert.ok(dec(x.theoreticalRatio.lower).times(100).minus('15.1666667').abs().lt('0.0000001'));
+  assert.equal(x.theoreticalRatio.upper,'0.1545');assert.equal(d.trial.theory.upper,'0.1595');
+  assert.equal(r.R_success,'100');assert.equal(d.capital.R,'100');
+  for(const [i,j,move] of [[10,100,200],[100,1000,20]]) {
+    const row=inspectRatio(x.ratioScan.ctx,{sign:1,i,j},{includeConstraints:true});
+    assert.equal(row.pfValue,String(100*i));assert.equal(row.hypeValue,String(i*10));
+    assert.equal(row.fail??row.conditionalEndpoints?.failure,'469');assert.equal(row.covers,false);
+    assert.equal(dec(row.lines.pass).div(x.ratioScan.ctx.market.pf.mark).times(100).toNumber(),move);
+  }
+});
+
+test('MOVE 6 调整量只读现仓，目标发生变化时重算，方向由现仓锁定',async()=>{
+  const {remainingOrder}=await import('../src/hedge/order-adjustment.js');
+  const {d,f,r}=moveCase({}, {percent:'50'});
+  assert.ok(d.action);assert.equal(d.action.pf,'40');assert.equal(d.action.sign,1);
+  assert.ok(d.directions[0].levels.find(l=>l.percent==='50').hedgeFeasibleSet.length);
+  for(const [cur,target,delta] of [['0.10','0.12','0.02'],['-0.015','-0.018','-0.003']])
+    assert.equal(remainingOrder(out(dec(target).minus(cur)),cur,[]).remaining,delta);
+  f.a.pf.qty='2';f.a.hl.qty='-0.30';
+  const previous=JSON.stringify(f.a);
+  const y=calculateCurrent(r,f.a,f.m,{},t,{scanRatios:true,baseObjectives:true,decision:{mode:'move',direction:'-1',percent:'50'}});
+  assert.equal(y.ratioScan.plans.decision.adopted,1);assert.equal(JSON.stringify(f.a),previous);
+  assert.ok(y.ratioScan.plans.decision.directions[1].reversal);
+});
+
+test('MOVE 7 报价微动跨快照复核；参数分析补资和放宽额逐分核验',()=>{
+  const {x,d,f,r}=moveCase({R_success:'150'}, {percent:'50',trial:{field:'R',value:'80'}});
+  const minChange=d.trial.minimum.change;
+  assert.ok(dec(minChange).gt(0));
+  const atChange=change=>calculateCurrent({...r,R_success:out(dec(r.R_success).minus(change))},f.a,f.m,{},t,
+    {baseObjectives:true,scanRatios:true,compareDirection:1,fixedLot:{i:40,sign:1}});
+  assert.ok(atChange(minChange).capacity);
+  assert.equal(atChange(dec(minChange).minus('0.01')).status,'none');
+  const previous=x.trace.id;
+  f.m.hl.levels[1][0][0]='100.000001';
+  const next=calculateCurrent(r,f.a,f.m,{},t,{baseObjectives:true,scanRatios:true,
+    decision:{mode:'move',percent:'50',direction:'1'}});
+  assert.notEqual(next.trace.id,previous);
+  assert.equal(next.ratioScan.plans.decision.directions[0].levels.at(-1).requiredPosition.qty,'40');
+  for(const field of ['deposit','depositB']) {
+    const v=moveCase({R_success:'150'},{percent:'50',trial:{field,value:'160'}}).d;
+    assert.equal(v.trial.B, field==='deposit'?'500':'660');
+    assert.equal(v.capital.hl,'409');assert.equal(v.capital.B,'500');
+    assert.ok(dec(v.trial.minimum.change).gt(0));
+  }
+});
+
+test('COLLECTION 同帧双向扫描、按双边数量去重、六档反推不依赖选择',()=>{
+  const {f,r}=moveCase();
+  f.m.spec.maxQty='150';
+  const fixed={scanRatios:true,baseObjectives:true,scanPercentages:[]},before=JSON.stringify([f.a,r]);
+  const solve=options=>calculateCurrent(r,f.a,f.m,{},t,{...fixed,...options}).ratioScan.plans.collection;
+  const data=solve({}),long=data.groups.find(g=>g.sign===1),at=(scale,tag)=>long.rows.find(v=>v.targets.includes(scale)&&v.tags.includes(tag));
+  assert.deepEqual(data.groups.map(g=>g.sign),[1,-1]);
+  const all=data.groups.flatMap(g=>g.rows);
+  assert.equal(all.length,new Set(all.map(row=>row.pf+'/'+row.hl)).size);
+  for(const scale of [1000,5000,10000]){
+    const reference=at(scale,'10%');assert.equal(reference.pfValue,String(scale));assert.equal(reference.hypeValue,String(scale/10));
+    assert.equal(reference.status,'fail');assert.match(reference.reason,/失败回收差/);
+    assert.ok(dec(reference.fail).lte('469') && dec(reference.fail).gt('468.99'));
+    assert.ok(reference.lines.pass.mark && reference.lines.fail.percent);
+  }
+  assert.deepEqual(['5%','10%','15%','20%'].map(p=>at(10000,p).hypeValue),['500','1000','1500','2000']);
+  assert.ok(long.rows.some(r=>r.tags.includes('合格边界') && r.status==='pass'));
+  assert.ok(long.rows.some(r=>r.tags.includes('区间内部') && r.status==='pass'));
+  assert.ok(long.rows.some(r=>r.tags.includes('两端现金余量交点邻档')));
+  for(const d of data.directions)assert.deepEqual(d.levels.map(l=>l.percent),['1','2','3','5','10','20']);
+  const other=solve({decision:{mode:'move',direction:'-1',percent:'10'}});
+  assert.deepEqual(other.groups,data.groups);
+  assert.equal(before,JSON.stringify([f.a,r]));
+  f.a.pf.qty='2';f.a.hl.qty='-0.3';
+  const held=JSON.stringify(f.a),reverse=solve({}).groups.find(g=>g.sign===-1);
+  assert.ok(reverse.reverse);
+  const row=reverse.rows.find(r=>r.tags.includes('10%'));
+  assert.equal(row.adjust.pf.delta,out(dec(row.pf).minus('2')));
+  assert.equal(row.adjust.hl.delta,out(dec(row.hl).plus('0.3')));
+  assert.ok(row.adjust.pf.close!=null && row.adjust.hl.open!=null);assert.equal(held,JSON.stringify(f.a));
 });

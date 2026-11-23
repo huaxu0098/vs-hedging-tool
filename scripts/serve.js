@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { makeBridge } from './bridge.js';
 import { readVestContract } from './vest-contract.js';
 import { createUsdRatesReader } from './usd-rates.js';
+import { createHypeSignerService } from './hype-signer.js';
+import { createHypeBackendEngine } from './hedge-engine.js';
 
 const root = new URL('../', import.meta.url);
 const host = '127.0.0.1';
@@ -20,6 +22,8 @@ const types = {
 };
 const bridge = makeBridge();
 const readUsdRates = createUsdRatesReader();
+const hypeSigner = createHypeSignerService();
+const hedgeEngine = createHypeBackendEngine(hypeSigner);
 
 const server = createServer(async (request, response) => {
   const validHost = ['localhost', '127.0.0.1'].some(
@@ -43,6 +47,110 @@ const server = createServer(async (request, response) => {
       response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(data));
     } catch {
       response.writeHead(503).end();
+    }
+    return;
+  }
+  if (
+    hedge &&
+    (url.pathname === '/api/hedge/session' ||
+      url.pathname === '/api/hedge/stream' ||
+      url.pathname === '/api/hedge/stats')
+  ) {
+    const localOrigin = 'http://' + request.headers.host;
+    if (
+      (request.headers.origin && request.headers.origin !== localOrigin) ||
+      request.headers['sec-fetch-site'] === 'cross-site'
+    ) {
+      response.writeHead(403).end();
+      return;
+    }
+    const jsonHeaders = {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff'
+    };
+    try {
+      if (url.pathname === '/api/hedge/stream' && request.method === 'GET') {
+        const sid = url.searchParams.get('sessionId') || '';
+        if (!hedgeEngine.attachStream(sid, request, response)) {
+          response.writeHead(404, jsonHeaders).end(JSON.stringify({ error: '会话不存在或已过期' }));
+        }
+        return;
+      }
+      if (url.pathname === '/api/hedge/stats' && request.method === 'GET') {
+        const sid = url.searchParams.get('sessionId') || '';
+        const stats = hedgeEngine.getSessionStats(sid);
+        response.writeHead(stats ? 200 : 404, jsonHeaders).end(JSON.stringify(stats ?? { error: '会话不存在' }));
+        return;
+      }
+      if (url.pathname === '/api/hedge/session' && request.method === 'POST') {
+        let size = 0;
+        const chunks = [];
+        for await (const chunk of request) {
+          size += chunk.length;
+          if (size > 65536) throw Error('会话配置过大');
+          chunks.push(chunk);
+        }
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+        if (!body || typeof body !== 'object' || Array.isArray(body)) throw Error('会话配置 JSON 无效');
+        const out = hedgeEngine.upsertSession(body);
+        response.writeHead(200, jsonHeaders).end(JSON.stringify(out));
+        return;
+      }
+      response.writeHead(405, jsonHeaders).end(JSON.stringify({ error: '不支持的请求方法' }));
+    } catch (error) {
+      response.writeHead(400, jsonHeaders).end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+  if (
+    hedge &&
+    (url.pathname === '/api/hype-api/status' ||
+      url.pathname === '/api/hype-api/config' ||
+      url.pathname === '/api/hype-api/verify')
+  ) {
+    const localOrigin = 'http://' + request.headers.host;
+    if (
+      (request.headers.origin && request.headers.origin !== localOrigin) ||
+      request.headers['sec-fetch-site'] === 'cross-site' ||
+      (request.method !== 'GET' && request.headers.origin && request.headers.origin !== localOrigin)
+    ) {
+      response.writeHead(403).end();
+      return;
+    }
+    const jsonHeaders = {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff'
+    };
+    try {
+      if (url.pathname === '/api/hype-api/status' && request.method === 'GET') {
+        const status = await hypeSigner.getStatus();
+        response.writeHead(200, jsonHeaders).end(JSON.stringify(status));
+        return;
+      }
+      if (url.pathname === '/api/hype-api/verify' && request.method === 'POST') {
+        const status = await hypeSigner.verifyAndRefresh();
+        response.writeHead(200, jsonHeaders).end(JSON.stringify(status));
+        return;
+      }
+      if (url.pathname === '/api/hype-api/config' && request.method === 'POST') {
+        let size = 0;
+        const chunks = [];
+        for await (const chunk of request) {
+          size += chunk.length;
+          if (size > 4096) throw Error('配置请求过大');
+          chunks.push(chunk);
+        }
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+        if (!body || typeof body !== 'object' || Array.isArray(body)) throw Error('配置 JSON 无效');
+        const status = await hypeSigner.verifyAndRefresh(body);
+        response.writeHead(200, jsonHeaders).end(JSON.stringify(status));
+        return;
+      }
+      response.writeHead(405, jsonHeaders).end(JSON.stringify({ error: '不支持的请求方法' }));
+    } catch (error) {
+      response.writeHead(400, jsonHeaders).end(JSON.stringify({ error: error.message }));
     }
     return;
   }

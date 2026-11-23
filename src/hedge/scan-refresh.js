@@ -38,7 +38,8 @@ export function scanKeys(rules, accounts, market, rates, scope) {
   ]);
   const converted = requiredSpotAssets(spec.contract, hlContract, rules);
   const values = JSON.stringify([
-    ...[market.pf,market.hl].map(q => [q.bookAt ?? q.asOf, q.markAt ?? q.asOf]),
+    ...[market.pf,market.hl].map(q => [q.bookAt ?? q.asOf, q.markAt ?? q.asOf, q.bid, q.ask]),
+    market.termReference, market.hl.funding, market.hl.oracle,
     market.pf.mark,
     market.hl.mark,
     market.pf.levels,
@@ -51,19 +52,11 @@ export function scanKeys(rules, accounts, market, rates, scope) {
   return { context, key: context + values };
 }
 
-// Small changes are coalesced against the last dispatch, never against the
-// last incoming tick. A continuous stream therefore has a bounded wait.
+// Dispatch changed economics immediately when the worker is idle. Source-clock
+// heartbeats alone are coalesced; the publication guard still checks freshness.
 export function refreshDelay(previous, market, elapsed) {
-  if (!previous) return 0;
-  const material = ['pf', 'hl'].some((venue) => {
-    const prices = (book) => [book.mark, book.levels?.[0]?.[0]?.[0], book.levels?.[1]?.[0]?.[0]];
-    const old = prices(previous[venue]);
-    const tick = Number(venue === 'pf' ? market.spec?.minTickSize : market.hl?.tickSize) || 0;
-    return prices(market[venue]).some((value, i) =>
-      Math.abs(Number(value) - Number(old[i])) >= Math.max(tick, Number(old[i]) * 0.00001)
-    );
-  });
-  return Math.max(0, (material ? 400 : 1800) - elapsed);
+  if (!previous || changedQuotes(previous,market).length) return 0;
+  return Math.max(0,1000-elapsed);
 }
 
 // Keep one exact value per stage and side in this worker. Reusing a venue's
@@ -82,4 +75,20 @@ export class MarketRevaluation {
     this.slots.set(slot, { key, value });
     return value;
   }
+}
+
+// Describe executable changes separately from mere advancement of a source clock.
+export function changedQuotes(previous,current) {
+  const changed=[];
+  for(const [side,label] of [['pf','Vest'],['hl','Hype']]) {
+    const a=previous[side],b=current[side];
+    const parts=[];
+    for(const [k,name] of [[0,'Bid'],[1,'Ask']])
+      if(a[name.toLowerCase()]!==b[name.toLowerCase()] || a.levels[k][0]?.[0]!==b.levels[k][0]?.[0]) parts.push(name);
+    if(a.mark!==b.mark) parts.push('Mark');
+    if(b.levels.some((levels,k)=>levels.length!==a.levels[k].length ||
+        levels.some(([px,size],i)=>size!==a.levels[k][i]?.[1] || i>0 && px!==a.levels[k][i]?.[0]))) parts.push('深度');
+    if(parts.length) changed.push(label+' '+parts.join('/'));
+  }
+  return changed;
 }

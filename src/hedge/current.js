@@ -1,26 +1,34 @@
+import {buildCandidateSet} from './candidate-set.js';
+import {moveDecision} from './move-position.js';
+import { evaluationClose, investmentBasis } from './account-stages.js';
+import { hasValue, parseTotalLoss, parseDailyLoss, resolveFundedTotalRule, resolveLossBoundary, solveFundedWBounds } from './loss-limits.js';
+import {examSchedule} from './exam-clock.js';
+import { examEnvelope, examMove } from './reachability.js';
+import { venueFields } from './venue-scenarios.js';
 import { scanContext, buildRatioScan, ratioSlice, inspectRatio, ratioBin } from './ratio-scan.js';
 import {
   dec,
+  max,
   out,
   positive,
   nonnegative,
-  profitSplit,
+  profitSplit, projectedShare, canClaimOnSuccess,
   fundingInterval,
   solveBudgetBounds,
   normalizeExposure,
-  estimateFill
+  estimateFill, fillEvidence
 } from './math.js';
 import { remainingOrder } from './order-adjustment.js';
 export { remainingOrder } from './order-adjustment.js';
-import { searchLiquidityMaximum } from './liquidity-search.js';
+import { searchLiquidityMaximum, missingPressureRate } from './liquidity-search.js';
 import { buildPlanReport, planRecord, pointKey, recordFromInspection } from './position-plans.js';
 import { analyzeRatios } from './ratio-analysis.js';
 import { validLeverageCap } from './leverage.js';
 import { auditCross } from './cross-check.js';
 import { adjustmentTarget, comparePlans } from './optimization.js';
-import { settlementBridge, sumPostings } from './settlement-ledger.js';
+import { settlementBridge } from './settlement-ledger.js';
 import { solveAuto } from './auto.js';
-import { currencyMapping, conversionBook, requiredSpotAssets } from './quote-currencies.js';
+import { currencyMapping, requiredSpotAssets } from './quote-currencies.js';
 import { calculationTrace } from './trace.js';
 import {
   solve,
@@ -35,6 +43,15 @@ const optional = (x) =>
   specified(x) ? out(dec(String(x).replace(/^([+-]?)\./, (_, sign) => sign + '0.'))) : null;
 export const fresh = (stamp, now, ms) =>
   Number.isFinite(Date.parse(stamp)) && now - Date.parse(stamp) >= -1000 && now - Date.parse(stamp) <= ms;
+// Historical fixtures may have only source clocks. Public live inputs also
+// require evidence from this socket session on every calculation and publish.
+export function subscriptionHealthy(data,side,now) {
+  if(!data.health && data.source!=='Vest / Hyperliquid 公开行情') return true;
+  const h=data.health?.[side];
+  return !!(h?.connected && h.ready && h.subscription==='streaming' && h.heartbeat &&
+    fresh(h.lastBookAt,now,3000) && fresh(h.lastMarkAt,now,3000) &&
+    (side!=='hl' || h.continuous && fresh(h.lastPongAt,now,11000)));
+}
 // Two independent venue clocks; older atomic snapshots use their common timestamp.
 export function quoteClock(q, now, ttl) {
   const bookAt = q?.bookAt ?? q?.asOf;
@@ -74,22 +91,31 @@ export function quoteClock(q, now, ttl) {
 export const rules = {
   stage: 'challenge',
   challengeFloor: '9400',
-  challengeTarget: '12000',
-  fundedFloor: '8000',
-  fundedTarget: '10100',
+  challengeDailyMode: 'none',
+  challengeDailyFloor: '',
+  challengeTarget: '11000',
+  fundedFloor: '9400',
+  fundedLossMode: 'floor',
+  fundedMaxLoss: '600',
+  fundedDailyMode: 'none',
+  fundedDailyFloor: '',
+  fundedTarget: '',
+  fundedDrawdown: '',
+  passCost: '',
   baseline: '10000',
   share: '0.8',
+  platformShare:'0.2', minimumProfit:'0', withdrawalFee:'0', resetBaseline:'10000',
   B: '500',
   investedCapital: '',
-  registration: '91',
+  registration: '142.50',
   outsideCosts: '0',
   minBuffer: '0',
   minMaintenanceSurplus: '0',
   R_success: '100',
+  successBuffer: '',
+  hardDepthD: '',
   R_free: '0',
   g: '0',
-  external: '0',
-  inTransit: '0',
   roundIn: '0',
   roundOut: '0',
   hlFee: '0.0005',
@@ -99,7 +125,6 @@ export const rules = {
   objective: 'size',
   pfUtil: '100',
   hlUtil: '100',
-  externalCurrency: 'USDC',
   adverseBps: '',
   asyncBps: '',
   jumpBps: '',
@@ -207,9 +232,10 @@ function buildMarket(data, r, a, currencies) {
     const step = out(dec('10').pow(-n));
     const im = r.stage === 'challenge' ? spec.capitalInitMarginRatio : spec.fundedInitMarginRatio;
     const rate = isPF ? r.pfFee : (ac.fee ?? r.hlFee);
+    const pfCaps=isPF?[im==null?null:out(dec('1').div(positive(im))),spec.maxLeverage,ac.maxLeverage,ac.leverage].filter(specified):[];
     const lev =
-      isPF && im
-        ? out(dec('1').div(positive(im)))
+      isPF && pfCaps.length
+        ? out(pfCaps.map(v=>positive(String(v))).reduce((x,y)=>x.lte(y)?x:y))
         : optional(!isPF && r.mode === 'auto' ? ac.configuredLeverage : ac.leverage);
     if (nonnegative(String(rate)).gte(1)) throw Error('单边费率须小于 100%');
     const utilization = nonnegative(String((isPF ? r.pfUtil : r.hlUtil) ?? '100')).div(100);
@@ -244,7 +270,8 @@ function buildMarket(data, r, a, currencies) {
         : validLeverageCap(ac.configuredLeverage)
           ? String(ac.configuredLeverage)
           : null,
-      exchangeMaxLeverage: isPF ? null : validLeverageCap(hl.maxLeverage),
+      exchangeMaxLeverage: isPF ? null : (ac.maxLeverage!=null && validLeverageCap(hl.maxLeverage)
+        ? validLeverageCap(Math.min(Number(ac.maxLeverage),Number(hl.maxLeverage))) : validLeverageCap(hl.maxLeverage)),
       currentMarginCredit:
         !isPF && ac.currentMarginCredit != null ? out(nonnegative(ac.currentMarginCredit)) : null,
       marginMode: ac.marginMode || null,
@@ -295,6 +322,10 @@ export function reason(code) {
       LEVERAGE_UNVERIFIED: '杠杆与清算模型未验证',
       NO_PAYOUT_TARGET: '提款参考点须高于分成基线',
       LEDGER_MISMATCH: '成交价独立验算与资金流水不符，已阻断结算与仓位建议',
+      EXAM_TIME_fail: '考核剩余期限内的失败触线幅度',
+      EXAM_TIME_pass: '考核剩余期限内的成功触线幅度',
+      EXAM_EQUITY_fail: '失败路径提前触及额外考核权益线',
+      EXAM_EQUITY_pass: '成功路径提前触及额外考核权益线',
       INVALID_PF_RULES: 'PF 失败线必须低于成功线',
       FUNDING_RECONCILIATION: '资金公式与双边成交现金未能对账',
       NO_DISCRETE_MATCH: '按步长取整后没有可行仓位',
@@ -335,13 +366,24 @@ export function reason(code) {
 }
 
 // If no adjustment passes, retain cash outcomes for the actual holdings where the path can reach the VS line.
-function heldOutcomes(book, market, p, pf, hl) {
+function heldOutcomes(book, market, p, pf, hl, checks) {
   if (dec(pf).isZero()) return null;
-  const lines = solveBoundaryPrices(book, market, pf, p.target, p.floor);
+  const lines = solveBoundaryPrices(book, market, pf, p.target, p.floor, checks.passTrigger, checks.failureTrigger);
   const notes = [];
   const cash = {};
   for (const [key, shift] of Object.entries(lines)) {
     const label = key === 'fail' ? '失败线' : '成功线';
+    const pfMove=dec(shift).times(market.pf.factor);
+    const pfEnd=out(dec(market.pf.mark).plus(pfMove));
+    if (checks.exam && examMove(checks.exam,market.pf.mark,pfEnd).status==='fail') {
+      notes.push('现仓'+label+'超出考核可达范围，终点资金未知');
+      continue;
+    }
+    if (checks.examEquityFloor!=null && [book.pf,projectSettlementEquity(book,market,'pf',pf,shift,'mark_equity')]
+        .some(equity=>dec(equity).lte(checks.examEquityFloor))) {
+      notes.push('现仓先触及额外考核权益线，终点资金未知');
+      continue;
+    }
     const path = ['pf', 'hl'].map((v) =>
       validateMargin(book, market, v, v === 'pf' ? pf : hl, ['0', shift]).at(-1)
     );
@@ -353,7 +395,6 @@ function heldOutcomes(book, market, p, pf, hl) {
       continue;
     }
     if (path.some((c) => c.status === 'unknown')) notes.push('现仓到' + label + '的保证金路径未验证');
-    cash.externalReceived = book.external;
     const bridges = (cash.paths ??= {});
     const legs = {};
     for (const [side, qty] of [
@@ -372,16 +413,16 @@ function heldOutcomes(book, market, p, pf, hl) {
         side === 'hl' ? p.k : '0'
       );
     }
-    const settled = dec(sumPostings([legs.hl.settled, book.external]));
+    const settled = dec(legs.hl.settled);
     bridges[key] = legs;
     if (key === 'fail') {
       cash.failureCash = out(settled);
       cash.failureHypeCash = legs.hl.settled;
-      cash.bridge = { ...legs.hl, external: book.external };
+      cash.bridge = legs.hl;
     } else {
-      cash.cashBeforePayout = out(settled.plus(p.inTransit));
+      cash.cashBeforePayout = out(settled);
       cash.hlBeforePayout = legs.hl.settled;
-      const payout = p.stage === 'funded' ? profitSplit(p.target, p.baseline, p.share).user : '0';
+      const payout = canClaimOnSuccess(p) ? projectedShare(legs.pf.settled,p,p.target,checks.passTrigger) : '0';
       cash.expectedUserPayout = payout;
       cash.pressureCashAfter = out(dec(cash.cashBeforePayout).plus(payout));
     }
@@ -389,34 +430,135 @@ function heldOutcomes(book, market, p, pf, hl) {
   return { cash, notes };
 }
 
+function attachHeldCash(result,book,market,p,pf,hl,checks,protection) {
+  try {
+    const held = heldOutcomes(book, market, p, pf, hl, checks);
+    if (held) {
+      result.heldCash = held.cash;
+      result.bridge = held.cash.bridge;
+      result.paths = held.cash.paths;
+      result.notices.push('以下现金按现有已成交仓位、保持不动计算', ...held.notes);
+      if (held.cash.failureCash != null)
+        result.failVsPrincipal = out(dec(held.cash.failureCash).minus(protection));
+      if (held.cash.pressureCashAfter != null)
+        result.passVsPrincipal = out(dec(held.cash.pressureCashAfter).minus(protection));
+    }
+  } catch (e) {
+    result.notices.push('现仓终点无法核算 · ' + reason(e.message));
+  }
+}
+
 // An old R was entered as a success-path reserve. The new collateral floor is independent.
 export function splitReserves(saved = {}) {
   const { R, scanEndpoint: obsoletePath, fx: obsoleteRatio, fxAt: obsoleteRatioTime, ...rest } = saved;
+  // Prior versions persisted manual claims. Retire their fields when importing
+  // rules, so they cannot affect new calculations or enter new trace files.
+  for (const field of ['inTransit','external','externalAt','externalCurrency','externalFx','externalFxAt','payoutRounds','payoutMode','approvalStatus','creditStatus','claimId','claimEquity',
+    'claimEquityAt','appliedPayout','approvedPayout','receivedPayout','receivedPayoutAt','receiptSource',
+    'postPayoutEquity','receivable','approvalDeduction','claimLimit','withdrawalStart']) delete rest[field];
+  if (rest.platformShare == null && specified(rest.share)) {
+    try { rest.platformShare = out(dec('1').minus(rest.share)); }
+    catch { /* Preserve invalid saved input for editing in the rule form. */ }
+  }
   return { ...rest, R_success: rest.R_success ?? R ?? rules.R_success, R_free: rest.R_free ?? rules.R_free };
 }
 function baseContext(ctx) {
-  return {...ctx,checks:{...ctx.checks,stress:undefined,pressureInputs:{},fundingRatesBps:[],adverseBps:'0',asyncBps:null,basisBps:null,basisRate:null,fullStress:false}};
+  return {...ctx,checks:{...ctx.checks,stress:undefined,venueScenarios:null,pressureInputs:{},fundingRatesBps:[],adverseBps:'0',asyncBps:null,basisBps:null,fullStress:false}};
 }
-// The ordinary leverage grid chooses the smallest setting affordable at the
-// current book. A delayed adjustment can be affordable only at a higher legal
-// setting. Keep the same two quantities and recheck all stressed ledgers
-// before giving up that PF size.
-function pressureCandidate(ctx,point,known) {
-  const base=known.get(pointKey(point)) ?? planRecord({ctx},point);
-  if (base.configuredPass || !base.pressureSummary?.retryLeverage || !base.both || !base.leverage) return base;
-  const grid=inspectRatio(ctx,point,{includeLeverageGrid:true}).leverageGrid ?? [];
-  let unresolved=null;
-  for (const tier of grid) {
-    if (tier.status!=='pass' || tier.leverage<=Number(base.leverage)) continue;
-    const row=recordFromInspection(ctx,inspectRatio(ctx,point,{fixedLeverage:tier.leverage,includePathAudit:true}));
+// For a fixed pair of cross-margin quantities the cash paths and maintenance
+// schedule are independent of leverage. Check settings in increasing order of
+// margin and stop only after a full pressure audit admits that setting.
+function summarizeLeverageGrid(grid) {
+  const passing=(grid??[]).filter(t=>t.status==='pass' && t.leverage!=null);
+  if(!passing.length) return {options:[],range:null};
+  const picks=[passing[0]];
+  if(passing.length>=3) picks.push(passing[Math.floor(passing.length/2)]);
+  if(passing.length>=2) picks.push(passing.at(-1));
+  return {
+    options:[...new Map(picks.map(t=>[t.leverage,{leverage:t.leverage,initial:t.initial,freeAfter:t.freeAfter}])).values()],
+    range:{min:passing[0].leverage,max:passing.at(-1).leverage,count:passing.length}
+  };
+}
+function cashCandidate(ctx,point) {
+  // Pick the lowest legal integer leverage that satisfies all constraints and retain the full legal tier range for comparison.
+  const inspected=inspectRatio(ctx,point,{minimizeMargin:!ctx.params.openingCapacity,includePathAudit:true,includeLeverageGrid:true});
+  const first=recordFromInspection(ctx,inspected);
+  const levMeta=summarizeLeverageGrid(inspected.leverageGrid);
+  first.leverageOptions=levMeta.options;
+  first.leverageRange=levMeta.range;
+  first.initialMarginHL=inspected.initial;
+  first.freeAfterHL=inspected.free;
+  first.maintenanceHL=inspected.maintenance;
+  first.liquidationHL=inspected.liquidation;
+  first.priceBufferHL=inspected.buffer;
+  if (first.configuredPass || !inspected.leverageGrid?.length || !dec(ctx.checks.stress?.delayBps??'0').gt(0)) return first;
+  let unresolved=first;
+  for (const tier of inspected.leverageGrid) {
+    if (tier.status!=='pass' || tier.leverage==null || Number(first.leverage)===tier.leverage) continue;
+    const nextInspected=inspectRatio(ctx,point,{fixedLeverage:tier.leverage,includePathAudit:true});
+    const row=recordFromInspection(ctx,nextInspected);
+    row.leverageOptions=first.leverageOptions;
+    row.leverageRange=first.leverageRange;
+    row.initialMarginHL=nextInspected.initial;
+    row.freeAfterHL=nextInspected.free;
+    row.maintenanceHL=nextInspected.maintenance;
+    row.liquidationHL=nextInspected.liquidation;
+    row.priceBufferHL=nextInspected.buffer;
     if (row.configuredPass) return row;
     if (row.pressureSummary?.status==='unknown') unresolved=row;
   }
-  return unresolved ?? base;
+  return unresolved;
+}
+// Account equity is already in ledger units. Never substitute an exit quote for a flat Hype balance.
+function closedHype(a, at, now, ttl) {
+  if (a.error || a.unsupported || a.otherPositions || !specified(a.equity) || !specified(a.qty) ||
+      !dec(a.qty).isZero() || a.orders?.length!==0) return null;
+  if (a.sourceKind==='plan') return null; // The planning deposit is an opening balance.
+  if (!['equity','qty','orders'].every(k=>fresh(fieldTime(a,k),now,ttl))) return null;
+  const equityAt=Date.parse(fieldTime(a,'equity'));
+  return equityAt>=Math.max(Date.parse(at),Date.parse(fieldTime(a,'qty'))) ? a.equity : null;
+}
+function observedEvaluation(r,a,now) {
+  if (r.stage!=='challenge' || a.pf.error || !specified(a.pf.equity)) return null;
+  const plan=a.pf.sourceKind==='plan', ttl=positive(r.accountSecs).toNumber()*1000;
+  if (plan && !r.planCrossFlat) return null;
+  const at=plan ? new Date(now).toISOString() : fieldTime(a.pf,'equity');
+  const stamp=Date.parse(at), exam=examSchedule(r,now);
+  if (exam.issue || !fresh(at,now,ttl) || stamp<exam.start || stamp>exam.cutoff) return null;
+  const totalRule=parseTotalLoss(r.challengeFloor);
+  const dailyRule=parseDailyLoss(r.challengeDailyMode, r.challengeDailyFloor);
+  if (totalRule.state==='invalid' || dailyRule.state==='invalid') return null;
+  const loss=resolveLossBoundary('challenge', a.pf.equity, totalRule, dailyRule);
+  if (loss.effectiveFloor==null) {
+    // Missing total loss floor: still recognize explicit pass target breach, never fabricate a failure close.
+    if (specified(r.challengeTarget) && dec(a.pf.equity).gte(positive(r.challengeTarget))) {
+      const close=evaluationClose({...r,challengeFloor:'0'},a.pf.equity,closedHype(a.hl,at,now,ttl),at,plan);
+      if (close && a.hl.accountId) close.hypeSource=a.hl.accountId;
+      return close;
+    }
+    return null;
+  }
+  const close=evaluationClose({...r,challengeFloor:loss.effectiveFloor},a.pf.equity,closedHype(a.hl,at,now,ttl),at,plan);
+  if (close && a.hl.accountId) close.hypeSource=a.hl.accountId;
+  return close;
 }
 export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(), options = {}) {
+  if (r.evaluationClose) {
+    const close=r.evaluationClose;
+    const matching=!close.hypeSource || close.hypeSource===a.hl.accountId;
+    const hype=close.hype ?? (matching ? closedHype(a.hl,close.at,now,positive(r.accountSecs).toNumber()*1000) : null);
+    return {issues:[],notices:['考核已结算'],cash:{},qty:{},currentNotional:{},frameState:'paused',
+      currencies:currencyMapping(data,fxData,now,3000,r.depegAlertBps??rules.depegAlertBps),
+      evaluationClose:{...close,hype,personal:hype}};
+  }
   r = splitReserves(r);
-  const result = computeCurrent(r, a, data, fxData, now, options);
+  // Keep real personal principal protection basis B (never zero it out!).
+  // Only remove the unrequested arbitrary post-pass reserve R_success.
+  const openingCapacity=options.openingCapacity===true && ['challenge','funded'].includes(r.stage) && r.mode==='auto';
+  const isPlanning=a.pf.sourceKind==='plan' && a.hl.sourceKind==='plan';
+  const principalBasis=openingCapacity?investmentBasis(r,isPlanning):null;
+  const effective=openingCapacity?{...r,B:principalBasis??r.B,R_success:'0',recoveryBuffer:'0',successBuffer:'0'}:r;
+  const result = computeCurrent(effective, a, data, fxData, now, {...options,openingCapacity});
   if (result.autoStatus === 'AUTO_FEASIBLE' && result.currencies?.warnings.length) {
     const required = requiredSpotAssets(result.currencies.pf, result.currencies.hl, r);
     if ([...required].some((asset) => result.currencies.spots[asset]?.alert)) {
@@ -425,30 +567,114 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
     }
   }
   if (result.ratioScan) {
-    const scan=result.ratioScan, pending=result.autoStatus==='AUTO_PAYOUT_PENDING';
+    const scan=result.ratioScan;
+    if(options.compareDirection) {
+      const ctx=result.pressureContext??scan.ctx;
+      const cap=searchLiquidityMaximum(scan,point=>cashCandidate(ctx,point),false,ctx,'scale',null,options.fixedLot?.i,options.compareDirection);
+      return {capacity:cap.row,status:cap.status,reason:cap.reason,theoreticalRatio:result.theoreticalRatio};
+    }
     const makeReport=grid=>{
       const view={...result,ratioScan:grid};
       attachRepresentative(view,r);
       grid.analysis=analyzeRatios(view,r);
-      grid.plans={...buildPlanReport(grid,pending),pfQuote:result.currencies.pf.quoteAsset,
+      grid.plans={...buildPlanReport(grid,false),pfQuote:result.currencies.pf.quoteAsset,
         hlQuote:result.currencies.hl.quoteAsset};
     };
-    makeReport(scan);
+    if(openingCapacity) {
+      // The calculator publishes audited positions directly. Detailed ratio
+      // histograms and the three historical optimizer reports live in analysis.
+      scan.analysis={};
+      scan.plans={rows:[],targetKeys:[null,null,null],eligible:0};
+    } else makeReport(scan);
     const riskContext=result.pressureContext ?? scan.ctx;
     const configuredRows=riskContext===scan.ctx ? new Map(scan.plans.rows.map(row=>[row.key,row])) : new Map();
     // Every pressure candidate must also pass A. Its grid is a sufficient
     // search domain even when the report publishes the three base objectives.
-    const pressure=searchLiquidityMaximum(scan,point=>pressureCandidate(riskContext,point,configuredRows),
-      pending,riskContext);
+    const evaluated=new Map();
+    const inspect=point=>{
+      const key=pointKey(point);
+      if (!evaluated.has(key)) {
+        if (evaluated.size>=64) evaluated.delete(evaluated.keys().next().value);
+        evaluated.set(key,cashCandidate(riskContext,point));
+      }
+      return evaluated.get(key);
+    };
+    const pressure=searchLiquidityMaximum(scan,inspect,false,riskContext,'scale');
+    const cash=openingCapacity?null:searchLiquidityMaximum(scan,inspect,false,riskContext,'cash',options.cashSeed);
+    if(['challenge','funded'].includes(riskContext.book.stage)) {
+      scan.plans.collection=buildCandidateSet(scan,riskContext,inspect,pressure,cash,data.termReference,now,data.source==='手工确认盘口'?null:data.hl);
+      if(riskContext.book.stage==='challenge' && options.decision) scan.plans.decision=moveDecision(scan,riskContext,inspect,pressure,options.decision);
+    }
+    if(scan.plans.decision) scan.plans.decision.sourceKind=a.pf.sourceKind==='plan'?'plan':'account';
+    const decision=scan.plans.decision, trial=options.decision?.trial;
+    if(decision && trial) {
+      const sign=decision.adopted;
+      const level=decision.directions.find(d=>d.sign===sign).levels.find(l=>l.percent===decision.percent);
+      const reserve=trial.field==='R'?'R_success':trial.field==='B'?'B':null;
+      const compare=(value,oneSize=false)=>{
+        const variant={...r}, accounts={...a,hl:{...a.hl}};
+        if(reserve) variant[reserve]=value;
+        else {
+          const add=v=>out(dec(v).plus(value));
+          accounts.hl.equity=add(a.hl.equity);
+          if(specified(a.hl.free)) accounts.hl.free=add(a.hl.free);
+          if(a.hl.directionalFree) accounts.hl.directionalFree=a.hl.directionalFree.map(add);
+          if(trial.field==='depositB') variant.B=add(r.B);
+        }
+        const alt=calculateCurrent(variant,accounts,data,fxData,now,{scanRatios:true,baseObjectives:true,compareDirection:sign,
+          fixedLot:oneSize?{i:level.requiredPosition.i,sign}:null});
+        return {alt,variant};
+      };
+      const {alt,variant}=compare(trial.value), row=alt.capacity;
+      // For a fixed Evaluation lot each extra cent of free Hype collateral
+      // relaxes cash/margin checks. Raising B alongside it cancels its effect
+      // only on the failure cash inequality. Reducing B or R also only relaxes.
+      const limit=reserve?dec(r[reserve]).minus(trial.value):dec(trial.value);
+      let minimum={reason:'请输入要比较的补资额或更低的门槛'};
+      if(level.choice) minimum={change:'0'};
+      else if(!level.complete || !level.requiredPosition.i) minimum={reason:'所需仓位或原方案核验不完整'};
+      else if(limit.gt(0)) {
+        const bound=limit.times(100).floor().toNumber();
+        const check=cents=>{
+          const change=dec(String(cents)).div(100);
+          const test=compare(reserve?out(dec(r[reserve]).minus(change)):out(change),true).alt;
+          return test.capacity?'pass':test.status==='none'?'fail':'unknown';
+        };
+        minimum={reason:'该比较范围内没有核实可行的补资或放宽额'};
+        if(Number.isSafeInteger(bound) && bound>0) {
+          // If the complete full search could not reach this PF size, no lot
+          // in this direction at that input can realise the requested move.
+          const end=alt.status==='none' || (row && row.i<level.requiredPosition.i)?'fail':check(bound);
+          if(end==='pass') {
+            let lo=0,hi=bound,known=true;
+            while(hi-lo>1) {
+              const mid=lo+Math.floor((hi-lo)/2), status=check(mid);
+              if(status==='unknown'){known=false;break;}
+              if(status==='pass') hi=mid;else lo=mid;
+            }
+            if(known) minimum={change:out(dec(String(hi)).div(100))};
+          }
+        }
+      }
+      decision.trial={...trial,minimum,reason:alt.reason??alt.issues?.join(' · '),theory:alt.theoreticalRatio,
+        B:variant.B,R:variant.R_success,cap:row?{pf:row.pfValue,h:row.notionalRatio,hl:row.hypeValue,
+        moves:row.pressureSummary.cases[0]?.success.exam?.percent,fail:row.pressureSummary.minFailure.value,
+        pass:row.pressureSummary.minSuccess.value}:null};
+    }
+    scan.plans.cashPriority=cash;
     scan.plans.pressure=pressure;
+    if(openingCapacity) result.autoStatus=pressure.status==='none'?'AUTO_INFEASIBLE':'AUTO_PARTIAL';
     let ordinary=scan;
-    if (scan.ctx.checks.stress) {
+    if (!openingCapacity && scan.ctx.checks.stress) {
       const cache=options.marketCache;
       ordinary=buildRatioScan(baseContext(scan.ctx),{cache:cache && {
         reuse:(slot,key,fn)=>cache.reuse('base-'+slot,key,fn)
       }});
       makeReport(ordinary);
+      ordinary.plans.decision=scan.plans.decision;
+      ordinary.plans.collection=scan.plans.collection;
       ordinary.plans.pressure=pressure;
+      ordinary.plans.cashPriority=cash;
       result.baseScan=ordinary;
     }
     if (riskContext.checks.stress) {
@@ -510,7 +736,17 @@ export function calculateCurrent(r, a, data = {}, fxData = {}, now = Date.now(),
       add(id, label);
     }
   }
-  if (!result.needsSearch) result.trace = calculationTrace(r, a, data, fxData, now, options);
+  if (result.deriveMoves) {
+    // Quantities price the two conditional exits. Time reachability is still unverified.
+    if (result.autoStatus==='AUTO_FEASIBLE') result.autoStatus='AUTO_PARTIAL';
+    result.advice=null;
+    result.adjust={};
+  }
+  if (!result.needsSearch) {
+    result.trace = calculationTrace(r, a, data, fxData, now, options);
+    const collection=result.ratioScan?.plans?.collection;
+    if(collection) collection.snapshotId=result.trace.id;
+  }
   return result;
 }
 
@@ -530,7 +766,7 @@ function attachRepresentative(result, r) {
     }
   }
   const eligible = scan.sets.eligible ?? scan.sets.both;
-  if (result.autoStatus !== 'AUTO_PAYOUT_PENDING' && eligible.largest && !Number(r.riskPreference) && point?.i !== eligible.largest.i) {
+  if (eligible.largest && !Number(r.riskPreference) && point?.i !== eligible.largest.i) {
     point = eligible.largest;
     group = 'both';
     objective = 'max_pf';
@@ -589,22 +825,45 @@ function computeCurrent(r, a, data, fxData, now, options) {
       qty: {},
       currentNotional: {},
       notices: [],
+      evaluationClose:observedEvaluation(r,a,now),
       leverageStatus: r.mode === 'auto' ? 'LEVERAGE_UNVERIFIED' : null,
       autoStatus: r.mode === 'auto' ? 'AUTO_DATA_BLOCKED' : null
     };
   const stage = r.stage,
-    funded = stage === 'funded',
-    target = funded ? r.fundedTarget : r.challengeTarget;
-  const floor = funded ? r.fundedFloor : r.challengeFloor;
-  const pending = funded && specified(r.receivable) && nonnegative(r.receivable).gt(0);
-  if (pending) result.notices.push('有分成待到账 ' + r.receivable + ' U，核对平台回执');
+    funded = stage === 'funded';
+  const totalRule = funded
+    ? resolveFundedTotalRule(r, r.resetBaseline ?? r.baseline ?? '10000')
+    : parseTotalLoss(r.challengeFloor);
+  const dailyRule = parseDailyLoss(
+    funded ? r.fundedDailyMode : r.challengeDailyMode,
+    funded ? r.fundedDailyFloor : r.challengeDailyFloor
+  );
+  if (totalRule.state === 'invalid') issues.push(totalRule.error);
+  if (dailyRule.state === 'invalid') issues.push(dailyRule.error);
+  const rawTarget = funded ? r.fundedTarget : r.challengeTarget;
+  if (!funded && !specified(rawTarget)) issues.push('请填写考核通过净值（U）');
+  if (funded && !options.openingCapacity && !specified(rawTarget)) issues.push('请填写 Funded 首次分成目标权益（U）');
+  const withdrawal=funded ? {
+    platformShare:r.platformShare, reset:out(positive(r.resetBaseline ?? '10000')),
+    minimum:out(nonnegative(r.minimumProfit || '0')), fee:out(nonnegative(r.withdrawalFee || '0'))
+  } : undefined;
+  if(funded && !nonnegative(r.platformShare??out(dec('1').minus(r.share))).plus(nonnegative(r.share)).eq(1))
+    throw Error('个人和平台分成比例之和必须为 100%');
+
+  if (!funded) {
+    const schedule=examSchedule(r,now);
+    if(schedule.issue) issues.push(schedule.issue);
+    if(Number.isFinite(schedule.start)) result.challengeStart=new Date(schedule.start).toISOString();
+    if(Number.isFinite(schedule.cutoff)) r={...r,deadline:new Date(schedule.cutoff).toISOString(),
+      deadlineBound:r.deadlineBound===r.deadline?new Date(schedule.cutoff).toISOString():r.deadlineBound};
+  }
   const expired = !funded && r.deadline && Date.parse(r.deadline) <= now;
   if (expired) result.notices.push('考核已到期，待核对实际退出');
   const planning = a.pf.sourceKind === 'plan' && a.hl.sourceKind === 'plan';
   const ttl = positive(r.accountSecs).toNumber() * 1000;
   const ages = positive(r.quoteSecs).toNumber() * 1000;
-  const clocks = Object.fromEntries(['pf', 'hl'].map((k) => [k, quoteClock(data[k], now, ages)]));
-  const quoteOK = (k) => clocks[k].ok && !data.errors?.[k];
+  const clocks = Object.fromEntries(['pf', 'hl'].map((k) => [k, quoteClock(data[k], now, Math.min(3000,ages))]));
+  const quoteOK = k => clocks[k].ok && !data.errors?.[k] && subscriptionHealthy(data,k,now);
   const usable = (k, field) => !a[k].error && (planning || fresh(fieldTime(a[k], field), now, ttl));
   const currencies = result.currencies = currencyMapping(data, fxData, now, ages, r.depegAlertBps ?? rules.depegAlertBps);
   result.inputGaps = [];
@@ -638,7 +897,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
     times.length && times.every(Number.isFinite) ? Math.max(...times) - Math.min(...times) : null;
   result.timing = {
     clocks,
-    quoteTTL: ages,
+    quoteTTL: Math.min(3000,ages),
     accountTTL: ttl,
     quoteSkew: span(quotes),
     accountSkew: span(stamps),
@@ -697,46 +956,55 @@ function computeCurrent(r, a, data, fxData, now, options) {
     if (unit && q != null && quoteOK(k) && data[k]?.mark)
       result.currentNotional[k] = out(dec(q).abs().times(unit).times(String(data[k].mark)));
   }
-  const protection = out(nonnegative(r.B).plus(nonnegative(r.outsideCosts ?? '0')));
-  if (nonnegative(r.registration ?? '0').gt(r.B)) result.notices.push('保护目标低于已支付的报名费');
-  // Only funds marked received and owned can enter personal recovery, at a verified USDC valuation.
-  const currency = r.externalCurrency ?? 'USDC',
-    externalAmount = nonnegative(r.external || '0');
-  let conversion = currency === 'USDC' ? '1' : null;
-  if (
-    currency !== 'USDC' &&
-    specified(r.externalFx) &&
-    fresh(r.externalFxAt, now, Number(r.accountSecs) * 1000)
-  )
-    conversion = out(positive(r.externalFx));
-  if (!conversion && ['USD', 'USDT'].includes(currency)) {
-    try { conversion = conversionBook(currency, 'USDC', fxData, now, ages).mid; }
-    catch { /* An unvalued external balance never enters the protection ledger. */ }
+  const activeLoss = resolveLossBoundary(stage, result.cash.pf, totalRule, dailyRule);
+  result.lossBoundary = activeLoss;
+  if (activeLoss.breached || activeLoss.zeroSpace) issues.push(activeLoss.notice);
+  else if (activeLoss.caseCode === 'E' && !options.openingCapacity) {
+    issues.push(activeLoss.notice);
   }
-  const externalFresh = planning || externalAmount.isZero() || fresh(r.externalAt, now, ttl);
-  const external = conversion && externalFresh ? out(externalAmount.times(conversion)) : '0';
-  if (!externalFresh) issues.push('外部已到账金额缺少当前确认，请核对资金来源');
+  const floor = activeLoss.failureDefined
+    ? activeLoss.effectiveFloor
+    : (activeLoss.caseCode === 'E' && options.openingCapacity && result.cash.pf != null && dec(result.cash.pf).gt(0)
+      ? out(dec(result.cash.pf).times('0.60'))
+      : null);
 
-  result.externalValue = external;
-  result.externalRate = conversion;
-  result.externalSource = !conversion
-    ? '缺少有效估值'
-    : currency === 'USDC'
-      ? 'USDC 本币'
-      : specified(r.externalFx) && fresh(r.externalFxAt, now, Number(r.accountSecs) * 1000)
-        ? '手工估值 ' + r.externalFxAt
-        : '公开现货汇率 ' +
-          [fxData.USDC?.asOf, currency === 'USDT' ? fxData.USDT?.asOf : null].filter(Boolean).join(' / ');
+  const profitBasis = investmentBasis(r, planning);
+  const pendingPassCost = hasValue(r.passCost)
+    ? out(nonnegative(String(r.passCost).trim()))
+    : (profitBasis != null && result.cash.hl != null ? out(max(0, dec(profitBasis).minus(result.cash.hl))) : '0');
+  let target = rawTarget;
+  let autoFundedTarget = false;
+  let fundedWBounds = null;
+  if (funded && options.openingCapacity && result.cash.pf != null && result.cash.hl != null) {
+    fundedWBounds = activeLoss.failureDefined
+      ? solveFundedWBounds(pendingPassCost, activeLoss.effectiveSpace, result.cash.hl, r.share || '0.8', r.minimumProfit || '0')
+      : null;
+    if (!specified(target)) {
+      autoFundedTarget = true;
+      const baseLine = positive(r.baseline || '10000');
+      if (fundedWBounds?.feasible && fundedWBounds.candidates.length) {
+        const autoW = dec(fundedWBounds.candidates[0]);
+        target = out(max(baseLine, dec(result.cash.pf)).plus(autoW));
+      } else if (fundedWBounds?.feasible === false) {
+        issues.push(fundedWBounds.reason);
+      } else {
+        issues.push('请填写 Funded 出金目标权益，或补齐 Funded 总止损底线以按真实规则求解 W');
+      }
+    }
+  }
+  const protection = options.openingCapacity && profitBasis != null
+    ? profitBasis
+    : out(nonnegative(r.B).plus(nonnegative(r.outsideCosts ?? '0')));
+  if (nonnegative(r.registration ?? '0').gt(protection)) result.notices.push('保护目标低于已支付的报名费');
+  // The personal ledger starts with Hype equity. Only the success path adds a projected PF share.
   result.marginHL =
     !a.hl.unsupported && usable('hl', 'free') ? (a.hl.directionalFree ?? optional(a.hl.free)) : null;
-  result.protect = result.cash.hl == null || !externalFresh ? null : out(dec(result.cash.hl).plus(external));
-  if (!conversion && !externalAmount.isZero())
-    result.notices.push('外部资金 ' + externalAmount + ' ' + currency + ' 估值未确认，暂未计入保护资金');
+  result.protect = result.cash.hl ?? null;
   const p = {
-    stage,
+    withdrawal,stage,
     E: result.cash.pf,
     C_hl: result.cash.hl,
-    C_external: external,
+    C_external: '0',
     inTransit: '0',
     C_ref: optional(r.ref),
     B: protection,
@@ -744,15 +1012,16 @@ function computeCurrent(r, a, data, fxData, now, options) {
     target,
     baseline: r.baseline,
     share: r.share,
-    R: r.R_success,
+    R: out(nonnegative(r.R_success).plus(nonnegative(r.successBuffer || '0'))),
     g: r.g,
     k: r.k,
     contributions: r.roundIn,
     withdrawals: r.roundOut
   };
   let terminal;
-  if (p.E != null && p.C_hl != null) {
+  if (p.E != null && p.C_hl != null && specified(p.floor) && specified(p.target)) {
     result.funding = { ...fundingInterval(p), R_success: r.R_success, R_free: r.R_free };
+    result.theoreticalRatio=fundingInterval({...p,B:r.B,R:r.R_success},'0','0');
     result.range = solveBudgetBounds(p);
     if (result.range.min == null) result.range = null; // Terminal events need fresh positions and executable quotes below.
   }
@@ -779,6 +1048,14 @@ function computeCurrent(r, a, data, fxData, now, options) {
     })
   );
   const market = currencies.ok && buildMarket(data, r, a, currencies);
+  if(options.openingCapacity && market && !planning) {
+    // Report what the recorded account can open at its active setting. A
+    // prospective leverage increase does not provide current buying power.
+    const active=a.hl.configuredLeverage??a.hl.leverage;
+    if(active!=null && market.hl.exchangeMaxLeverage!=null)
+      market.hl.exchangeMaxLeverage=validLeverageCap(active)?
+        Math.min(Number(active),market.hl.exchangeMaxLeverage):null;
+  }
   result.configuredLeverage =
     a.hl.source === 'Hype 主网 API' && usable('hl', 'leverage') ? (a.hl.configuredLeverage ?? null) : null;
   const { pf, hl } = result.qty;
@@ -815,6 +1092,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
             ? ' 行情接口断开：' + data.errors[k]
             : ' 行情缺失或过期 · ' +
               [
+                !subscriptionHealthy(data,k,now) && '订阅或心跳未就绪',
                 !clocks[k].bookOK && '盘口时间',
                 !clocks[k].markOK && '标记价或时间',
                 !clocks[k].depthOK && '盘口深度无效'
@@ -862,8 +1140,8 @@ function computeCurrent(r, a, data, fxData, now, options) {
           .minus(dec(f.notional).times(market.pf.fx).times(market.pf.rate))
       : dec(p.E);
     result.settlePF = out(net);
-    if (funded) result.claim = profitSplit(out(net), r.baseline, r.share).user;
-    if (p.C_hl != null) {
+    if (funded) result.claim = profitSplit(out(net), r.baseline, r.share, withdrawal).user;
+    if (p.C_hl != null && specified(p.floor) && specified(p.target)) {
       const netRange = solveBudgetBounds({ ...p, E: out(net) });
       terminal = netRange.min == null ? reason(netRange.code) : null;
       if (!terminal && result.funding?.lower == null) terminal = 'PF 标记权益已到边界，净结算尚待确认';
@@ -891,83 +1169,44 @@ function computeCurrent(r, a, data, fxData, now, options) {
     !issues.some((x) => /过期|缺失|未录入|请录入|断开|休市|确认时间|连接失败|熔断|来源混用/.test(x)) &&
     currencies.ok &&
     !terminal &&
-    !pending &&
     !result.stress.fundingScheduleError
   )
     result.autoStatus = 'AUTO_PARTIAL';
-  if (expired && !issues.length && market) {
-    const q = result.qty.hl,
-      l = market.hl,
-      f = estimateFill(out(dec(q).neg()), l, l.multiplier);
-    const net = dec(result.cash.hl)
-      .plus(f ? dec(q).times(l.multiplier).times(l.fx).times(dec(f.price).minus(l.mark)) : 0)
-      .minus(f ? dec(f.notional).times(l.fx).times(l.rate) : 0);
-    if (
-      quotes.length === 4 &&
-      quotes.every((at) => at === Date.parse(r.deadline)) &&
-      ['pf', 'hl'].every(
-        (k) =>
-          planning ||
-          ['equity', 'qty'].every((field) => Date.parse(fieldTime(a[k], field)) <= Date.parse(r.deadline))
-      )
-    ) {
-      result.deadlineExit = out(net.plus(external));
+  if(expired && !terminal) {
+    result.expiryOutcome={cash:null,reason:issues[0]??'缺少截止时刻双边盘口、标记价或持仓快照'};
+    if(!issues.length && market) {
+      const q=dec(result.qty.hl), leg=market.hl, fill=fillEvidence(out(q.neg()),leg);
+      if(['noTrade','covered'].includes(fill.status)) {
+        const net=dec(result.cash.hl).plus(q.isZero()?0:q.times(leg.multiplier).times(leg.fx)
+          .times(dec(fill.vwap).minus(leg.mark))).minus(q.isZero()?0:
+          q.abs().times(fill.vwap).times(leg.multiplier).times(leg.fx).times(leg.rate));
+        if(quotes.length===4 && quotes.every(at=>at===Date.parse(r.deadline)) &&
+          ['pf','hl'].every(k=>planning || ['equity','qty'].every(field=>Date.parse(fieldTime(a[k],field))<=Date.parse(r.deadline)))) {
+          result.deadlineExit=out(net);
+          result.expiryOutcome={cash:out(net),reason:null};
+        }
+        result.notices.push('按本次可见盘口退出，个人现金约 '+net.toFixed(2)+' U，待实际结算');
+      } else result.expiryOutcome.reason='缺少足以全量退出的 Hype 盘口深度';
     }
-    result.notices.push('按本次可见盘口退出，个人现金约 ' + net.plus(external).toFixed(2) + ' U，待实际结算');
   }
-  const receiptEntered = !planning && funded && specified(r.receivedPayout);
-  const receiptSource = r.receiptSource === 'hl' ? 'hl' : 'external';
-  const receiptBalance =
-    receiptSource === 'hl' ? result.cash.hl : conversion && externalFresh ? external : null;
-  const receipt =
-    receiptEntered &&
-    Date.parse(r.receivedPayoutAt) <= now &&
-    receiptBalance != null &&
-    nonnegative(r.receivedPayout).lte(receiptBalance)
-      ? out(nonnegative(r.receivedPayout))
-      : null;
-  result.receipt =
-    receipt == null
-      ? null
-      : {
-          amount: receipt,
-          at: r.receivedPayoutAt,
-          source: receiptSource,
-          cash: result.protect,
-          net:
-            result.protect == null || !specified(r.investedCapital)
-              ? null
-              : out(
-                  dec(result.protect)
-                    .minus(r.investedCapital)
-                    .minus(r.outsideCosts ?? '0')
-                )
-        };
-  if (receiptEntered && receipt == null) issues.push('请核对实际分成回执时间和收款账户快照');
-  if (receipt != null && dec(receipt).gt(0)) {
-    result.notices.push('首笔分成到账，本轮结束。到账金额已计入收款账户。');
-    if (r.mode === 'auto') result.autoStatus = 'AUTO_CYCLE_SETTLED';
-    return result;
-  }
-  if (issues.length || terminal || expired) return result;
-  if (pending && (r.mode !== 'auto' || (!options.scanRatios && !options.deferAuto))) return result;
+  if (result.evaluationClose || issues.length || terminal || expired) return result;
   const pos = {};
   const book = {
-    mode: 'live_readonly',
+    withdrawal,mode: 'live_readonly',
     stage,
     status: funded ? 'FUNDED_ACTIVE' : 'CHALLENGE_ACTIVE',
     B: protection,
     baseline: r.baseline,
     share: r.share,
-    fundedFloor: r.fundedFloor,
-    challengeFloor: r.challengeFloor,
+    fundedFloor: funded ? floor : r.fundedFloor,
+    challengeFloor: funded ? r.challengeFloor : floor,
     challengeTarget: r.challengeTarget,
     challengeDeadlineAt: r.deadline || null,
-    passTrigger: 'net_settlement',
-    failureTrigger: 'net_settlement',
-    external: external,
+    passTrigger: r.passTrigger || 'net_settlement',
+    failureTrigger: r.failureTrigger || 'mark_equity',
+    external:'0',
     ref: p.C_ref,
-    transfers: { current: { status: 'in_transit', amount: '0' } },
+    transfers: {},
     payouts: {},
     roundIn: r.roundIn,
     roundOut: r.roundOut,
@@ -998,24 +1237,62 @@ function computeCurrent(r, a, data, fxData, now, options) {
           .map((x) => x.trim())
           .filter(Boolean)
           .map((x) => out(positive(x)));
+  const fundedPfCaps = data.spec ? [
+    data.spec.fundedInitMarginRatio == null ? null : out(dec('1').div(positive(data.spec.fundedInitMarginRatio))),
+    data.spec.maxLeverage, a.pf.maxLeverage, a.pf.leverage
+  ].filter(specified) : [];
+  const fundedBaseline = specified(r.baseline)
+    ? r.baseline
+    : (planning && specified(r.planPF) ? r.planPF : '10000');
+  const fundedReset = specified(r.resetBaseline)
+    ? r.resetBaseline
+    : fundedBaseline;
+  const fundedRules = {
+    accountSize: planning && specified(r.planPF) ? r.planPF : fundedReset,
+    baseline: fundedBaseline,
+    resetBaseline: fundedReset,
+    challengeTarget: r.challengeTarget,
+    fundedLossMode: r.fundedLossMode === 'max_loss' ? 'max_loss' : 'floor',
+    fundedMaxLoss: r.fundedMaxLoss ?? '',
+    fundedFloor: r.fundedFloor,
+    fundedDailyMode: r.fundedDailyMode,
+    fundedDailyFloor: r.fundedDailyFloor ?? '',
+    fundedTarget: r.fundedTarget,
+    share: r.share,
+    platformShare: r.platformShare,
+    minimumProfit: r.minimumProfit || '0',
+    withdrawalFee: r.withdrawalFee || '0',
+    pfLeverage: fundedPfCaps.length
+      ? out(fundedPfCaps.map((v) => positive(String(v))).reduce((x, y) => (x.lte(y) ? x : y)))
+      : market.pf.leverage
+  };
   const params = {
-    mode: r.mode,
+    openingCapacity:options.openingCapacity===true, mode: r.mode,
     sizes,
     target,
     sort: 'gain',
-    profitBasis: specified(planning ? r.planCapital : r.investedCapital)
-      ? out(
-          nonnegative(planning ? r.planCapital : r.investedCapital).plus(nonnegative(r.outsideCosts ?? '0'))
-        )
-      : null,
+    profitBasis,
+    pendingPassCost,
+    passCostInput: hasValue(r.passCost) ? out(nonnegative(String(r.passCost).trim())) : null,
+    lossBoundary: activeLoss,
+    autoFundedTarget,
+    fundedWBounds,
+    registration: planning && specified(r.registration) ? out(nonnegative(r.registration)) : null,
+    fundedRules,
     directions: [1, -1],
-    R: r.R_success,
+    baseReserve: out(nonnegative(r.R_success)),
+    baseRecovery: funded ? protection : out(nonnegative(r.B)),
+    successBuffer: out(nonnegative(r.successBuffer || '0')),
+    R: p.R,
     g: r.g,
     k: r.k,
     objective: 'size',
-    externalPriced: !!conversion || externalAmount.isZero(),
-    pendingPayout: funded && specified(r.receivable) ? out(nonnegative(r.receivable)) : null,
-    receivedPayout: receipt,
+    horizon:{holdHours:specified(r.holdHours)?out(positive(r.holdHours)):null,
+      dailyUpPct:specified(r.dailyUpPct)?out(nonnegative(r.dailyUpPct)):null,
+      twoDayUpPct:specified(r.twoDayUpPct)?out(nonnegative(r.twoDayUpPct)):null,
+      twoDayDownPct:specified(r.twoDayDownPct)?out(nonnegative(r.twoDayDownPct)):null,
+      dailyDownPct:specified(r.dailyDownPct)?out(nonnegative(r.dailyDownPct)):null},
+    challengeStart:result.challengeStart,deadline:result.deadline,
     deadlineMark:
       result.deadline &&
       r.deadlineAsset === data.asset &&
@@ -1025,11 +1302,34 @@ function computeCurrent(r, a, data, fxData, now, options) {
         : null,
     movePct: result.deadline && specified(r.movePct) ? out(nonnegative(r.movePct)) : null
   };
+  const exam=funded?null:examEnvelope(params.horizon,params.deadline,new Date(now).toISOString());
+  if (exam) {
+    for (const [direction, label, daily, twoDay] of [
+      ['up','上涨','dailyUpPct','twoDayUpPct'], ['down','下跌','dailyDownPct','twoDayDownPct']
+    ]) {
+      if (exam[direction]!=null) continue;
+      if (params.horizon[daily]!=null || params.horizon[twoDay]!=null || exam.expired) {
+        const reason=exam.expired?'考核窗口已结束':'考核期限内可达性未知，48 小时'+label+'上限须至少等于 24 小时上限';
+        result.issues.push(reason);
+        result.inputGaps.push({id:exam.expired?'deadline':twoDay,text:reason});
+        return result;
+      }
+      exam.deriveMoves=true;
+    }
+    result.deriveMoves=exam.deriveMoves===true;
+  }
   const checks = {
+    passTrigger: book.passTrigger,
+    failureTrigger: book.failureTrigger,
+    exam,examEquityFloor:!funded && specified(r.examEquityFloor)?out(nonnegative(r.examEquityFloor)):null,
+    exitDelaySeconds:out(nonnegative(r.exitDelaySeconds || '0')),
     currentSnapshot: true,
+    hardDepthD: r.hardDepthD === 'required',
     liveLimits: true,
     basisBps: specified(r.adverseBps) ? out(nonnegative(r.adverseBps)) : null,
-    basisRate: specified(r.adverseBps) ? currencies.hypeToVest?.mid ?? null : null,
+    basisRate: currencies.hypeToVest?.mid ?? null,
+    venueScenarios:Object.fromEntries(venueFields.map(k=>
+      [k,specified(r[k])?out(nonnegative(r[k])):null])),
     fullStress: !result.stress.missing.length && !result.stress.zero.length && currencies.hypeToVest?.mid != null,
     pressureInputs:{basis:r.adverseBps,async:r.asyncBps,delay:r.delayBps,jump:r.jumpBps,
       funding:specified(r.fundingDebit) ? r.fundingDebit : result.stress.fundingRatesBps.length ? '0' : r.fundingDebit},
@@ -1040,7 +1340,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
     minPriceBuffer: out(nonnegative(r.minBuffer ?? '0')),
     now: new Date(now).toISOString()
   };
-  if (result.stress.positive.length)
+  if (result.stress.positive.length || Object.values(checks.venueScenarios).some(v=>v!=null && dec(v).gt(0)) || dec(checks.exitDelaySeconds).gt(0))
     checks.stress = {
       asyncBps: r.asyncBps || '0',
       jumpBps: r.jumpBps || '0',
@@ -1053,6 +1353,8 @@ function computeCurrent(r, a, data, fxData, now, options) {
   if (canScan) {
     result.leverageStatus = 'LEVERAGE_UNVERIFIED';
     const missing = [];
+    if(options.openingCapacity && !planning && !validLeverageCap(a.hl.configuredLeverage??a.hl.leverage))
+      missing.push('Hype 当前账户杠杆');
     for (const [key, label] of [
       ['pf', 'VS'],
       ['hl', 'Hype']
@@ -1121,6 +1423,10 @@ function computeCurrent(r, a, data, fxData, now, options) {
       !a.pf.otherPositions;
     if (checks.accountVerified) checks.crossAccount = a.hl;
     if (options.deferAuto && canScan) {
+      if (missingPressureRate(checks) && !checks.hardDepthD) {
+        issues.push('已配置跨平台压力，等待有效的双边报价币换算汇率');
+        return result;
+      }
       result.needsSearch = true;
       return result;
     }
@@ -1136,7 +1442,18 @@ function computeCurrent(r, a, data, fxData, now, options) {
     const ctx = scanContext(book, market, { ...params, recoveryBuffer: out(nonnegative(r.recoveryBuffer || '0')) }, checks);
     const separateStress=options.baseObjectives && checks.stress;
     if (separateStress) result.pressureContext=ctx;
-    const scan = (result.ratioScan = buildRatioScan(separateStress ? baseContext(ctx) : ctx, { cache: options.marketCache }));
+    const scan = (result.ratioScan = buildRatioScan(separateStress ? baseContext(ctx) : ctx, { cache: options.marketCache, fixedLot:options.fixedLot, searchDirection:options.compareDirection }));
+    if(options.compareDirection || options.openingCapacity) return result;
+    // A complete empty risk intersection rules out every nonzero candidate.
+    // Existing holdings still need their own path audit even when no new target is admissible.
+    if (options.baseObjectives && r.mode==='auto' && exam && scan.complete && scan.sets.legal.count &&
+        !scan.sets.risk.count) {
+      result.autoStatus=!dec(hl).isZero() && market.hl.currentMarginCredit==null?'AUTO_PARTIAL':'AUTO_INFEASIBLE';
+      result.flatHold=dec(pf).isZero() && dec(hl).isZero() && [a.pf,a.hl].every(leg=>leg.orders?.length===0);
+      attachHeldCash(result,book,market,p,pf,hl,checks,protection);
+      result.issues.push('考核期限和途中风控约束下没有可行仓位');
+      return result;
+    }
     const feasible = scan.sets.both;
     checks.seeds = [feasible.largest, feasible.min, feasible.max].filter(Boolean).map((point) => ({
       vsTargetQuantity: out(dec(market.pf.step).times(point.i).times(point.sign)),
@@ -1144,10 +1461,6 @@ function computeCurrent(r, a, data, fxData, now, options) {
     }));
   }
   if (options.seedTargets?.length) checks.seeds = [...(checks.seeds ?? []), ...options.seedTargets];
-  if (pending) {
-    result.autoStatus = 'AUTO_PAYOUT_PENDING';
-    return result;
-  }
   const solverChecks = options.marketCache ? { ...checks, marketCache: options.marketCache } : checks;
   const solverBook = { ...book, B: out(dec(book.B).plus(nonnegative(r.recoveryBuffer || '0'))) };
   let solved =
@@ -1292,21 +1605,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
   result.exactRange = solved.theory;
   const c = solved.selected;
   if (!c) {
-    try {
-      const held = heldOutcomes(book, market, p, pf, hl);
-      if (held) {
-        result.heldCash = held.cash;
-        result.bridge = held.cash.bridge;
-        result.paths = held.cash.paths;
-        result.notices.push('以下现金按现有已成交仓位、保持不动计算', ...held.notes);
-        if (held.cash.failureCash != null)
-          result.failVsPrincipal = out(dec(held.cash.failureCash).minus(protection));
-        if (held.cash.pressureCashAfter != null)
-          result.passVsPrincipal = out(dec(held.cash.pressureCashAfter).minus(protection));
-      }
-    } catch (e) {
-      result.notices.push('现仓终点无法核算 · ' + reason(e.message));
-    }
+    attachHeldCash(result,book,market,p,pf,hl,checks,protection);
     const rejected = solved.rejected.find((x) => x.constraints?.some((t) => t.status === 'fail'));
     const miss = rejected?.constraints.find((x) => x.status === 'fail');
     issues.push(
@@ -1386,7 +1685,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
     }
     result.paths[path] = legs;
   }
-  result.bridge = { ...result.paths.fail.hl, external: c.externalReceived };
+  result.bridge = result.paths.fail.hl;
   result.failVsPrincipal = out(dec(c.failureCash).minus(protection));
   result.passVsPrincipal = out(dec(c.pressureCashAfter).minus(protection));
   result.adjust = {};
@@ -1422,7 +1721,7 @@ function computeCurrent(r, a, data, fxData, now, options) {
       result.adjust = {};
     }
   }
-  result.forward = out(dec(c.pressureCashAfter).minus(p.C_hl).minus(external));
+  result.forward = out(dec(c.pressureCashAfter).minus(p.C_hl));
   result.round =
     c.roundGain ??
     (p.C_ref === null

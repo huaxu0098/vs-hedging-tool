@@ -60,6 +60,7 @@ export function analyzeRatios(result, rules) {
     : [];
   return {
     recoveryBuffer: rules.recoveryBuffer || '0',
+    successBuffer: rules.successBuffer || '0',
     riskPreference: rules.riskPreference || '0',
     theory: {
       lower: f.lower,
@@ -91,7 +92,6 @@ export function ratioChanges(previous, next) {
   for (const [field, label] of Object.entries({
     B: '保护本金',
     C_H: 'Hype 权益',
-    C_E: '外部到账资金',
     E: 'PF 权益',
     F: '失败线',
     T: '成功线',
@@ -119,9 +119,10 @@ export function ratioChanges(previous, next) {
     changes.push('参考汇率');
   if (changed(older.ctx.book.positions, newer.ctx.book.positions)) changes.push('已有仓位');
   if (older.analysis.riskPreference !== newer.analysis.riskPreference) changes.push('风险偏好');
+  if (older.analysis.successBuffer !== newer.analysis.successBuffer) changes.push('额外留存缓冲');
   if (older.analysis.recoveryBuffer !== newer.analysis.recoveryBuffer) changes.push('额外回收缓冲');
   if (
-    ['stress', 'adverseBps', 'minPriceBuffer', 'minMaintenanceSurplus'].some((k) =>
+    ['stress', 'hardDepthD', 'adverseBps', 'minPriceBuffer', 'minMaintenanceSurplus'].some((k) =>
       changed(older.ctx.checks[k], newer.ctx.checks[k])
     )
   )

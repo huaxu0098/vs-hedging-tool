@@ -1,4 +1,6 @@
-import { dec, out, fillEvidence, profitSplit } from './math.js';
+import {examEnvelope,examMove} from './reachability.js';
+import {venuePath} from './venue-scenarios.js';
+import { dec, out, fillEvidence, canClaimOnSuccess, projectedShare } from './math.js';
 import { settlementBridge, sumPostings } from './settlement-ledger.js';
 import { executionDetail, validateMargin } from './solver.js';
 
@@ -20,6 +22,15 @@ export function exitBook(leg, target, removedLevels) {
     if (shortfall) for (let k=start;k<i;k++) remaining=remaining.minus(levels[k][1]);
   }
   return {...leg,[side]:levels.slice(i)};
+}
+
+export function exitDepthLabel(test) {
+  const fills=[test?.depth?.pf,test?.depth?.hl];
+  if (fills.some(fill=>!fill || fill.status==='unknown' || fill.covered==null || fill.uncovered==null)) return '可成交深度未验证';
+  if (fills.every(fill=>dec(fill.uncovered).isZero()))
+    return test.status==='pass'?'可全量成交且满足资金门槛':'可全量成交，资金或路径未通过核验';
+  return fills.some(fill=>dec(fill.covered).gt(0))
+    ? '部分可成交，剩余数量无法估值' : '无可成交数量，完全无法全量退出';
 }
 
 function reprice(leg, book, entry, shift, extraDebit) {
@@ -105,9 +116,33 @@ export function exitLiquidity(ctx,row,end,removedLevels=1,shock={}) {
     report.reason='撤档后 PF 边界已越过起始价';
     return report;
   }
-  const offset=dec(shock.offset ?? '0');
+  const unit=dec(market.pf.multiplier).times(market.pf.fx);
+  const slope=dec(row.pf).minus(trigger==='mark_equity'?'0':dec(row.pf).abs().times(market.pf.rate)).times(unit);
+  const line=end==='fail'?(ctx.book.stage==='funded'?ctx.book.fundedFloor:ctx.book.challengeFloor):(ctx.book.stage==='challenge'?ctx.book.challengeTarget:ctx.params.target);
+  const markedStart=dec(pf.start).plus(pf.entryFill).minus(pf.entryFee);
+  const nativeFill=fills.pf.vwap;
+  const intercept=trigger==='mark_equity'?markedStart:markedStart.plus(dec(row.pf).times(unit).times(dec(nativeFill).minus(market.pf.mark)))
+    .minus(dec(row.pf).abs().times(unit).times(nativeFill).times(market.pf.rate)).minus(pf.friction);
+  report.derivation={line,trigger:trigger??'net_settlement',slope:out(slope),intercept:out(intercept)};
+  report.mathMarks={start:market.pf.mark,trigger:out(dec(market.pf.mark).plus(pfShift.times(market.pf.factor)))};
+  const independent=shock.venue ? venuePath(shock.venue,market,out(dec(market.pf.mark).plus(pfShift.times(market.pf.factor))),
+    ctx.checks.basisRate,shock.bps,row.hl) : null;
+  if (independent?.error) {report.reason=independent.error;return report;}
+  report.venue=independent;
+  if(ctx.checks.exam) {
+    const delayed=shock.venue==='vestFirst' || shock.venue==='hypeFirst';
+    const envelope=delayed && Number(ctx.checks.exitDelaySeconds)>0?
+      examEnvelope(ctx.params.horizon,ctx.params.deadline,ctx.checks.now,ctx.checks.exitDelaySeconds):ctx.checks.exam;
+    report.exam=examMove(envelope,market.pf.mark,independent?.pfEnd??report.mathMarks.trigger);
+    if(report.exam.status==='fail' || report.exam.status==='unknown' && !ctx.checks.exam.deriveMoves) {
+      report.pathStatus=report.status=report.exam.status;
+      report.reason=report.exam.status==='fail'?'所需价格变化超出考核窗口上限':'未填写该方向的考核波动情景';
+      return report;
+    }
+  }
+  const offset=independent ? dec(independent.hlEnd).minus(market.hl.mark).minus(pfShift.times(market.hl.factor)) : dec(shock.offset ?? '0');
   const hlShift=pfShift.plus(offset.div(market.hl.factor));
-  const shifts={pf:out(pfShift),hl:out(hlShift)};
+  const shifts={pf:independent?out(dec(independent.pfEnd).minus(market.pf.mark).div(market.pf.factor)):out(pfShift),hl:out(hlShift)};
   for (const side of sides) {
     const leg=market[side], displacement=out(dec(shifts[side]).times(leg.factor));
     recordCoverage(side,displacement,true);
@@ -145,8 +180,8 @@ export function exitLiquidity(ctx,row,end,removedLevels=1,shock={}) {
     return report;
   }
   const model={...market,hl:{...market.hl,leverage:String(row.lev ?? market.hl.leverage)}};
-  const interim=out(offset.div(market.hl.factor));
-  if (dec(model.hl.mark).plus(offset).lte(0)) {
+  const interim=out((independent?dec(independent.hlInterim).minus(model.hl.mark):offset).div(market.hl.factor));
+  if (dec(model.hl.mark).plus(dec(interim).times(market.hl.factor)).lte(0)) {
     report.status='fail'; report.pathStatus='fail'; report.reason='不利错位导致中间标记价越界';
     return report;
   }
@@ -155,7 +190,8 @@ export function exitLiquidity(ctx,row,end,removedLevels=1,shock={}) {
   const pathMarks=['0',interim,shifts.hl];
   if (shock.arrivalMark!=null) pathMarks.unshift(out(dec(shock.arrivalMark).minus(market.hl.mark).div(market.hl.factor)));
   const walk=validateMargin(ctx.book,model,'hl',row.hl,pathMarks,ctx.checks.catalog,debit,{openFree:row.free}).at(-1);
-  const pfWalk=validateMargin(ctx.book,model,'pf',row.pf,['0',shifts.pf],ctx.checks.catalog,'0',{}).at(-1);
+  const pfPath=independent?['0',out(dec(independent.pfInterim).minus(market.pf.mark).div(market.pf.factor)),shifts.pf]:['0',shifts.pf];
+  const pfWalk=validateMargin(ctx.book,model,'pf',row.pf,pfPath,ctx.checks.catalog,'0',{}).at(-1);
   report.path=walk;
   report.pfPath=pfWalk;
   if (walk.status!=='pass' || pfWalk.status!=='pass' ||
@@ -164,6 +200,9 @@ export function exitLiquidity(ctx,row,end,removedLevels=1,shock={}) {
     report.pathStatus=report.status;
     report.reason='退出前的保证金或路径未通过核验';
     return report;
+  }
+  if(ctx.checks.examEquityFloor!=null && pfWalk.checkpoints.some(point=>dec(point.equity).lte(ctx.checks.examEquityFloor))) {
+    report.pathStatus=report.status='fail';report.reason='途中触及额外考核最低标记权益线';return report;
   }
   report.pathStatus='pass';
   const cushion=dec(ctx.checks.minMaintenanceSurplus ?? '0');
@@ -186,12 +225,12 @@ export function exitLiquidity(ctx,row,end,removedLevels=1,shock={}) {
     dec(personal).gte(dec(ctx.book.B).plus(ctx.params.recoveryBuffer ?? '0'));
   fees.pf=pfEnd.exitFee; fees.hl=hlEnd.exitFee;
   const b=ctx.book, params=ctx.params;
-  const payoutIfCredited=end==='pass' && b.stage==='funded' ? profitSplit(pfEnd.settled,b.baseline,b.share).user : '0';
+  const payoutIfCredited=end==='pass' && canClaimOnSuccess(b) ? projectedShare(pfEnd.settled,b,params.target,trigger) : '0';
   const roundOK=end!=='pass' || b.stage!=='funded' || b.ref==null ||
     dec(personal).plus(payoutIfCredited).minus(b.ref).minus(b.roundIn).plus(b.roundOut).gte(params.g ?? '0');
   report.status=covered && roundOK && !report.riskIssue ? 'pass' : 'fail';
   report.reason=report.riskIssue ?? (!roundOK?'出金后周期收益不足':covered ? null : '退出后未达该路径资金门槛');
-  report.settlement={pfMark:pfEnd.exitMark,pfPrice:pfEnd.exitPrice,pfEquity:pfEnd.settled,
+  report.settlement={pfFees:sumPostings([pfEnd.entryFee,pfEnd.exitFee]),hlFees:sumPostings([hlEnd.entryFee,hlEnd.exitFee]),pfMark:pfEnd.exitMark,pfPrice:pfEnd.exitPrice,pfEquity:pfEnd.settled,
     hlMark:hlEnd.exitMark,hlPrice:hlEnd.exitPrice,hype:hlEnd.settled,personal,payoutIfCredited};
   return report;
 }

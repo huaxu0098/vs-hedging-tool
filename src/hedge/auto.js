@@ -1,7 +1,7 @@
 // Legal lots are divided at every entry/exit depth breakpoint. Between breakpoints
 // settlement at today's mark is affine in lots; the boundary shift is A/lots + B.
 // Those bounds let us exclude whole rectangles without assuming a hedge ratio.
-import { D, dec, positive, nonnegative, out, min, max, profitSplit, fundingInterval } from './math.js';
+import { D, dec, positive, nonnegative, out, min, max, profitSplit, canClaimOnSuccess, fundingInterval } from './math.js';
 import { evaluateLeverageGrid } from './leverage.js';
 import { executionDetail, projectSettlementEquity, profileInputs, fundingProof } from './solver.js';
 
@@ -358,7 +358,7 @@ function rankCandidates(book, m, params, options) {
     complete = true,
     unknown = false;
   const budget = options.searchBudget ?? 3500,
-    payout = p.stage === 'funded' ? profitSplit(p.target, p.baseline, p.share).user : '0';
+    payout = canClaimOnSuccess(p) ? profitSplit(p.target, p.baseline, p.share, p.withdrawal).user : '0';
   const cashFloor = params.cashFloor == null ? null : dec(params.cashFloor);
   const failNeed = max(p.B, cashFloor ?? p.B)
     .plus(p.k)

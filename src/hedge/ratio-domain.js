@@ -65,7 +65,7 @@ function entryChecks(ctx, venue, sign, i, lev) {
       checks.push(cap, cap.plus(v.marked.minus(ctx.book.hl).times(lev)),
         v.marked.minus(hold).minus(free).times(lev).minus(v.notional));
     } else if (!reducing) checks.push(cap,cap.plus(v.marked.minus(ctx.book.hl).times(lev)));
-    if (l.capacity && (lev <= Number(l.configuredLeverage) || v.q.isZero()))
+    if (l.capacity)
       checks.push(dec(l.capacity[side]).minus(v.delta.abs()));
     if (!v.q.isZero() && !order.isZero() && String(lev) !== l.configuredLeverage) checks.push(dec('-1'));
     if (!v.q.isZero() && !old.isZero() && String(lev) !== l.configuredLeverage) {

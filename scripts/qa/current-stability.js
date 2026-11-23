@@ -28,7 +28,7 @@ const install = `(() => {
             multiplier:s.ctx.market[k].multiplier,fx:s.ctx.market[k].fx}])),
           pfMark:s.ctx.market.pf.mark,hlMark:s.ctx.market.hl.mark, count:s.sets.legal.count,
           revaluation:r.revaluation, sequence:data.version, protect:s.ctx.book.B, reserve:s.ctx.params.R,
-          plans:[s.plans.targetKeys[0],null,...s.plans.targetKeys.slice(1)].map((k,i)=>i===1?s.plans.pressure.row??null:s.plans.rows.find(row=>row.key===k)),
+          plans:[s.plans.targetKeys[0],null,...s.plans.targetKeys.slice(1),null].map((k,i)=>i===4?s.plans.cashPriority.row??null:i===1?s.plans.pressure.row??null:s.plans.rows.find(row=>row.key===k)),
           fixed:s.plans.fixed, comparison:s.plans.comparison, comparisonRows:s.plans.rows.filter(row=>row.labels.includes('同 h 规模对照')),
           joint:{count:s.sets.both.count,min:s.sets.both.min,max:s.sets.both.max,minCount:s.sets.both.minCount,maxCount:s.sets.both.maxCount,
             counts:s.buckets.map(bin=>[bin.edgeKey,bin.both])}, rep:rep && {pf:rep.pfValue, hl:rep.hypeValue, fail:rep.fail, success:rep.success},
@@ -151,7 +151,7 @@ try {
   for (const f of frames) {
     assert.ok(f.status.includes('最近成功计算'));
     assert.equal(f.rows.length, f.bins.length);
-    const featured=f.plans[1]?.pressureSummary;
+    const featured=f.plans[4]?.pressureSummary;
     assert.deepEqual(f.cash, [cash(featured?.minFailure.value ?? f.plans[0].fail), cash(featured?.minSuccess.value ?? f.plans[0].success)]);
     assert.equal(f.shown.length, f.plans.length);
     if(f.status.includes('当前数据有效')) assert.deepEqual(f.bookTimes,f.clocks);
@@ -288,13 +288,13 @@ try {
       const at = selector => Math.ceil(document.querySelector(selector).getBoundingClientRect().bottom);
       return {width:innerWidth, height:innerHeight, contentWidth:document.documentElement.scrollWidth,
         quotes:at('.book-table'), cash:at('#scan-cash'), ranges:at('.scan-sets'),
-        secondBand:at('#plan-rows tr:nth-child(2)'), table:at('#scan-results')};
+        secondBand:at('#home-cash'), table:at('#scan-results')};
     })()`);
     assert.ok(layout.contentWidth <= width && layout.secondBand <= height, JSON.stringify(layout));
     if (width>=1000) assert.ok(layout.table <= height, JSON.stringify(layout));
     evidence.viewports.push(layout);
   }
-  assert.ok(await run("!document.getElementById('positions-view').open && !document.querySelector('#desk-details').open && document.getElementById('plan-columns').rows[0].cells.length===5 && !document.body.innerText.includes('全部目标仓位')"));
+  assert.ok(await run("document.getElementById('positions-view').open && !document.getElementById('position-breakdown').open && !document.querySelector('#desk-details').open && document.getElementById('plan-columns').rows[0].cells.length===6 && !document.getElementById('comparison-detail').open && document.getElementById('home-cash').checkVisibility() && !document.body.innerText.includes('全部目标仓位')"));
   for (const f of frames) {
     assert.deepEqual(Object.values(f.panels.version),[f.id,...f.traceVersions]);
     assert.deepEqual(f.panels.positions,f.panels.live);
@@ -318,8 +318,9 @@ try {
   })()`,15000);
   evidence.advancedFocusVerified=true;
   await b.click('[aria-controls="live-view"]');
+  await b.run("document.getElementById('comparison-detail').open=true");
   await b.click('#scale-link');
-  assert.ok(await run("document.getElementById('positions-view').open && !document.getElementById('desk-details').open && !document.getElementById('live-view').open"));
+  assert.ok(await run("document.getElementById('positions-view').open && document.getElementById('position-breakdown').open"));
   const comparison = await run(`(() => {
     const e=id=>document.getElementById(id), id=e('scan-desk').dataset.resultId;
     const result=window.scanTest.results[id], read=id=>[...e(id).rows].map(tr=>[...tr.cells].map(td=>td.textContent));
@@ -442,7 +443,7 @@ try {
   const cached=await run('window.scanTest.readPanels()');
   assert.deepEqual(cached.ids,Array(8).fill(cached.version.snapshotId));
   assert.deepEqual(cached.live,cached.positions);
-  assert.equal(cached.live.length,3+Number(!!saved.ratioScan.plans.pressure.row));
+  assert.equal(cached.live.length,3+Number(!!saved.ratioScan.plans.pressure.row)+Number(!!saved.ratioScan.plans.cashPriority.row));
   assert.equal(cached.empty,'');
   assert.ok(await run("document.getElementById('current').dataset.historical==='true' && document.getElementById('position-list').checkVisibility()"));
   assert.equal(cached.version.rulesVersion,saved.rulesVersion);

@@ -33,6 +33,8 @@
     "node": ">=22"
   },
   "dependencies": {
-    "decimal.js": "10.6.0"
+    "@nktkas/hyperliquid": "^0.33.3",
+    "decimal.js": "10.6.0",
+    "viem": "^2.58.4"
   }
 }

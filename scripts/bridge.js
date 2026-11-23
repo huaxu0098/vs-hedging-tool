@@ -47,8 +47,9 @@ function infoBody(body) {
     return exact(r, new Set(['type','user','startTime'])) && /^0x[\da-fA-F]{40}$/.test(r.user) &&
       Number.isSafeInteger(r.startTime) && r.startTime > 0 && r.startTime <= Date.now();
   const wallet = typeof r.user === 'string' && /^0x[\da-fA-F]{40}$/.test(r.user);
-  if (['userAbstraction', 'userFees', 'userFills', 'spotClearinghouseState'].includes(r.type))
+  if (['userAbstraction', 'userFees', 'userFills', 'spotClearinghouseState', 'extraAgents', 'subAccounts', 'userRole'].includes(r.type))
     return wallet && exact(r, new Set(['type', 'user']));
+  if (['spotMeta', 'meta', 'allMids'].includes(r.type)) return exact(r, new Set(['type']));
   if (r.type === 'userFunding')
     return (
       wallet &&
@@ -64,7 +65,6 @@ function infoBody(body) {
       /^[\w.:-]{1,80}$/.test(r.coin) &&
       exact(r, new Set(['type', 'user', 'coin']))
     );
-  if (r.type === 'spotMeta') return exact(r, new Set(['type']));
   if (r.type === 'l2Book')
     return (
       exact(r, new Set(['type', 'coin'])) && typeof r.coin === 'string' && /^[\w.:-]{1,80}$/.test(r.coin)
